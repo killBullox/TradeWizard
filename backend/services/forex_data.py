@@ -81,6 +81,9 @@ async def fetch_ohlcv(symbol: str, timeframe: str = "H1", limit: int = 200) -> d
         if timeframe == "H4":
             df = _resample_to_h4(df)
 
+        # Normalize column names (yfinance 1.x uses lowercase)
+        df.columns = [c.capitalize() for c in df.columns]
+
         df = df.tail(limit)
         candles = []
         for ts, row in df.iterrows():
@@ -97,6 +100,8 @@ async def fetch_ohlcv(symbol: str, timeframe: str = "H1", limit: int = 200) -> d
         return {"symbol": symbol, "timeframe": timeframe, "candles": candles, "indicators": indicators}
 
     except Exception as e:
+        import logging
+        logging.getLogger("forex_data").warning("yfinance fetch failed (%s), using mock data: %s", symbol, e)
         return _generate_mock_data(symbol, timeframe, limit)
 
 
@@ -104,8 +109,14 @@ def _download(ticker: str, interval: str, period: str) -> Optional[pd.DataFrame]
     try:
         t = yf.Ticker(ticker)
         df = t.history(period=period, interval=interval)
-        return df if not df.empty else None
-    except Exception:
+        if df is None or df.empty:
+            return None
+        # Normalize to capitalized column names for both old and new yfinance
+        df.columns = [c.capitalize() for c in df.columns]
+        return df
+    except Exception as e:
+        import logging
+        logging.getLogger("forex_data").warning("_download error: %s", e)
         return None
 
 
