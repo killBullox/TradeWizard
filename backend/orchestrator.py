@@ -67,6 +67,8 @@ class Orchestrator:
     #  Main Analysis Loop  (runs every analysis_interval seconds)
     # ------------------------------------------------------------------ #
     async def _analysis_loop(self):
+        # Brief startup delay so the WS clients can connect first
+        await asyncio.sleep(10)
         while self._running:
             try:
                 await self._run_analysis_cycle()

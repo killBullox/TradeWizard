@@ -32,7 +32,7 @@ class ConnectorAgent(BaseAgent):
         return hmac.new(
             self.mt5_secret.encode(),
             payload.encode(),
-            hashlib.sha256,
+            "sha256",
         ).hexdigest()
 
     async def open_trade(self, trade: dict) -> dict:
