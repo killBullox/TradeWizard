@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TradeWizard — Multi-Agent ICT Forex</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-left">
+      <div class="logo">⚡ TradeWizard</div>
+      <div class="subtitle">Multi-Agent ICT Forex System</div>
+    </div>
+    <div class="header-center">
+      <div class="status-indicator" id="ws-status">
+        <span class="dot disconnected"></span>
+        <span id="ws-label">Connecting...</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <button class="btn btn-primary" id="btn-analyze-all">🔍 Analyze All</button>
+      <button class="btn btn-secondary" id="btn-meeting">📋 Run Meeting</button>
+      <button class="btn btn-ghost" id="btn-settings">⚙️ Settings</button>
+    </div>
+  </header>
+
+  <!-- Main Layout -->
+  <div class="app-layout">
+
+    <!-- Left Panel: Agents -->
+    <aside class="panel agents-panel">
+      <h2 class="panel-title">🤖 Agents</h2>
+      <div id="agents-list">
+        <div class="agent-card" id="agent-ICTEA" data-agent="ICTEA">
+          <div class="agent-header">
+            <span class="agent-emoji">🎯</span>
+            <div class="agent-info">
+              <div class="agent-name">ICT Advisor</div>
+              <div class="agent-role">ICTEA — Market Analyst</div>
+            </div>
+            <div class="agent-badge idle">IDLE</div>
+          </div>
+          <div class="agent-message" id="msg-ICTEA">Waiting for market data...</div>
+        </div>
+
+        <div class="agent-card" id="agent-RM" data-agent="RM">
+          <div class="agent-header">
+            <span class="agent-emoji">⚖️</span>
+            <div class="agent-info">
+              <div class="agent-name">Risk Manager</div>
+              <div class="agent-role">RM — Risk Controller</div>
+            </div>
+            <div class="agent-badge idle">IDLE</div>
+          </div>
+          <div class="agent-message" id="msg-RM">Awaiting ICTEA proposals...</div>
+        </div>
+
+        <div class="agent-card" id="agent-TR" data-agent="TR">
+          <div class="agent-header">
+            <span class="agent-emoji">💹</span>
+            <div class="agent-info">
+              <div class="agent-name">Trader</div>
+              <div class="agent-role">TR — Execution Specialist</div>
+            </div>
+            <div class="agent-badge idle">IDLE</div>
+          </div>
+          <div class="agent-message" id="msg-TR">Awaiting RM approval...</div>
+        </div>
+
+        <div class="agent-card" id="agent-AT" data-agent="AT">
+          <div class="agent-header">
+            <span class="agent-emoji">🔬</span>
+            <div class="agent-info">
+              <div class="agent-name">Trade Analyst</div>
+              <div class="agent-role">AT — Validator &amp; Monitor</div>
+            </div>
+            <div class="agent-badge idle">IDLE</div>
+          </div>
+          <div class="agent-message" id="msg-AT">Monitoring trades...</div>
+        </div>
+
+        <div class="agent-card" id="agent-CC" data-agent="CC">
+          <div class="agent-header">
+            <span class="agent-emoji">🔌</span>
+            <div class="agent-info">
+              <div class="agent-name">Connector</div>
+              <div class="agent-role">CC — MT5 Interface</div>
+            </div>
+            <div class="agent-badge idle">IDLE</div>
+          </div>
+          <div class="agent-message" id="msg-CC">Ready to connect MT5...</div>
+        </div>
+
+        <div class="agent-card" id="agent-JR" data-agent="JR">
+          <div class="agent-header">
+            <span class="agent-emoji">📝</span>
+            <div class="agent-info">
+              <div class="agent-name">Journalist</div>
+              <div class="agent-role">JR — Journal &amp; Review</div>
+            </div>
+            <div class="agent-badge idle">IDLE</div>
+          </div>
+          <div class="agent-message" id="msg-JR">Ready to journal...</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Center: Main Content -->
+    <main class="main-content">
+      <!-- Tabs -->
+      <div class="tabs">
+        <button class="tab active" data-tab="dashboard">📊 Dashboard</button>
+        <button class="tab" data-tab="trades">📈 Trades</button>
+        <button class="tab" data-tab="journal">📋 Journal</button>
+        <button class="tab" data-tab="meetings">🗣️ Meetings</button>
+        <button class="tab" data-tab="performance">📉 Performance</button>
+        <button class="tab" data-tab="settings">⚙️ Settings</button>
+      </div>
+
+      <!-- Dashboard Tab -->
+      <div class="tab-content active" id="tab-dashboard">
+        <div class="stats-row">
+          <div class="stat-card">
+            <div class="stat-value" id="stat-open">0</div>
+            <div class="stat-label">Open Trades</div>
+          </div>
+          <div class="stat-card win">
+            <div class="stat-value" id="stat-winrate">0%</div>
+            <div class="stat-label">Win Rate</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-total">0</div>
+            <div class="stat-label">Total Trades</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-pnl">$0.00</div>
+            <div class="stat-label">Total P&L</div>
+          </div>
+        </div>
+
+        <div class="dashboard-grid">
+          <!-- Activity Feed -->
+          <div class="card">
+            <div class="card-header">
+              <h3>⚡ Live Activity</h3>
+              <button class="btn btn-ghost btn-sm" id="btn-clear-feed">Clear</button>
+            </div>
+            <div class="activity-feed" id="activity-feed">
+              <div class="activity-item info">System starting up...</div>
+            </div>
+          </div>
+
+          <!-- Open Trades -->
+          <div class="card">
+            <div class="card-header">
+              <h3>📈 Open Trades</h3>
+              <div id="open-trades-count" class="badge">0</div>
+            </div>
+            <div id="open-trades-list">
+              <div class="empty-state">No open trades</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pair Analysis Quick Actions -->
+        <div class="card">
+          <div class="card-header">
+            <h3>🔍 Quick Analysis</h3>
+          </div>
+          <div class="pairs-grid" id="pairs-grid">
+            <!-- populated by JS -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Trades Tab -->
+      <div class="tab-content" id="tab-trades">
+        <div class="card">
+          <div class="card-header">
+            <h3>All Trades</h3>
+            <div class="filter-row">
+              <select id="trades-filter" class="select">
+                <option value="">All</option>
+                <option value="ACTIVE">Active</option>
+                <option value="CLOSED">Closed</option>
+                <option value="CANCELLED">Cancelled</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrapper">
+            <table class="table" id="trades-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Symbol</th><th>Dir</th><th>Setup</th>
+                  <th>Entry</th><th>SL</th><th>TP1</th><th>Lots</th>
+                  <th>Status</th><th>P&L</th><th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="trades-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Journal Tab -->
+      <div class="tab-content" id="tab-journal">
+        <div class="card">
+          <div class="card-header"><h3>📋 Trade Journal</h3></div>
+          <div id="journal-entries" class="journal-list"></div>
+        </div>
+      </div>
+
+      <!-- Meetings Tab -->
+      <div class="tab-content" id="tab-meetings">
+        <div class="card">
+          <div class="card-header">
+            <h3>🗣️ Agent Meetings</h3>
+            <div class="btn-group">
+              <button class="btn btn-primary btn-sm" onclick="triggerMeeting('POST_TRADE')">Post-Trade</button>
+              <button class="btn btn-secondary btn-sm" onclick="triggerMeeting('WEEKLY_REVIEW')">Weekly Review</button>
+            </div>
+          </div>
+          <div id="meetings-list" class="meetings-list"></div>
+        </div>
+      </div>
+
+      <!-- Performance Tab -->
+      <div class="tab-content" id="tab-performance">
+        <div class="stats-row" id="perf-stats"></div>
+        <div class="card">
+          <div class="card-header"><h3>📊 Performance by Setup</h3></div>
+          <div class="table-wrapper">
+            <table class="table" id="perf-table">
+              <thead>
+                <tr><th>Setup</th><th>Total</th><th>Wins</th><th>Losses</th><th>Win%</th><th>Total Pips</th></tr>
+              </thead>
+              <tbody id="perf-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings Tab -->
+      <div class="tab-content" id="tab-settings">
+        <div class="card">
+          <div class="card-header"><h3>⚙️ System Configuration</h3></div>
+          <div id="config-form" class="config-form"></div>
+          <button class="btn btn-primary" id="btn-save-config">💾 Save All</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right Panel: Agent Communication Log -->
+    <aside class="panel comms-panel">
+      <h2 class="panel-title">💬 Agent Comms</h2>
+      <div class="comms-feed" id="comms-feed">
+        <div class="comm-item">
+          <span class="comm-agent">SYS</span>
+          <span class="comm-msg">Initializing agents...</span>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Trade Detail Modal -->
+  <div class="modal" id="trade-modal" style="display:none">
+    <div class="modal-backdrop" onclick="closeModal()"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-title">Trade Details</h3>
+        <button class="btn btn-ghost" onclick="closeModal()">✕</button>
+      </div>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal" id="settings-modal" style="display:none">
+    <div class="modal-backdrop" onclick="closeSettingsModal()"></div>
+    <div class="modal-content modal-wide">
+      <div class="modal-header">
+        <h3>⚙️ Quick Settings</h3>
+        <button class="btn btn-ghost" onclick="closeSettingsModal()">✕</button>
+      </div>
+      <div id="settings-body" class="config-form"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
