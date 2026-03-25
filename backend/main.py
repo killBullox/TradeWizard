@@ -3,8 +3,12 @@ TradeWizard — Multi-Agent ICT Forex Trading System
 FastAPI backend with WebSocket for real-time agent communication.
 """
 
-import json
+import sys
 import os
+# Ensure the backend directory is on sys.path regardless of where uvicorn is launched from
+sys.path.insert(0, os.path.dirname(__file__))
+
+import json
 import logging
 import asyncio
 from datetime import datetime
