@@ -150,8 +150,8 @@ def _compute_indicators(df: pd.DataFrame, symbol: str) -> dict:
         pdh = pdl = pdc = float(close.iloc[-1])
 
     # Simple trend direction (EMA 20 vs 50)
-    ema20 = close.ewm(span=20, adjust=False).iloc[-1]
-    ema50 = close.ewm(span=50, adjust=False).iloc[-1]
+    ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
     trend = "bullish" if ema20 > ema50 else "bearish"
 
     # Current price
