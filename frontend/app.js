@@ -546,6 +546,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'charts')      window.activateChartsTab?.();
     if (tab.dataset.tab === 'backtest')    refreshBtHistory();
     if (tab.dataset.tab === 'paper')       refreshPaper();
+    if (tab.dataset.tab === 'analytics')  refreshAnalytics();
   });
 });
 
@@ -682,6 +683,202 @@ document.getElementById('btn-refresh-news')?.addEventListener('click', refreshNe
 document.getElementById('btn-refresh-news-tab')?.addEventListener('click', refreshNews);
 document.getElementById('btn-save-news-config')?.addEventListener('click', saveNewsConfig);
 document.getElementById('news-hours-filter')?.addEventListener('change', refreshNews);
+
+// ── Analytics ─────────────────────────────────────────────────────────
+let anEquityChart = null;
+let anDdChart     = null;
+
+async function refreshAnalytics() {
+  try {
+    const data = await fetchJSON('/api/analytics');
+    renderAnalyticsSummary(data.summary);
+    renderAnEquity(data.equity_curve);
+    renderAnDrawdown(data.drawdown_series);
+    renderAnHeatmap(data.by_month);
+    renderAnBarChart('an-by-symbol', data.by_symbol,  'name',  'win_rate', 'total_pnl');
+    renderAnBarChart('an-by-setup',  data.by_setup,   'name',  'win_rate', 'total_pnl');
+    renderAnBarChart('an-by-dow',    data.by_dow,     'day',   'win_rate', 'total_pips');
+    renderAnHourChart('an-by-hour',  data.by_hour);
+  } catch (e) { console.error('refreshAnalytics', e); }
+}
+
+function renderAnalyticsSummary(s) {
+  if (!s) return;
+  const fmt  = (v, d=2) => v != null ? Number(v).toFixed(d) : '—';
+  const pct  = v => v != null ? fmt(v,1) + '%' : '—';
+  const pnl  = v => v != null ? (v >= 0 ? '+' : '') + '$' + fmt(v) : '—';
+
+  setEl('an-total',   s.total_trades ?? '—');
+  const wrEl = document.getElementById('an-winrate');
+  if (wrEl) {
+    wrEl.textContent = pct(s.win_rate);
+    wrEl.className   = `stat-value ${(s.win_rate||0) >= 55 ? 'text-win' : (s.win_rate||0) >= 45 ? '' : 'text-loss'}`;
+  }
+  setEl('an-pf',      s.profit_factor === 999 ? '∞' : fmt(s.profit_factor));
+  setEl('an-sharpe',  fmt(s.sharpe));
+  setEl('an-sortino', fmt(s.sortino));
+  const ddEl = document.getElementById('an-maxdd');
+  if (ddEl) { ddEl.textContent = fmt(s.max_drawdown_pct, 1) + '%'; ddEl.className = 'stat-value text-loss'; }
+  const expEl = document.getElementById('an-exp');
+  if (expEl) { expEl.textContent = pnl(s.expectancy); expEl.className = `stat-value ${(s.expectancy||0) >= 0 ? 'text-win' : 'text-loss'}`; }
+
+  const streak = s.current_streak || {};
+  const strEl  = document.getElementById('an-streak');
+  if (strEl) {
+    if (streak.type) {
+      strEl.textContent = `${streak.count} ${streak.type}`;
+      strEl.className   = `stat-value ${streak.type === 'WIN' ? 'text-win' : 'text-loss'}`;
+    } else {
+      strEl.textContent = '—';
+      strEl.className   = 'stat-value';
+    }
+  }
+}
+
+function renderAnEquity(equityCurve) {
+  const container = document.getElementById('an-equity-canvas');
+  if (!container || !equityCurve?.length || typeof LightweightCharts === 'undefined') return;
+  if (anEquityChart) { anEquityChart.remove(); anEquityChart = null; }
+
+  anEquityChart = LightweightCharts.createChart(container, _chartOpts(container.clientWidth, 220));
+  const series = anEquityChart.addAreaSeries({
+    lineColor: '#3b82f6', topColor: 'rgba(59,130,246,0.2)',
+    bottomColor: 'rgba(59,130,246,0.02)', lineWidth: 2, priceLineVisible: false,
+  });
+  series.setData(equityCurve.map(e => ({ time: _tsToUnix(e.time), value: e.equity })).filter(d => d.time > 0));
+  anEquityChart.timeScale().fitContent();
+}
+
+function renderAnDrawdown(ddSeries) {
+  const container = document.getElementById('an-dd-canvas');
+  if (!container || !ddSeries?.length || typeof LightweightCharts === 'undefined') return;
+  if (anDdChart) { anDdChart.remove(); anDdChart = null; }
+
+  anDdChart = LightweightCharts.createChart(container, _chartOpts(container.clientWidth, 220));
+  const series = anDdChart.addAreaSeries({
+    lineColor: '#ef4444', topColor: 'rgba(239,68,68,0.15)',
+    bottomColor: 'rgba(239,68,68,0.02)', lineWidth: 2,
+    priceLineVisible: false, invertFilledArea: false,
+  });
+  series.setData(ddSeries.map(e => ({ time: _tsToUnix(e.time), value: e.drawdown_pct })).filter(d => d.time > 0));
+  anDdChart.timeScale().fitContent();
+}
+
+function renderAnHeatmap(byMonth) {
+  const container = document.getElementById('an-heatmap');
+  if (!container) return;
+  if (!byMonth?.length) {
+    container.innerHTML = '<div class="empty-state">No trade history yet</div>';
+    return;
+  }
+
+  // Group by year
+  const years = {};
+  for (const m of byMonth) {
+    if (!years[m.year]) years[m.year] = {};
+    years[m.year][m.month] = m;
+  }
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const maxAbs  = Math.max(...byMonth.map(m => Math.abs(m.total_pnl)), 1);
+
+  let html = `<div class="heatmap-table">
+    <div class="heatmap-row heatmap-header">
+      <div class="heatmap-year-label"></div>
+      ${MONTHS.map(m => `<div class="heatmap-month-label">${m}</div>`).join('')}
+    </div>`;
+
+  for (const year of Object.keys(years).sort()) {
+    html += `<div class="heatmap-row">
+      <div class="heatmap-year-label">${year}</div>`;
+    for (let mo = 1; mo <= 12; mo++) {
+      const m = years[year][mo];
+      if (!m) {
+        html += `<div class="heatmap-cell heatmap-empty"></div>`;
+        continue;
+      }
+      const intensity = Math.min(Math.abs(m.total_pnl) / maxAbs, 1);
+      const alpha     = 0.15 + intensity * 0.7;
+      const bg        = m.total_pnl >= 0
+        ? `rgba(16,185,129,${alpha.toFixed(2)})`
+        : `rgba(239,68,68,${alpha.toFixed(2)})`;
+      const sign = m.total_pnl >= 0 ? '+' : '';
+      html += `<div class="heatmap-cell" style="background:${bg}" title="${m.month_name} ${year}: ${sign}$${m.total_pnl.toFixed(0)} (${m.trades} trades)">
+        <span class="heatmap-value">${sign}$${Math.abs(m.total_pnl) >= 1000 ? (m.total_pnl/1000).toFixed(1)+'k' : m.total_pnl.toFixed(0)}</span>
+      </div>`;
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+function renderAnBarChart(containerId, data, nameKey, rateKey, valueKey) {
+  const container = document.getElementById(containerId);
+  if (!container || !data?.length) {
+    if (container) container.innerHTML = '<div class="empty-state">No data</div>';
+    return;
+  }
+  const maxVal = Math.max(...data.map(d => Math.abs(d[valueKey] || 0)), 1);
+  container.innerHTML = data.slice(0, 8).map(d => {
+    const val     = d[valueKey] ?? 0;
+    const wr      = d[rateKey]  ?? 0;
+    const width   = Math.round(Math.abs(val) / maxVal * 100);
+    const isPos   = val >= 0;
+    const barCls  = isPos ? 'an-bar-pos' : 'an-bar-neg';
+    const sign    = isPos ? '+' : '';
+    const valStr  = valueKey === 'win_rate' ? wr.toFixed(1)+'%'
+                  : valueKey === 'total_pips' ? val.toFixed(1)+'p'
+                  : '$'+val.toFixed(0);
+    return `
+      <div class="an-bar-row">
+        <div class="an-bar-label">${escHtml(String(d[nameKey] || '?'))}</div>
+        <div class="an-bar-track">
+          <div class="an-bar ${barCls}" style="width:${width}%"></div>
+        </div>
+        <div class="an-bar-stat">
+          <span class="${isPos ? 'text-win' : 'text-loss'}">${sign}${valStr}</span>
+          <span class="an-bar-wr">${wr.toFixed(1)}%WR</span>
+          <span class="an-bar-cnt">${d.total ?? 0}T</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderAnHourChart(containerId, hours) {
+  const container = document.getElementById(containerId);
+  if (!container || !hours?.length) return;
+  const active  = hours.filter(h => h.total > 0);
+  if (!active.length) { container.innerHTML = '<div class="empty-state">No data</div>'; return; }
+  const maxPips = Math.max(...active.map(h => Math.abs(h.total_pips)), 1);
+  container.innerHTML = hours.map(h => {
+    if (!h.total) return `<div class="an-hour-col an-hour-empty" title="${h.label}"></div>`;
+    const height = Math.round(Math.abs(h.total_pips) / maxPips * 60);
+    const isPos  = h.total_pips >= 0;
+    return `
+      <div class="an-hour-col" title="${h.label}: ${h.total_pips.toFixed(1)}p (${h.win_rate}%WR, ${h.total}T)">
+        <div class="an-hour-bar ${isPos ? 'an-hour-pos' : 'an-hour-neg'}" style="height:${height}px"></div>
+        <div class="an-hour-label">${h.hour}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function _chartOpts(w, h) {
+  return {
+    layout: { background: { color: '#0f1117' }, textColor: '#94a3b8' },
+    grid:   { vertLines: { color: '#1e2130' }, horzLines: { color: '#1e2130' } },
+    rightPriceScale: { borderColor: '#2d3450' },
+    timeScale: { borderColor: '#2d3450', timeVisible: true },
+    width: w || 600, height: h || 220,
+  };
+}
+
+function _tsToUnix(ts) {
+  if (!ts) return 0;
+  try { return Math.floor(new Date(ts).getTime() / 1000); } catch { return 0; }
+}
 
 // ── Paper Trading ─────────────────────────────────────────────────────
 let paperEquityChart  = null;

@@ -118,6 +118,7 @@
         <button class="tab" data-tab="journal">📋 Journal</button>
         <button class="tab" data-tab="meetings">🗣️ Meetings</button>
         <button class="tab" data-tab="performance">📉 Performance</button>
+        <button class="tab" data-tab="analytics">📡 Analytics</button>
         <button class="tab" data-tab="charts">📊 Charts</button>
         <button class="tab" data-tab="backtest">🔬 Backtest</button>
         <button class="tab" data-tab="paper">📄 Paper</button>
@@ -255,6 +256,68 @@
               </thead>
               <tbody id="perf-tbody"></tbody>
             </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Analytics Tab -->
+      <div class="tab-content" id="tab-analytics">
+
+        <!-- Key metrics row -->
+        <div class="stats-row" id="an-stats-row">
+          <div class="stat-card"><div class="stat-value" id="an-total">—</div><div class="stat-label">Total Trades</div></div>
+          <div class="stat-card win"><div class="stat-value" id="an-winrate">—</div><div class="stat-label">Win Rate</div></div>
+          <div class="stat-card"><div class="stat-value" id="an-pf">—</div><div class="stat-label">Profit Factor</div></div>
+          <div class="stat-card"><div class="stat-value" id="an-sharpe">—</div><div class="stat-label">Sharpe</div></div>
+          <div class="stat-card"><div class="stat-value" id="an-sortino">—</div><div class="stat-label">Sortino</div></div>
+          <div class="stat-card"><div class="stat-value" id="an-maxdd">—</div><div class="stat-label">Max DD %</div></div>
+          <div class="stat-card"><div class="stat-value" id="an-exp">—</div><div class="stat-label">Expectancy $</div></div>
+          <div class="stat-card"><div class="stat-value" id="an-streak">—</div><div class="stat-label">Current Streak</div></div>
+        </div>
+
+        <!-- Equity + Drawdown charts -->
+        <div class="an-charts-row">
+          <div class="card an-chart-card">
+            <div class="card-header"><h3>📈 Equity Curve</h3></div>
+            <div id="an-equity-canvas" class="chart-canvas" style="height:220px"></div>
+          </div>
+          <div class="card an-chart-card">
+            <div class="card-header"><h3>📉 Drawdown</h3></div>
+            <div id="an-dd-canvas" class="chart-canvas" style="height:220px"></div>
+          </div>
+        </div>
+
+        <!-- Monthly heatmap -->
+        <div class="card" style="margin-top:12px">
+          <div class="card-header"><h3>🗓️ Monthly Returns</h3></div>
+          <div id="an-heatmap" class="an-heatmap"></div>
+        </div>
+
+        <!-- Breakdowns grid -->
+        <div class="an-breakdown-grid">
+
+          <!-- By Symbol -->
+          <div class="card">
+            <div class="card-header"><h3>💱 By Symbol</h3></div>
+            <div id="an-by-symbol" class="an-bar-chart"></div>
+          </div>
+
+          <!-- By Setup -->
+          <div class="card">
+            <div class="card-header"><h3>🎯 By ICT Setup</h3></div>
+            <div id="an-by-setup" class="an-bar-chart"></div>
+          </div>
+
+          <!-- By Day of Week -->
+          <div class="card">
+            <div class="card-header"><h3>📅 By Day of Week</h3></div>
+            <div id="an-by-dow" class="an-bar-chart"></div>
+          </div>
+
+          <!-- By Session Hour -->
+          <div class="card">
+            <div class="card-header"><h3>⏰ By Hour (UTC)</h3></div>
+            <div id="an-by-hour" class="an-hour-chart"></div>
           </div>
         </div>
       </div>

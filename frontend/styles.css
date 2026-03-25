@@ -542,3 +542,65 @@ body {
 .paper-live-pnl { font-size: 0.85rem; font-weight: 700; margin-left: auto; padding-right: 8px; }
 .paper-pos-win  { border-left: 3px solid #10b981; }
 .paper-pos-loss { border-left: 3px solid #ef4444; }
+
+/* ── Analytics Dashboard ── */
+.an-charts-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+@media (max-width: 900px) { .an-charts-row { grid-template-columns: 1fr; } }
+
+.an-chart-card { display: flex; flex-direction: column; }
+.an-chart-card h3 { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+.an-chart-box  { width: 100%; height: 220px; }
+
+/* Monthly heatmap */
+.an-heatmap { overflow-x: auto; margin-bottom: 16px; }
+.heatmap-table { border-collapse: collapse; min-width: 600px; width: 100%; font-size: 0.78rem; }
+.heatmap-table th {
+  padding: 6px 8px; text-align: center; color: var(--text-muted);
+  font-weight: 600; font-size: 0.72rem; background: var(--bg-secondary);
+}
+.heatmap-table td { padding: 5px 8px; text-align: center; white-space: nowrap; }
+.heatmap-cell {
+  border-radius: 4px; padding: 4px 6px; display: inline-block;
+  min-width: 56px; font-weight: 600;
+}
+.heatmap-cell.positive { color: #10b981; }
+.heatmap-cell.negative { color: #ef4444; }
+.heatmap-cell.zero     { color: var(--text-muted); }
+
+/* Breakdown grid */
+.an-breakdown-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+@media (max-width: 900px) { .an-breakdown-grid { grid-template-columns: 1fr; } }
+
+.an-breakdown-card h3 { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* Horizontal bar chart (symbol / setup / DOW) */
+.an-bar-chart { display: flex; flex-direction: column; gap: 6px; }
+.an-bar-row { display: flex; align-items: center; gap: 8px; font-size: 0.78rem; }
+.an-bar-label { width: 72px; text-align: right; color: var(--text-muted); flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.an-bar-track { flex: 1; height: 18px; background: var(--bg-tertiary); border-radius: 3px; overflow: hidden; }
+.an-bar-fill  { height: 100%; border-radius: 3px; transition: width 0.4s; }
+.an-bar-fill.positive { background: rgba(16,185,129,0.55); }
+.an-bar-fill.negative { background: rgba(239,68,68,0.50); }
+.an-bar-val   { width: 68px; font-size: 0.75rem; color: var(--text-secondary); }
+
+/* Hour chart (vertical bars) */
+.an-hour-chart {
+  display: flex; align-items: flex-end; gap: 2px;
+  height: 90px; padding-bottom: 18px; position: relative;
+  overflow: hidden;
+}
+.an-hour-bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+.an-hour-bar-fill { width: 100%; border-radius: 2px 2px 0 0; transition: height 0.4s; }
+.an-hour-bar-fill.positive { background: rgba(16,185,129,0.6); }
+.an-hour-bar-fill.negative { background: rgba(239,68,68,0.55); }
+.an-hour-bar-label { font-size: 0.55rem; color: var(--text-muted); margin-top: 3px; transform: rotate(-45deg); }

@@ -28,6 +28,7 @@ from models.database import (
 from orchestrator import Orchestrator
 from services.forex_data import fetch_ohlcv
 from services.backtester import run_backtest
+from services.analytics import compute_analytics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -545,6 +546,12 @@ def _bt_to_dict(r: BacktestRun) -> dict:
         "created_at":   r.created_at.isoformat() if r.created_at else None,
         "completed_at": r.completed_at.isoformat() if r.completed_at else None,
     }
+
+
+@app.get("/api/analytics")
+async def get_analytics():
+    """Full analytics report — equity curve, drawdown, breakdowns, stats."""
+    return await compute_analytics()
 
 
 @app.get("/api/performance")
