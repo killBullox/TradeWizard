@@ -531,6 +531,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'performance') refreshPerformance();
     if (tab.dataset.tab === 'settings')    refreshConfig();
     if (tab.dataset.tab === 'news')        refreshNews();
+    if (tab.dataset.tab === 'charts')      window.activateChartsTab?.();
   });
 });
 

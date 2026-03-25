@@ -25,6 +25,7 @@ from models.database import (
     JournalEntry, Meeting, SystemConfig, set_config, get_config
 )
 from orchestrator import Orchestrator
+from services.forex_data import fetch_ohlcv
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -290,6 +291,41 @@ async def get_news(hours: int = 24, symbol: str | None = None):
         "block_minutes_after":  orchestrator.news_filter.block_minutes_after,
         "count": len(events),
     }
+
+
+@app.get("/api/chart-data/{symbol}")
+async def get_chart_data(symbol: str, timeframe: str = "H1", bars: int = 200):
+    """OHLCV + ICT overlays for the chart tab."""
+    symbol = symbol.upper()
+    bars   = max(50, min(bars, 500))
+    valid_tf = {"M1","M5","M15","M30","H1","H4","D1","W1"}
+    if timeframe not in valid_tf:
+        raise HTTPException(400, f"timeframe must be one of {valid_tf}")
+
+    data = await fetch_ohlcv(symbol, timeframe, bars)
+
+    # Attach active trades for this symbol as overlay levels
+    async with async_session_factory() as s:
+        result = await s.execute(
+            select(Trade).where(Trade.symbol == symbol, Trade.status == "ACTIVE")
+        )
+        active = result.scalars().all()
+
+    trade_levels = [
+        {
+            "id":          t.id,
+            "direction":   t.direction,
+            "entry_price": t.entry_price,
+            "stop_loss":   t.stop_loss,
+            "take_profit_1": t.take_profit_1,
+            "take_profit_2": t.take_profit_2,
+            "take_profit_3": t.take_profit_3,
+            "ict_setup":   t.ict_setup,
+        }
+        for t in active
+    ]
+
+    return {**data, "active_trades": trade_levels}
 
 
 @app.post("/api/news/refresh")

@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TradeWizard — Multi-Agent ICT Forex</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <!-- Lightweight Charts v4 (TradingView OSS) -->
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
   <!-- Header -->
@@ -116,6 +118,7 @@
         <button class="tab" data-tab="journal">📋 Journal</button>
         <button class="tab" data-tab="meetings">🗣️ Meetings</button>
         <button class="tab" data-tab="performance">📉 Performance</button>
+        <button class="tab" data-tab="charts">📊 Charts</button>
         <button class="tab" data-tab="news">📰 News</button>
         <button class="tab" data-tab="settings">⚙️ Settings</button>
       </div>
@@ -254,6 +257,42 @@
         </div>
       </div>
 
+      <!-- Charts Tab -->
+      <div class="tab-content" id="tab-charts">
+        <div class="card chart-card">
+          <div class="card-header">
+            <h3>📊 ICT Chart</h3>
+            <div class="chart-controls">
+              <select id="chart-symbol" class="select-sm"></select>
+              <select id="chart-tf" class="select-sm"></select>
+              <button class="btn btn-primary btn-sm" id="btn-chart-load">Load</button>
+              <span id="chart-status" class="chart-status chart-status-loading">Initialising…</span>
+            </div>
+          </div>
+          <div id="chart-legend" class="chart-legend"></div>
+          <div id="chart-canvas" class="chart-canvas"></div>
+        </div>
+
+        <!-- ICT overlay legend -->
+        <div class="chart-overlay-legend card">
+          <div class="overlay-legend-title">Overlays</div>
+          <div class="overlay-items">
+            <div class="overlay-item"><span class="ol-swatch" style="background:#f59e0b"></span>EMA 20</div>
+            <div class="overlay-item"><span class="ol-swatch" style="background:#8b5cf6"></span>EMA 50</div>
+            <div class="overlay-item"><span class="ol-swatch" style="background:rgba(16,185,129,0.4)"></span>FVG Bullish</div>
+            <div class="overlay-item"><span class="ol-swatch" style="background:rgba(239,68,68,0.4)"></span>FVG Bearish</div>
+            <div class="overlay-item"><span class="ol-swatch" style="background:rgba(59,130,246,0.4)"></span>Order Block Bullish</div>
+            <div class="overlay-item"><span class="ol-swatch" style="background:rgba(245,158,11,0.4)"></span>Order Block Bearish</div>
+            <div class="overlay-item"><span class="ol-swatch" style="border:2px dashed #f59e0b;background:transparent"></span>PDH / PDL</div>
+            <div class="overlay-item"><span class="ol-swatch" style="border:2px dotted #10b981;background:transparent"></span>Swing High</div>
+            <div class="overlay-item"><span class="ol-swatch" style="border:2px dotted #ef4444;background:transparent"></span>Swing Low</div>
+            <div class="overlay-item"><span class="ol-swatch" style="background:#3b82f6"></span>Active Entry</div>
+            <div class="overlay-item"><span class="ol-swatch" style="background:#ef4444"></span>Active SL</div>
+            <div class="overlay-item"><span class="ol-swatch" style="background:#10b981"></span>Active TP</div>
+          </div>
+        </div>
+      </div>
+
       <!-- News Tab -->
       <div class="tab-content" id="tab-news">
         <div class="card">
@@ -360,6 +399,7 @@
     </div>
   </div>
 
+  <script src="/static/charts.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
