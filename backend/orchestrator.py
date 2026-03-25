@@ -8,6 +8,7 @@ Also handles: live trade monitoring, post-trade meetings, system self-improvemen
 import json
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Callable, Awaitable
 from sqlalchemy import select
@@ -22,6 +23,7 @@ from agents import (
 )
 from services.forex_data import get_multi_timeframe_data, fetch_ohlcv
 from services.news_filter import get_news_filter, NewsFilter
+from services.telegram_bot import get_telegram_bot, TelegramBot
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,7 @@ class Orchestrator:
         self._analysis_task: asyncio.Task | None = None
         self._monitor_task:  asyncio.Task | None = None
         self._news: NewsFilter | None = None
+        self._tg:   TelegramBot | None = None
 
     # ------------------------------------------------------------------ #
     #  Startup / Shutdown
@@ -59,6 +62,12 @@ class Orchestrator:
         # Pre-warm the calendar cache
         asyncio.create_task(self._news.force_refresh())
 
+        # Initialize Telegram bot
+        self._tg = get_telegram_bot(orchestrator=self)
+        polling  = os.getenv("TELEGRAM_POLLING", "true").lower() == "true"
+        if polling:
+            self._tg.start_polling()
+
         self._analysis_task = asyncio.create_task(self._analysis_loop())
         self._monitor_task  = asyncio.create_task(self._monitor_loop())
         await self.broadcast({"type": "system_started", "timestamp": datetime.utcnow().isoformat()})
@@ -66,6 +75,8 @@ class Orchestrator:
 
     async def stop(self):
         self._running = False
+        if self._tg:
+            self._tg.stop_polling()
         for task in (self._analysis_task, self._monitor_task):
             if task:
                 task.cancel()
@@ -128,6 +139,8 @@ class Orchestrator:
                         "message": msg,
                     })
                     logger.info("News block: %s — %s", symbol, msg)
+                    if self._tg:
+                        asyncio.create_task(self._tg.notify_news_block(event.to_dict(), symbol))
                     return
 
             # 1. Fetch market data
@@ -210,6 +223,14 @@ class Orchestrator:
                 "ticket": cc_result.get("ticket"),
                 "timestamp": datetime.utcnow().isoformat(),
             })
+            if self._tg:
+                asyncio.create_task(self._tg.notify_trade_open({
+                    **trade_params,
+                    "id": trade_id,
+                    "ict_setup": strategy.get("setup"),
+                    "mt5_ticket": cc_result.get("ticket"),
+                    "rr_ratio": rm_result.get("position_size", {}).get("rr_ratio", 2.0),
+                }))
 
         except Exception as e:
             logger.error(f"Error analyzing {symbol}: {e}", exc_info=True)
@@ -263,11 +284,15 @@ class Orchestrator:
                         "new_sl": new_sl,
                         "reason": decision.get("reason"),
                     })
+                    if self._tg:
+                        asyncio.create_task(self._tg.notify_sl_trailed(trade.symbol, trade.id, new_sl))
 
                 elif action == "PARTIAL_CLOSE" and decision.get("close_percent"):
                     pct = decision["close_percent"]
                     await self.cc.close_partial(trade.mt5_ticket or "", trade.symbol, pct)
                     await self.broadcast({"type": "partial_close", "trade_id": trade.id, "percent": pct})
+                    if self._tg:
+                        asyncio.create_task(self._tg.notify_partial_close(trade.symbol, trade.id, pct))
 
                 elif action in ("CLOSE_ALL", "CLOSE"):
                     await self._close_trade(trade, current_price, "AT Management Decision")
@@ -321,6 +346,15 @@ class Orchestrator:
             "pnl_pips": pnl_pips,
             "reason": reason,
         })
+        if self._tg:
+            asyncio.create_task(self._tg.notify_trade_close(
+                {
+                    "id": trade.id, "symbol": trade.symbol, "direction": trade.direction,
+                    "entry_price": trade.entry_price, "close_price": close_price,
+                    "ict_setup": trade.ict_setup, "result": result_str,
+                },
+                pnl_usd, pnl_pips, reason,
+            ))
 
         # Trigger post-trade meeting
         asyncio.create_task(self._schedule_meeting("POST_TRADE", [trade]))
@@ -392,6 +426,12 @@ class Orchestrator:
             "improvements": improvements,
             "conclusions": meeting_result.get("conclusions", []),
         })
+        if self._tg and (improvements or meeting_result.get("conclusions")):
+            asyncio.create_task(self._tg.notify_meeting(
+                meeting_type,
+                meeting_result.get("conclusions", []),
+                improvements,
+            ))
 
         return meeting_result
 
@@ -440,6 +480,10 @@ class Orchestrator:
     @property
     def news_filter(self) -> NewsFilter | None:
         return self._news
+
+    @property
+    def telegram(self) -> TelegramBot | None:
+        return self._tg
 
     async def get_status(self) -> dict:
         async with async_session_factory() as s:

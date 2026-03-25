@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from typing import Set
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -248,6 +248,35 @@ async def trigger_analysis(data: dict | None = None):
     symbol = data.get("symbol") if data else None
     asyncio.create_task(orchestrator.trigger_analysis(symbol))
     return {"status": "Analysis triggered", "symbol": symbol or "all pairs"}
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Receive Telegram webhook updates (alternative to polling)."""
+    if not orchestrator or not orchestrator.telegram:
+        return {"ok": False}
+    update = await request.json()
+    asyncio.create_task(orchestrator.telegram.handle_webhook_update(update))
+    return {"ok": True}
+
+
+@app.post("/api/telegram/test")
+async def telegram_test():
+    if not orchestrator or not orchestrator.telegram:
+        raise HTTPException(503, "Telegram bot not configured")
+    result = await orchestrator.telegram.send_test()
+    return result
+
+
+@app.post("/api/telegram/webhook/set")
+async def telegram_set_webhook(data: dict):
+    if not orchestrator or not orchestrator.telegram:
+        raise HTTPException(503, "Telegram bot not configured")
+    url = data.get("url", "")
+    if not url:
+        raise HTTPException(400, "url is required")
+    result = await orchestrator.telegram.set_webhook(url)
+    return result
 
 
 @app.get("/api/news")
