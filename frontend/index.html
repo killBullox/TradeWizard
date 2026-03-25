@@ -119,6 +119,7 @@
         <button class="tab" data-tab="meetings">🗣️ Meetings</button>
         <button class="tab" data-tab="performance">📉 Performance</button>
         <button class="tab" data-tab="charts">📊 Charts</button>
+        <button class="tab" data-tab="backtest">🔬 Backtest</button>
         <button class="tab" data-tab="news">📰 News</button>
         <button class="tab" data-tab="settings">⚙️ Settings</button>
       </div>
@@ -289,6 +290,112 @@
             <div class="overlay-item"><span class="ol-swatch" style="background:#3b82f6"></span>Active Entry</div>
             <div class="overlay-item"><span class="ol-swatch" style="background:#ef4444"></span>Active SL</div>
             <div class="overlay-item"><span class="ol-swatch" style="background:#10b981"></span>Active TP</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Backtest Tab -->
+      <div class="tab-content" id="tab-backtest">
+
+        <!-- Config form -->
+        <div class="card">
+          <div class="card-header"><h3>🔬 Run Backtest</h3></div>
+          <div class="bt-form-grid">
+            <div class="form-group">
+              <label>Symbol</label>
+              <select id="bt-symbol" class="form-input">
+                <option>EURUSD</option><option>GBPUSD</option><option>USDJPY</option>
+                <option>XAUUSD</option><option>USDCHF</option><option>AUDUSD</option>
+                <option>GBPJPY</option><option>NZDUSD</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Timeframe</label>
+              <select id="bt-tf" class="form-input">
+                <option>M15</option><option>M30</option>
+                <option selected>H1</option><option>H4</option><option>D1</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Strategy</label>
+              <select id="bt-strategy" class="form-input">
+                <option selected>Mixed</option>
+                <option>FVG</option>
+                <option>OrderBlock</option>
+                <option>Liquidity</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Bars</label>
+              <input type="number" id="bt-bars" class="form-input" value="500" min="100" max="2000" />
+            </div>
+            <div class="form-group">
+              <label>Risk % per trade</label>
+              <input type="number" id="bt-risk" class="form-input" value="1.0" min="0.1" max="5" step="0.1" />
+            </div>
+            <div class="form-group">
+              <label>R:R ratio</label>
+              <input type="number" id="bt-rr" class="form-input" value="2.0" min="1" max="10" step="0.5" />
+            </div>
+            <div class="form-group">
+              <label>Initial balance ($)</label>
+              <input type="number" id="bt-balance" class="form-input" value="10000" min="1000" />
+            </div>
+          </div>
+          <button class="btn btn-primary" id="btn-bt-run">▶ Run Backtest</button>
+          <span id="bt-run-status" style="margin-left:12px;font-size:0.8rem;color:var(--text-muted)"></span>
+        </div>
+
+        <!-- Results stats -->
+        <div id="bt-results" style="display:none">
+          <div class="stats-row" id="bt-stats-row"></div>
+
+          <!-- Equity curve -->
+          <div class="card" style="margin-top:12px">
+            <div class="card-header"><h3>📈 Equity Curve</h3></div>
+            <div id="bt-equity-canvas" class="chart-canvas"></div>
+          </div>
+
+          <!-- Trade list -->
+          <div class="card" style="margin-top:12px">
+            <div class="card-header">
+              <h3>📋 Simulated Trades</h3>
+              <div id="bt-trade-count" class="badge">0</div>
+            </div>
+            <div class="table-wrapper">
+              <table class="table" id="bt-trades-table">
+                <thead>
+                  <tr>
+                    <th>#</th><th>Setup</th><th>Dir</th>
+                    <th>Entry</th><th>SL</th><th>TP</th>
+                    <th>Exit</th><th>Result</th><th>Pips</th><th>R:R</th>
+                  </tr>
+                </thead>
+                <tbody id="bt-trades-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Past runs -->
+        <div class="card" style="margin-top:12px">
+          <div class="card-header">
+            <h3>🕓 Past Runs</h3>
+            <button class="btn btn-ghost btn-sm" id="btn-bt-refresh-history">↻</button>
+          </div>
+          <div class="table-wrapper">
+            <table class="table" id="bt-history-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>Symbol</th><th>TF</th><th>Strategy</th>
+                  <th>Trades</th><th>Win%</th><th>Pips</th><th>Return%</th>
+                  <th>Max DD%</th><th>PF</th><th>Sharpe</th><th>Status</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="bt-history-tbody">
+                <tr><td colspan="13" class="empty-state">No runs yet</td></tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>

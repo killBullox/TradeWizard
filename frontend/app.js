@@ -532,6 +532,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'settings')    refreshConfig();
     if (tab.dataset.tab === 'news')        refreshNews();
     if (tab.dataset.tab === 'charts')      window.activateChartsTab?.();
+    if (tab.dataset.tab === 'backtest')    refreshBtHistory();
   });
 });
 
@@ -668,6 +669,198 @@ document.getElementById('btn-refresh-news')?.addEventListener('click', refreshNe
 document.getElementById('btn-refresh-news-tab')?.addEventListener('click', refreshNews);
 document.getElementById('btn-save-news-config')?.addEventListener('click', saveNewsConfig);
 document.getElementById('news-hours-filter')?.addEventListener('change', refreshNews);
+
+// ── Backtest ──────────────────────────────────────────────────────────
+let btEquityChart = null;
+let currentBtRunId = null;
+let btPollTimer = null;
+
+async function runBacktest() {
+  const payload = {
+    symbol:          document.getElementById('bt-symbol')?.value  || 'EURUSD',
+    timeframe:       document.getElementById('bt-tf')?.value      || 'H1',
+    strategy:        document.getElementById('bt-strategy')?.value || 'Mixed',
+    bars:            parseInt(document.getElementById('bt-bars')?.value    || 500),
+    risk_percent:    parseFloat(document.getElementById('bt-risk')?.value  || 1.0),
+    rr_ratio:        parseFloat(document.getElementById('bt-rr')?.value    || 2.0),
+    initial_balance: parseFloat(document.getElementById('bt-balance')?.value || 10000),
+  };
+
+  setBtStatus('running', '⏳ Running…');
+  document.getElementById('bt-results').style.display = 'none';
+
+  try {
+    const resp = await fetchJSON('/api/backtest/run', {
+      method: 'POST',
+      body:   JSON.stringify(payload),
+    });
+    currentBtRunId = resp.run_id;
+    // Poll until DONE
+    clearInterval(btPollTimer);
+    btPollTimer = setInterval(() => pollBtResult(currentBtRunId), 1500);
+  } catch (e) {
+    setBtStatus('error', '❌ ' + e.message);
+  }
+}
+
+async function pollBtResult(runId) {
+  try {
+    const run = await fetchJSON(`/api/backtest/${runId}`);
+    if (run.status === 'DONE') {
+      clearInterval(btPollTimer);
+      setBtStatus('ok', `✅ Done — ${run.total_trades} trades`);
+      renderBtResults(run);
+      refreshBtHistory();
+    } else if (run.status === 'FAILED') {
+      clearInterval(btPollTimer);
+      setBtStatus('error', '❌ ' + (run.error || 'Unknown error'));
+    }
+  } catch (e) {
+    clearInterval(btPollTimer);
+    setBtStatus('error', '❌ Polling error');
+  }
+}
+
+function setBtStatus(type, msg) {
+  const el = document.getElementById('bt-run-status');
+  if (!el) return;
+  el.style.color = type === 'ok' ? '#10b981' : type === 'error' ? '#ef4444' : '#f59e0b';
+  el.textContent = msg;
+}
+
+function renderBtResults(run) {
+  const resultsEl = document.getElementById('bt-results');
+  if (!resultsEl) return;
+  resultsEl.style.display = 'block';
+
+  // Stats row
+  const statsEl = document.getElementById('bt-stats-row');
+  if (statsEl) {
+    const wr  = run.win_rate ?? 0;
+    const ret = run.total_return ?? 0;
+    const dd  = run.max_drawdown ?? 0;
+    const pf  = run.profit_factor ?? 0;
+    statsEl.innerHTML = `
+      <div class="stat-card"><div class="stat-value">${run.total_trades ?? 0}</div><div class="stat-label">Trades</div></div>
+      <div class="stat-card ${wr>=55?'win':''}"><div class="stat-value">${wr.toFixed(1)}%</div><div class="stat-label">Win Rate</div></div>
+      <div class="stat-card"><div class="stat-value ${(run.total_pips??0)>=0?'text-win':'text-loss'}">${(run.total_pips??0).toFixed(1)}</div><div class="stat-label">Total Pips</div></div>
+      <div class="stat-card"><div class="stat-value ${ret>=0?'text-win':'text-loss'}">${ret.toFixed(2)}%</div><div class="stat-label">Return</div></div>
+      <div class="stat-card"><div class="stat-value text-loss">${dd.toFixed(2)}%</div><div class="stat-label">Max DD</div></div>
+      <div class="stat-card"><div class="stat-value">${pf === 999 ? '∞' : pf.toFixed(2)}</div><div class="stat-label">Profit Factor</div></div>
+      <div class="stat-card"><div class="stat-value">${(run.sharpe??0).toFixed(2)}</div><div class="stat-label">Sharpe</div></div>
+      <div class="stat-card"><div class="stat-value">${run.avg_rr??0}</div><div class="stat-label">Avg R:R</div></div>
+    `;
+  }
+
+  // Equity curve
+  if (run.equity && run.equity.length > 1) {
+    renderBtEquity(run.equity);
+  }
+
+  // Trades table
+  const tbody = document.getElementById('bt-trades-tbody');
+  const cnt   = document.getElementById('bt-trade-count');
+  if (tbody && run.trades) {
+    cnt && (cnt.textContent = run.trades.length);
+    tbody.innerHTML = run.trades.map((t, i) => `
+      <tr>
+        <td>${i + 1}</td>
+        <td><span class="badge">${t.setup}</span></td>
+        <td class="${t.direction==='BUY'?'text-win':'text-loss'}">${t.direction}</td>
+        <td>${t.entry_price}</td>
+        <td>${t.stop_loss}</td>
+        <td>${t.take_profit}</td>
+        <td>${t.exit_price ?? '—'}</td>
+        <td>
+          <span class="badge ${t.result==='WIN'?'badge-win':t.result==='LOSS'?'badge-loss':''}">
+            ${t.result ?? 'OPEN'}
+          </span>
+        </td>
+        <td class="${(t.pnl_pips??0)>=0?'text-win':'text-loss'}">${t.pnl_pips!=null?t.pnl_pips.toFixed(1):'—'}</td>
+        <td>${t.rr_actual!=null?t.rr_actual.toFixed(2):'—'}</td>
+      </tr>
+    `).join('');
+  }
+}
+
+function renderBtEquity(equityData) {
+  const container = document.getElementById('bt-equity-canvas');
+  if (!container || typeof LightweightCharts === 'undefined') return;
+
+  if (btEquityChart) {
+    btEquityChart.remove();
+    btEquityChart = null;
+  }
+
+  btEquityChart = LightweightCharts.createChart(container, {
+    layout: { background: { color: '#0f1117' }, textColor: '#94a3b8' },
+    grid:   { vertLines: { color: '#1e2130' }, horzLines: { color: '#1e2130' } },
+    rightPriceScale: { borderColor: '#2d3450' },
+    timeScale: { borderColor: '#2d3450', timeVisible: true },
+    width:  container.clientWidth,
+    height: 260,
+  });
+
+  const lineSeries = btEquityChart.addAreaSeries({
+    lineColor:    '#3b82f6',
+    topColor:     'rgba(59,130,246,0.25)',
+    bottomColor:  'rgba(59,130,246,0.02)',
+    lineWidth:    2,
+    priceLineVisible: false,
+  });
+
+  const data = equityData.map(e => ({
+    time:  Math.floor(new Date(e.time).getTime() / 1000),
+    value: e.equity,
+  })).filter(d => d.time > 0);
+
+  lineSeries.setData(data);
+  btEquityChart.timeScale().fitContent();
+}
+
+async function refreshBtHistory() {
+  try {
+    const runs  = await fetchJSON('/api/backtest?limit=15');
+    const tbody = document.getElementById('bt-history-tbody');
+    if (!tbody) return;
+    if (!runs.length) {
+      tbody.innerHTML = '<tr><td colspan="13" class="empty-state">No runs yet</td></tr>';
+      return;
+    }
+    tbody.innerHTML = runs.map(r => {
+      const statusClass = r.status === 'DONE' ? 'badge-win' : r.status === 'FAILED' ? 'badge-loss' : 'badge-warn';
+      return `
+        <tr>
+          <td>${r.id}</td>
+          <td><b>${r.symbol}</b></td>
+          <td>${r.timeframe}</td>
+          <td>${r.strategy}</td>
+          <td>${r.total_trades ?? '—'}</td>
+          <td class="${(r.win_rate??0)>=55?'text-win':''}">${r.win_rate!=null?r.win_rate.toFixed(1)+'%':'—'}</td>
+          <td class="${(r.total_pips??0)>=0?'text-win':'text-loss'}">${r.total_pips!=null?r.total_pips.toFixed(1):'—'}</td>
+          <td class="${(r.total_return??0)>=0?'text-win':'text-loss'}">${r.total_return!=null?r.total_return.toFixed(2)+'%':'—'}</td>
+          <td class="text-loss">${r.max_drawdown!=null?r.max_drawdown.toFixed(2)+'%':'—'}</td>
+          <td>${r.profit_factor!=null?(r.profit_factor===999?'∞':r.profit_factor.toFixed(2)):'—'}</td>
+          <td>${r.sharpe!=null?r.sharpe.toFixed(2):'—'}</td>
+          <td><span class="badge ${statusClass}">${r.status}</span></td>
+          <td>${r.status==='DONE'?`<button class="btn btn-ghost btn-sm" onclick="loadBtRun(${r.id})">Load</button>`:''}</td>
+        </tr>
+      `;
+    }).join('');
+  } catch (e) { console.error('refreshBtHistory', e); }
+}
+
+async function loadBtRun(runId) {
+  try {
+    const run = await fetchJSON(`/api/backtest/${runId}`);
+    renderBtResults(run);
+    document.getElementById('bt-results').scrollIntoView({ behavior: 'smooth' });
+  } catch (e) { alert('Failed to load run: ' + e.message); }
+}
+window.loadBtRun = loadBtRun;
+
+document.getElementById('btn-bt-run')?.addEventListener('click', runBacktest);
+document.getElementById('btn-bt-refresh-history')?.addEventListener('click', refreshBtHistory);
 
 // Keep WS alive
 setInterval(() => { if (ws?.readyState === WebSocket.OPEN) sendWS({ command: 'ping' }); }, 30000);

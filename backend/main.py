@@ -22,10 +22,12 @@ load_dotenv()
 
 from models.database import (
     async_session_factory, init_db, Trade, AgentLog,
-    JournalEntry, Meeting, SystemConfig, set_config, get_config
+    JournalEntry, Meeting, SystemConfig, set_config, get_config,
+    BacktestRun,
 )
 from orchestrator import Orchestrator
 from services.forex_data import fetch_ohlcv
+from services.backtester import run_backtest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -334,6 +336,136 @@ async def refresh_news():
         raise HTTPException(503, "System not ready")
     count = await orchestrator.news_filter.force_refresh()
     return {"status": "refreshed", "event_count": count}
+
+
+@app.post("/api/backtest/run")
+async def backtest_run(data: dict):
+    symbol       = data.get("symbol", "EURUSD").upper()
+    timeframe    = data.get("timeframe", "H1")
+    strategy     = data.get("strategy", "Mixed")
+    bars         = int(data.get("bars", 500))
+    risk_percent = float(data.get("risk_percent", 1.0))
+    rr_ratio     = float(data.get("rr_ratio", 2.0))
+    balance      = float(data.get("initial_balance", 10000.0))
+
+    valid_tf = {"M5","M15","M30","H1","H4","D1"}
+    valid_st = {"FVG","OrderBlock","Liquidity","Mixed"}
+    if timeframe not in valid_tf:
+        raise HTTPException(400, f"timeframe must be one of {valid_tf}")
+    if strategy not in valid_st:
+        raise HTTPException(400, f"strategy must be one of {valid_st}")
+
+    # Create DB record
+    async with async_session_factory() as s:
+        run = BacktestRun(
+            symbol=symbol, timeframe=timeframe, strategy=strategy,
+            bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
+        )
+        s.add(run)
+        await s.commit()
+        await s.refresh(run)
+        run_id = run.id
+
+    # Execute in background so the HTTP call returns quickly
+    asyncio.create_task(_exec_backtest(
+        run_id, symbol, timeframe, strategy, bars,
+        risk_percent, rr_ratio, balance
+    ))
+    return {"run_id": run_id, "status": "RUNNING"}
+
+
+async def _exec_backtest(
+    run_id, symbol, timeframe, strategy, bars,
+    risk_percent, rr_ratio, balance
+):
+    try:
+        result = await run_backtest(
+            symbol=symbol, timeframe=timeframe, strategy=strategy,
+            bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
+            initial_balance=balance,
+        )
+        async with async_session_factory() as s:
+            run = await s.get(BacktestRun, run_id)
+            if run:
+                run.status        = "DONE"
+                run.total_trades  = result.total_trades
+                run.wins          = result.wins
+                run.losses        = result.losses
+                run.win_rate      = result.win_rate
+                run.total_pips    = result.total_pips
+                run.total_return  = result.total_return
+                run.max_drawdown  = result.max_drawdown
+                run.profit_factor = result.profit_factor if result.profit_factor != float("inf") else 999.0
+                run.avg_rr        = result.avg_rr
+                run.sharpe        = result.sharpe
+                run.trades_json   = json.dumps([t.__dict__ for t in result.trades], default=str)
+                run.equity_json   = json.dumps(result.equity)
+                run.completed_at  = datetime.utcnow()
+                await s.commit()
+    except Exception as exc:
+        logger.error("Backtest %s failed: %s", run_id, exc, exc_info=True)
+        async with async_session_factory() as s:
+            run = await s.get(BacktestRun, run_id)
+            if run:
+                run.status = "FAILED"
+                run.error  = str(exc)
+                await s.commit()
+
+
+@app.get("/api/backtest")
+async def list_backtests(limit: int = 20):
+    async with async_session_factory() as s:
+        result = await s.execute(
+            select(BacktestRun).order_by(desc(BacktestRun.created_at)).limit(limit)
+        )
+        runs = result.scalars().all()
+    return [_bt_to_dict(r) for r in runs]
+
+
+@app.get("/api/backtest/{run_id}")
+async def get_backtest(run_id: int):
+    async with async_session_factory() as s:
+        run = await s.get(BacktestRun, run_id)
+    if not run:
+        raise HTTPException(404, "Backtest run not found")
+    d = _bt_to_dict(run)
+    if run.trades_json:
+        try:
+            d["trades"] = json.loads(run.trades_json)
+        except Exception:
+            d["trades"] = []
+    if run.equity_json:
+        try:
+            d["equity"] = json.loads(run.equity_json)
+        except Exception:
+            d["equity"] = []
+    return d
+
+
+def _bt_to_dict(r: BacktestRun) -> dict:
+    return {
+        "id":           r.id,
+        "symbol":       r.symbol,
+        "timeframe":    r.timeframe,
+        "strategy":     r.strategy,
+        "bars":         r.bars,
+        "risk_percent": r.risk_percent,
+        "rr_ratio":     r.rr_ratio,
+        "status":       r.status,
+        "total_trades": r.total_trades,
+        "wins":         r.wins,
+        "losses":       r.losses,
+        "win_rate":     r.win_rate,
+        "total_pips":   r.total_pips,
+        "total_return": r.total_return,
+        "max_drawdown": r.max_drawdown,
+        "profit_factor":r.profit_factor,
+        "avg_rr":       r.avg_rr,
+        "sharpe":       r.sharpe,
+        "error":        r.error,
+        "created_at":   r.created_at.isoformat() if r.created_at else None,
+        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+    }
 
 
 @app.get("/api/performance")

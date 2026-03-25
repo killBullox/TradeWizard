@@ -113,6 +113,35 @@ class SystemConfig(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class BacktestRun(Base):
+    __tablename__ = "backtest_runs"
+
+    id          = Column(Integer, primary_key=True, index=True)
+    symbol      = Column(String(20), nullable=False)
+    timeframe   = Column(String(10), nullable=False)
+    strategy    = Column(String(100), nullable=False)  # FVG, OrderBlock, Mixed
+    bars        = Column(Integer, default=500)
+    risk_percent = Column(Float, default=1.0)
+    rr_ratio    = Column(Float, default=2.0)
+    status      = Column(String(20), default="RUNNING")  # RUNNING, DONE, FAILED
+    # Results (populated when DONE)
+    total_trades = Column(Integer, nullable=True)
+    wins         = Column(Integer, nullable=True)
+    losses       = Column(Integer, nullable=True)
+    win_rate     = Column(Float,   nullable=True)
+    total_pips   = Column(Float,   nullable=True)
+    total_return = Column(Float,   nullable=True)   # % return
+    max_drawdown = Column(Float,   nullable=True)   # % drawdown
+    profit_factor = Column(Float,  nullable=True)
+    avg_rr       = Column(Float,   nullable=True)
+    sharpe       = Column(Float,   nullable=True)
+    trades_json  = Column(Text,    nullable=True)   # JSON list of sim trades
+    equity_json  = Column(Text,    nullable=True)   # JSON equity curve
+    error        = Column(Text,    nullable=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+
 class MarketSession(Base):
     __tablename__ = "market_sessions"
 
