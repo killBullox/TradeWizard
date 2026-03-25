@@ -50,6 +50,7 @@ class Trade(Base):
     pnl_usd = Column(Float, nullable=True)
     result = Column(String(20), nullable=True)  # WIN / LOSS / BREAKEVEN
     trailing_sl_updates = Column(Integer, default=0)
+    is_paper = Column(Boolean, default=False)     # True = paper trade
     created_at = Column(DateTime, default=datetime.utcnow)
 
     logs = relationship("AgentLog", back_populates="trade")
@@ -172,6 +173,8 @@ async def init_db():
                 SystemConfig(key="analysis_interval", value="3600", description="Analysis interval in seconds"),
                 SystemConfig(key="ict_strategies", value='["FVG","OrderBlock","Liquidity","BOS","CHOCH","Mitigation","PD_Array"]', description="ICT strategies to use"),
                 SystemConfig(key="system_performance", value='{"total_trades":0,"wins":0,"losses":0,"breakeven":0,"win_rate":0,"avg_rr":0}', description="System performance metrics"),
+                SystemConfig(key="paper_mode",    value="false", description="Enable paper trading mode (virtual execution)"),
+                SystemConfig(key="paper_balance", value="10000.0", description="Current paper trading account balance"),
                 SystemConfig(key="news_block_minutes_before", value="30", description="Minutes before high-impact news to block trading"),
                 SystemConfig(key="news_block_minutes_after",  value="30", description="Minutes after high-impact news to block trading"),
                 SystemConfig(key="news_block_medium",         value="false", description="Also block Medium-impact events"),

@@ -24,6 +24,7 @@ from agents import (
 from services.forex_data import get_multi_timeframe_data, fetch_ohlcv
 from services.news_filter import get_news_filter, NewsFilter
 from services.telegram_bot import get_telegram_bot, TelegramBot
+from services.paper_account import get_paper_account, PaperAccount
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +44,9 @@ class Orchestrator:
         self._running  = False
         self._analysis_task: asyncio.Task | None = None
         self._monitor_task:  asyncio.Task | None = None
-        self._news: NewsFilter | None = None
-        self._tg:   TelegramBot | None = None
+        self._news:  NewsFilter   | None = None
+        self._tg:    TelegramBot  | None = None
+        self._paper: PaperAccount | None = None
 
     # ------------------------------------------------------------------ #
     #  Startup / Shutdown
@@ -62,6 +64,17 @@ class Orchestrator:
         # Pre-warm the calendar cache
         asyncio.create_task(self._news.force_refresh())
 
+        # Initialize paper trading account
+        async with async_session_factory() as s:
+            paper_bal = float(await get_config("paper_balance", s) or 10000.0)
+        self._paper = get_paper_account(
+            broadcast_fn=self.broadcast,
+            initial_balance=paper_bal,
+        )
+        paper_on = (await self._get_config_value("paper_mode")) == "true"
+        if paper_on:
+            await self._paper.start()
+
         # Initialize Telegram bot
         self._tg = get_telegram_bot(orchestrator=self)
         polling  = os.getenv("TELEGRAM_POLLING", "true").lower() == "true"
@@ -77,6 +90,8 @@ class Orchestrator:
         self._running = False
         if self._tg:
             self._tg.stop_polling()
+        if self._paper:
+            await self._paper.stop()
         for task in (self._analysis_task, self._monitor_task):
             if task:
                 task.cancel()
@@ -188,14 +203,20 @@ class Orchestrator:
             if isinstance(final_trade, dict) and not final_trade.get("error"):
                 trade_params = {**trade_params, **final_trade}
 
-            # 6. Save to DB
+            # 6. Save to DB — mark as paper if paper mode is on
+            paper_on = await self._is_paper_mode()
             trade_id = await self._save_trade(
-                symbol, strategy, rm_result, trade_params, ict_analysis
+                symbol, strategy, rm_result, trade_params, ict_analysis,
+                is_paper=paper_on,
             )
 
-            # 7. Connector — send to MT5
-            cc_result = await self.cc.open_trade({**trade_params, "id": trade_id})
-            await self._log_agent("CC", "TRADE_SENT", f"Sent {symbol} to MT5", cc_result)
+            # 7. Connector — send to MT5 (or paper account)
+            if paper_on and self._paper:
+                cc_result = self._paper.open_position(trade_id, trade_params)
+                await self._log_agent("CC", "PAPER_OPEN", f"Paper open {symbol}", cc_result)
+            else:
+                cc_result = await self.cc.open_trade({**trade_params, "id": trade_id})
+                await self._log_agent("CC", "TRADE_SENT", f"Sent {symbol} to MT5", cc_result)
 
             if cc_result.get("success"):
                 await self._update_trade_ticket(trade_id, cc_result.get("ticket", "SIM"))
@@ -494,18 +515,22 @@ class Orchestrator:
             config = await self._load_config(s)
             perf_raw = await get_config("system_performance", s)
 
+        paper_summary = self._paper.get_summary() if self._paper else {}
+        paper_on      = config.get("paper_mode", "false") == "true"
         return {
-            "running": self._running,
-            "open_trades": len(open_list),
-            "closed_trades": len(closed_list),
-            "config": config,
-            "performance": json.loads(perf_raw or "{}"),
+            "running":      self._running,
+            "open_trades":  len(open_list),
+            "closed_trades":len(closed_list),
+            "config":       config,
+            "performance":  json.loads(perf_raw or "{}"),
+            "paper_mode":   paper_on,
+            "paper":        paper_summary,
         }
 
     # ------------------------------------------------------------------ #
     #  DB Helpers
     # ------------------------------------------------------------------ #
-    async def _save_trade(self, symbol, strategy, rm_result, trade_params, ict_analysis) -> int:
+    async def _save_trade(self, symbol, strategy, rm_result, trade_params, ict_analysis, is_paper: bool = False) -> int:
         position = rm_result.get("position_size", {})
         async with async_session_factory() as s:
             trade = Trade(
@@ -525,6 +550,7 @@ class Orchestrator:
                 risk_analysis=json.dumps(rm_result),
                 analyst_verdict=json.dumps({}),
                 open_time=datetime.utcnow(),
+                is_paper=is_paper,
             )
             s.add(trade)
             await s.commit()
@@ -595,6 +621,37 @@ class Orchestrator:
             total = stats["total_trades"]
             stats["win_rate"] = round(stats.get("wins", 0) / total * 100, 1) if total > 0 else 0
             await set_config("system_performance", json.dumps(stats), s)
+
+    async def _is_paper_mode(self) -> bool:
+        async with async_session_factory() as s:
+            val = await get_config("paper_mode", s)
+        return (val or "false").lower() == "true"
+
+    async def _get_config_value(self, key: str) -> str:
+        async with async_session_factory() as s:
+            return await get_config(key, s) or ""
+
+    @property
+    def paper_account(self) -> PaperAccount | None:
+        return self._paper
+
+    async def enable_paper_mode(self, balance: float | None = None):
+        async with async_session_factory() as s:
+            await set_config("paper_mode", "true", s)
+            if balance is not None:
+                await set_config("paper_balance", str(balance), s)
+        if self._paper:
+            if balance:
+                self._paper.balance = balance
+                self._paper.initial_balance = balance
+            if not self._paper._running:
+                await self._paper.start()
+
+    async def disable_paper_mode(self):
+        async with async_session_factory() as s:
+            await set_config("paper_mode", "false", s)
+        if self._paper:
+            await self._paper.stop()
 
     @staticmethod
     async def _noop(msg: dict):

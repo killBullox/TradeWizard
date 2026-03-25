@@ -412,6 +412,85 @@ async def _exec_backtest(
                 await s.commit()
 
 
+@app.get("/api/paper/status")
+async def paper_status():
+    if not orchestrator or not orchestrator.paper_account:
+        raise HTTPException(503, "System not ready")
+    paper_on = (await orchestrator._get_config_value("paper_mode")) == "true"
+    return {
+        **orchestrator.paper_account.get_summary(),
+        "paper_mode": paper_on,
+    }
+
+
+@app.get("/api/paper/positions")
+async def paper_positions():
+    if not orchestrator or not orchestrator.paper_account:
+        raise HTTPException(503, "System not ready")
+    return orchestrator.paper_account.get_positions()
+
+
+@app.get("/api/paper/trades")
+async def paper_trades(limit: int = 50):
+    async with async_session_factory() as s:
+        result = await s.execute(
+            select(Trade)
+            .where(Trade.is_paper == True)  # noqa: E712
+            .order_by(desc(Trade.created_at))
+            .limit(limit)
+        )
+        trades = result.scalars().all()
+    return [_trade_to_dict(t) for t in trades]
+
+
+@app.post("/api/paper/enable")
+async def paper_enable(data: dict | None = None):
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    balance = float((data or {}).get("balance", 10000.0))
+    await orchestrator.enable_paper_mode(balance)
+    return {"status": "paper_mode enabled", "balance": balance}
+
+
+@app.post("/api/paper/disable")
+async def paper_disable():
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    await orchestrator.disable_paper_mode()
+    return {"status": "paper_mode disabled"}
+
+
+@app.post("/api/paper/reset")
+async def paper_reset(data: dict | None = None):
+    if not orchestrator or not orchestrator.paper_account:
+        raise HTTPException(503, "System not ready")
+    balance = float((data or {}).get("balance", 10000.0))
+    await orchestrator.paper_account.reset(balance)
+    await orchestrator.enable_paper_mode(balance)
+    return {"status": "reset", "balance": balance}
+
+
+@app.post("/api/paper/close/{trade_id}")
+async def paper_close(trade_id: int):
+    if not orchestrator or not orchestrator.paper_account:
+        raise HTTPException(503, "System not ready")
+    result = orchestrator.paper_account.close_position(trade_id)
+    if result.get("success"):
+        # Update DB
+        async with async_session_factory() as s:
+            t = await s.get(Trade, trade_id)
+            if t:
+                close_price = result.get("close_price", t.entry_price)
+                t.status      = "CLOSED"
+                t.close_price = close_price
+                t.close_time  = datetime.utcnow()
+                t.pnl_pips    = result.get("pnl_pips", 0)
+                t.pnl_usd     = result.get("pnl_usd", 0)
+                t.result      = "WIN" if (t.pnl_usd or 0) > 0 else "LOSS"
+                await s.commit()
+    return result
+
+
 @app.get("/api/backtest")
 async def list_backtests(limit: int = 20):
     async with async_session_factory() as s:

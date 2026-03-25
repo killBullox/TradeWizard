@@ -143,6 +143,18 @@ function handleMessage(msg) {
       addActivity(`⏭ ${msg.symbol}: skipped (${msg.reason})`, 'info');
       break;
 
+    case 'paper_update':
+      handlePaperUpdate(msg);
+      break;
+
+    case 'paper_auto_close':
+      addActivity(
+        `📄 Paper auto-close #${msg.trade_id} ${msg.symbol} [${msg.reason}] — ${msg.pnl_usd >= 0 ? '+' : ''}$${(msg.pnl_usd||0).toFixed(2)}`,
+        msg.pnl_usd >= 0 ? 'success' : 'warning'
+      );
+      refreshPaper();
+      break;
+
     case 'news_block':
       addActivity(`📰 NEWS BLOCK: ${msg.symbol} — ${msg.message}`, 'warning');
       showNewsBanner(msg.event);
@@ -533,6 +545,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'news')        refreshNews();
     if (tab.dataset.tab === 'charts')      window.activateChartsTab?.();
     if (tab.dataset.tab === 'backtest')    refreshBtHistory();
+    if (tab.dataset.tab === 'paper')       refreshPaper();
   });
 });
 
@@ -669,6 +682,179 @@ document.getElementById('btn-refresh-news')?.addEventListener('click', refreshNe
 document.getElementById('btn-refresh-news-tab')?.addEventListener('click', refreshNews);
 document.getElementById('btn-save-news-config')?.addEventListener('click', saveNewsConfig);
 document.getElementById('news-hours-filter')?.addEventListener('change', refreshNews);
+
+// ── Paper Trading ─────────────────────────────────────────────────────
+let paperEquityChart  = null;
+let paperEquityData   = [];
+
+async function refreshPaper() {
+  try {
+    const status = await fetchJSON('/api/paper/status');
+    renderPaperSummary(status);
+    const positions = await fetchJSON('/api/paper/positions');
+    renderPaperPositions(positions);
+    const trades = await fetchJSON('/api/paper/trades?limit=50');
+    renderPaperTrades(trades);
+    // Sync toggle
+    const toggle = document.getElementById('paper-toggle');
+    if (toggle) toggle.checked = !!status.paper_mode;
+    // Equity curve from summary
+    if (status.equity_curve && status.equity_curve.length > 1) {
+      paperEquityData = status.equity_curve;
+      renderPaperEquity(paperEquityData);
+    }
+  } catch (e) { console.error('refreshPaper', e); }
+}
+
+function renderPaperSummary(s) {
+  const fmt = v => v != null ? '$' + Number(v).toFixed(2) : '$—';
+  const pct = v => v != null ? (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '%' : '—';
+  setEl('paper-balance',    fmt(s.balance));
+  setEl('paper-equity',     fmt(s.equity));
+  setEl('paper-open-pos',   s.open_positions ?? 0);
+  const unrEl = document.getElementById('paper-unrealised');
+  if (unrEl) {
+    const u = s.unrealised_pnl ?? 0;
+    unrEl.textContent  = fmt(u);
+    unrEl.className    = `stat-value ${u >= 0 ? 'text-win' : 'text-loss'}`;
+  }
+  const retEl = document.getElementById('paper-return');
+  if (retEl) {
+    const r = s.return_pct ?? 0;
+    retEl.textContent = pct(r);
+    retEl.className   = `stat-value ${r >= 0 ? 'text-win' : 'text-loss'}`;
+  }
+}
+
+function renderPaperPositions(positions) {
+  const el  = document.getElementById('paper-positions-list');
+  const cnt = document.getElementById('paper-pos-count');
+  if (!el) return;
+  if (cnt) cnt.textContent = positions.length;
+  if (!positions.length) {
+    el.innerHTML = '<div class="empty-state">No open paper positions</div>';
+    return;
+  }
+  el.innerHTML = positions.map(p => {
+    const pnl  = p.unrealised_pnl_usd ?? 0;
+    const pips = p.unrealised_pnl_pips ?? 0;
+    const isB  = p.direction === 'BUY';
+    return `
+      <div class="open-trade-card ${pnl >= 0 ? 'paper-pos-win' : 'paper-pos-loss'}">
+        <div class="trade-header-row">
+          <span class="trade-symbol">${p.symbol}</span>
+          <span class="trade-dir ${p.direction}">${p.direction}</span>
+          <span class="trade-setup">${p.ict_setup || 'PAPER'}</span>
+          <span class="paper-live-pnl ${pnl >= 0 ? 'text-win' : 'text-loss'}">
+            ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pips >= 0 ? '+' : ''}${pips.toFixed(1)}p)
+          </span>
+          <button class="btn btn-danger btn-sm" onclick="closePaperTrade(${p.trade_id})">✕</button>
+        </div>
+        <div class="trade-levels">
+          <div><div class="trade-level-label">Entry</div><div class="trade-level-val">${p.entry_price}</div></div>
+          <div><div class="trade-level-label">Current</div><div class="trade-level-val ${pnl>=0?'text-win':'text-loss'}">${p.current_price ?? '—'}</div></div>
+          <div><div class="trade-level-label">SL</div><div class="trade-level-val text-loss">${p.stop_loss}</div></div>
+          <div><div class="trade-level-label">TP</div><div class="trade-level-val text-win">${p.take_profit}</div></div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderPaperTrades(trades) {
+  const tbody = document.getElementById('paper-trades-tbody');
+  if (!tbody) return;
+  if (!trades.length) {
+    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No paper trades yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => `
+    <tr>
+      <td>#${t.id}</td>
+      <td><b>${t.symbol}</b></td>
+      <td class="${t.direction==='BUY'?'text-win':'text-loss'}">${t.direction}</td>
+      <td><span class="badge">${t.ict_setup||'—'}</span></td>
+      <td>${t.entry_price??'—'}</td>
+      <td>${t.stop_loss??'—'}</td>
+      <td>${t.take_profit_1??'—'}</td>
+      <td>${t.close_price??'—'}</td>
+      <td><span class="badge ${t.result==='WIN'?'badge-win':t.result==='LOSS'?'badge-loss':''}">${t.result||t.status}</span></td>
+      <td class="${(t.pnl_pips??0)>=0?'text-win':'text-loss'}">${t.pnl_pips!=null?t.pnl_pips.toFixed(1):'—'}</td>
+      <td class="${(t.pnl_usd??0)>=0?'text-win':'text-loss'}">${t.pnl_usd!=null?'$'+t.pnl_usd.toFixed(2):'—'}</td>
+      <td>${t.status==='ACTIVE'?`<button class="btn btn-danger btn-sm" onclick="closePaperTrade(${t.id})">Close</button>`:''}</td>
+    </tr>
+  `).join('');
+}
+
+function renderPaperEquity(equityData) {
+  const container = document.getElementById('paper-equity-canvas');
+  const card      = document.getElementById('paper-equity-card');
+  if (!container || typeof LightweightCharts === 'undefined') return;
+  card && (card.style.display = 'block');
+
+  if (paperEquityChart) { paperEquityChart.remove(); paperEquityChart = null; }
+
+  paperEquityChart = LightweightCharts.createChart(container, {
+    layout: { background: { color: '#0f1117' }, textColor: '#94a3b8' },
+    grid:   { vertLines: { color: '#1e2130' }, horzLines: { color: '#1e2130' } },
+    rightPriceScale: { borderColor: '#2d3450' },
+    timeScale: { borderColor: '#2d3450', timeVisible: true },
+    width: container.clientWidth, height: 240,
+  });
+
+  const series = paperEquityChart.addAreaSeries({
+    lineColor: '#10b981', topColor: 'rgba(16,185,129,0.2)',
+    bottomColor: 'rgba(16,185,129,0.02)', lineWidth: 2,
+    priceLineVisible: false,
+  });
+  const data = equityData
+    .map(e => ({ time: Math.floor(new Date(e.time).getTime() / 1000), value: e.equity }))
+    .filter(d => d.time > 0);
+  series.setData(data);
+  paperEquityChart.timeScale().fitContent();
+}
+
+async function closePaperTrade(id) {
+  if (!confirm(`Close paper trade #${id}?`)) return;
+  try {
+    const r = await fetchJSON(`/api/paper/close/${id}`, { method: 'POST' });
+    addActivity(`📄 Paper trade #${id} closed — ${r.pnl_usd >= 0 ? '+' : ''}$${(r.pnl_usd||0).toFixed(2)}`,
+      r.pnl_usd >= 0 ? 'success' : 'warning');
+    await refreshPaper();
+  } catch (e) { alert('Failed: ' + e); }
+}
+window.closePaperTrade = closePaperTrade;
+
+document.getElementById('paper-toggle')?.addEventListener('change', async (e) => {
+  if (e.target.checked) {
+    await fetchJSON('/api/paper/enable', { method: 'POST', body: JSON.stringify({}) });
+    addActivity('📄 Paper trading ENABLED', 'info');
+  } else {
+    await fetchJSON('/api/paper/disable', { method: 'POST' });
+    addActivity('📄 Paper trading DISABLED', 'info');
+  }
+  await refreshPaper();
+});
+
+document.getElementById('btn-paper-reset')?.addEventListener('click', async () => {
+  const bal = parseFloat(document.getElementById('paper-reset-balance')?.value || 10000);
+  if (!confirm(`Reset paper account to $${bal}? All open positions will be cancelled.`)) return;
+  await fetchJSON('/api/paper/reset', { method: 'POST', body: JSON.stringify({ balance: bal }) });
+  addActivity(`📄 Paper account reset to $${bal}`, 'info');
+  await refreshPaper();
+});
+
+document.getElementById('btn-paper-refresh')?.addEventListener('click', refreshPaper);
+
+// Handle live paper_update events from WebSocket
+function handlePaperUpdate(msg) {
+  if (msg.summary) renderPaperSummary(msg.summary);
+  if (msg.positions) renderPaperPositions(msg.positions);
+  if (msg.summary?.equity_curve) {
+    paperEquityData = msg.summary.equity_curve;
+    if (paperEquityData.length > 1) renderPaperEquity(paperEquityData);
+  }
+}
 
 // ── Backtest ──────────────────────────────────────────────────────────
 let btEquityChart = null;

@@ -504,3 +504,41 @@ body {
   outline: none;
   border-color: var(--accent);
 }
+
+/* ── Paper Trading ── */
+.paper-header-card { }
+
+.paper-toggle-row {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 16px;
+}
+.paper-mode-label { font-size: 1rem; font-weight: 600; color: var(--text-primary); }
+.paper-mode-desc  { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+
+/* Toggle switch */
+.toggle-switch { position: relative; display: inline-block; width: 48px; height: 26px; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute; cursor: pointer; inset: 0;
+  background: var(--bg-tertiary); border-radius: 26px;
+  border: 1px solid var(--border); transition: .2s;
+}
+.toggle-slider::before {
+  content: ""; position: absolute;
+  width: 18px; height: 18px; left: 3px; bottom: 3px;
+  background: var(--text-muted); border-radius: 50%; transition: .2s;
+}
+.toggle-switch input:checked + .toggle-slider { background: rgba(16,185,129,0.25); border-color: #10b981; }
+.toggle-switch input:checked + .toggle-slider::before { background: #10b981; transform: translateX(22px); }
+
+.paper-balance-row { border-top: 1px solid var(--border); padding-top: 14px; }
+.paper-account-stats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.paper-account-stats .stat-card { flex: 1 1 120px; padding: 10px 14px; }
+
+.paper-actions { display: flex; gap: 8px; align-items: center; }
+.btn-warning { background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.3); }
+.btn-warning:hover { background: rgba(245,158,11,0.25); }
+
+.paper-live-pnl { font-size: 0.85rem; font-weight: 700; margin-left: auto; padding-right: 8px; }
+.paper-pos-win  { border-left: 3px solid #10b981; }
+.paper-pos-loss { border-left: 3px solid #ef4444; }
