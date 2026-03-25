@@ -21,6 +21,7 @@ from agents import (
     TradeAnalystAgent, ConnectorAgent, JournalistAgent,
 )
 from services.forex_data import get_multi_timeframe_data, fetch_ohlcv
+from services.news_filter import get_news_filter, NewsFilter
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class Orchestrator:
         self._running  = False
         self._analysis_task: asyncio.Task | None = None
         self._monitor_task:  asyncio.Task | None = None
+        self._news: NewsFilter | None = None
 
     # ------------------------------------------------------------------ #
     #  Startup / Shutdown
@@ -47,6 +49,16 @@ class Orchestrator:
     async def start(self):
         await init_db()
         self._running = True
+
+        # Initialize news filter from config
+        async with async_session_factory() as s:
+            block_before = int(await get_config("news_block_minutes_before", s) or 30)
+            block_after  = int(await get_config("news_block_minutes_after",  s) or 30)
+            block_medium = (await get_config("news_block_medium", s) or "false").lower() == "true"
+        self._news = get_news_filter(block_before, block_after, block_medium)
+        # Pre-warm the calendar cache
+        asyncio.create_task(self._news.force_refresh())
+
         self._analysis_task = asyncio.create_task(self._analysis_loop())
         self._monitor_task  = asyncio.create_task(self._monitor_loop())
         await self.broadcast({"type": "system_started", "timestamp": datetime.utcnow().isoformat()})
@@ -104,6 +116,20 @@ class Orchestrator:
 
     async def _analyze_and_trade(self, symbol: str, config: dict, open_count: int):
         try:
+            # 0. News filter — block analysis if high-impact event is near
+            if self._news:
+                blocked, event = await self._news.is_blocked(symbol)
+                if blocked and event:
+                    msg = f"{event.title} [{event.currency}] @ {event.time.strftime('%H:%M')} UTC"
+                    await self.broadcast({
+                        "type":    "news_block",
+                        "symbol":  symbol,
+                        "event":   event.to_dict(),
+                        "message": msg,
+                    })
+                    logger.info("News block: %s — %s", symbol, msg)
+                    return
+
             # 1. Fetch market data
             market_data = await get_multi_timeframe_data(symbol)
 
@@ -410,6 +436,10 @@ class Orchestrator:
         close_price = data.get("indicators", {}).get("current_price", trade.entry_price)
         await self._close_trade(trade, close_price, reason)
         return {"success": True}
+
+    @property
+    def news_filter(self) -> NewsFilter | None:
+        return self._news
 
     async def get_status(self) -> dict:
         async with async_session_factory() as s:

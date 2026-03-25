@@ -250,6 +250,27 @@ async def trigger_analysis(data: dict | None = None):
     return {"status": "Analysis triggered", "symbol": symbol or "all pairs"}
 
 
+@app.get("/api/news")
+async def get_news(hours: int = 24, symbol: str | None = None):
+    if not orchestrator or not orchestrator.news_filter:
+        raise HTTPException(503, "System not ready")
+    events = await orchestrator.news_filter.upcoming_events(hours_ahead=hours, symbol=symbol)
+    return {
+        "events": [e.to_dict() for e in events],
+        "block_minutes_before": orchestrator.news_filter.block_minutes_before,
+        "block_minutes_after":  orchestrator.news_filter.block_minutes_after,
+        "count": len(events),
+    }
+
+
+@app.post("/api/news/refresh")
+async def refresh_news():
+    if not orchestrator or not orchestrator.news_filter:
+        raise HTTPException(503, "System not ready")
+    count = await orchestrator.news_filter.force_refresh()
+    return {"status": "refreshed", "event_count": count}
+
+
 @app.get("/api/performance")
 async def get_performance():
     async with async_session_factory() as s:

@@ -143,6 +143,11 @@ function handleMessage(msg) {
       addActivity(`⏭ ${msg.symbol}: skipped (${msg.reason})`, 'info');
       break;
 
+    case 'news_block':
+      addActivity(`📰 NEWS BLOCK: ${msg.symbol} — ${msg.message}`, 'warning');
+      showNewsBanner(msg.event);
+      break;
+
     case 'pong':
       break;
   }
@@ -208,7 +213,10 @@ function escHtml(str) {
 
 // ── Data Refresh ─────────────────────────────────────────────────────
 async function refreshAll() {
-  await Promise.all([refreshTrades(), refreshJournal(), refreshMeetings(), refreshPerformance(), refreshConfig()]);
+  await Promise.all([
+    refreshTrades(), refreshJournal(), refreshMeetings(),
+    refreshPerformance(), refreshConfig(), refreshNews(),
+  ]);
 }
 
 async function refreshTrades() {
@@ -522,6 +530,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'meetings')    refreshMeetings();
     if (tab.dataset.tab === 'performance') refreshPerformance();
     if (tab.dataset.tab === 'settings')    refreshConfig();
+    if (tab.dataset.tab === 'news')        refreshNews();
   });
 });
 
@@ -552,6 +561,112 @@ document.getElementById('btn-clear-feed')?.addEventListener('click', () => {
 document.getElementById('trades-filter')?.addEventListener('change', () => renderTradesTable(state.trades));
 
 window.closeSettingsModal = () => { document.getElementById('settings-modal').style.display = 'none'; };
+
+// ── News ─────────────────────────────────────────────────────────────
+let newsData = [];
+
+async function refreshNews() {
+  try {
+    const hours = document.getElementById('news-hours-filter')?.value || 24;
+    const data  = await fetchJSON(`/api/news?hours=${hours}`);
+    newsData = data.events || [];
+
+    // Sync settings inputs
+    const bBefore = document.getElementById('news-block-before');
+    const bAfter  = document.getElementById('news-block-after');
+    if (bBefore && data.block_minutes_before !== undefined) bBefore.value = data.block_minutes_before;
+    if (bAfter  && data.block_minutes_after  !== undefined) bAfter.value  = data.block_minutes_after;
+
+    renderNewsTable(newsData);
+    renderNewsPreview(newsData);
+  } catch (e) { console.error('refreshNews', e); }
+}
+
+function renderNewsTable(events) {
+  const tbody = document.getElementById('news-tbody');
+  if (!tbody) return;
+  if (!events.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No high-impact events in this window</td></tr>';
+    return;
+  }
+  tbody.innerHTML = events.map(e => {
+    const t    = new Date(e.time);
+    const soon = (t - Date.now()) < 30 * 60 * 1000 && (t - Date.now()) > -30 * 60 * 1000;
+    return `
+      <tr class="${soon ? 'news-row-soon' : ''}">
+        <td>${t.toUTCString().slice(5,22)}</td>
+        <td><span class="currency-badge">${e.currency}</span></td>
+        <td>${escHtml(e.title)}</td>
+        <td><span class="impact-badge impact-${e.impact.toLowerCase()}">${e.impact}</span></td>
+        <td>${e.forecast || '—'}</td>
+        <td>${e.previous || '—'}</td>
+        <td>${e.actual   || '—'}</td>
+        <td>${e.is_released
+          ? '<span class="badge badge-win">Released</span>'
+          : soon
+            ? '<span class="badge badge-warn">🔴 Soon</span>'
+            : '<span class="badge">Pending</span>'}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderNewsPreview(events) {
+  const el = document.getElementById('news-preview-list');
+  if (!el) return;
+  const now = Date.now();
+  const upcoming = events
+    .filter(e => !e.is_released && new Date(e.time) > now - 15 * 60 * 1000)
+    .slice(0, 5);
+
+  if (!upcoming.length) {
+    el.innerHTML = '<div class="empty-state">No high-impact events in the next 24h</div>';
+    return;
+  }
+  el.innerHTML = upcoming.map(e => {
+    const t    = new Date(e.time);
+    const mins = Math.round((t - now) / 60000);
+    const soon = mins >= 0 && mins <= 30;
+    return `
+      <div class="news-preview-item ${soon ? 'news-soon' : ''}">
+        <span class="currency-badge">${e.currency}</span>
+        <span class="news-title">${escHtml(e.title)}</span>
+        <span class="impact-badge impact-${e.impact.toLowerCase()}">${e.impact}</span>
+        <span class="news-time">${mins >= 0 ? `in ${mins}m` : `${-mins}m ago`}</span>
+      </div>
+    `;
+  }).join('');
+}
+
+function showNewsBanner(event) {
+  const banner = document.getElementById('news-block-banner');
+  if (!banner) return;
+  banner.style.display = 'block';
+  banner.innerHTML = `
+    📰 <strong>NEWS BLOCK ACTIVE</strong> —
+    ${escHtml(event.title)} [${event.currency}]
+    @ ${new Date(event.time).toUTCString().slice(17,22)} UTC
+    <button onclick="this.parentElement.style.display='none'" style="float:right;background:none;border:none;color:inherit;cursor:pointer">✕</button>
+  `;
+  setTimeout(() => { banner.style.display = 'none'; }, 5 * 60 * 1000);
+}
+
+async function saveNewsConfig() {
+  const before  = document.getElementById('news-block-before')?.value;
+  const after   = document.getElementById('news-block-after')?.value;
+  const medium  = document.getElementById('news-block-medium')?.value;
+  await Promise.all([
+    before !== undefined ? fetchJSON('/api/config/news_block_minutes_before', { method: 'PUT', body: JSON.stringify({ value: before }) }) : null,
+    after  !== undefined ? fetchJSON('/api/config/news_block_minutes_after',  { method: 'PUT', body: JSON.stringify({ value: after  }) }) : null,
+    medium !== undefined ? fetchJSON('/api/config/news_block_medium',          { method: 'PUT', body: JSON.stringify({ value: medium }) }) : null,
+  ].filter(Boolean));
+  addActivity('📰 News filter settings saved', 'success');
+}
+
+document.getElementById('btn-refresh-news')?.addEventListener('click', refreshNews);
+document.getElementById('btn-refresh-news-tab')?.addEventListener('click', refreshNews);
+document.getElementById('btn-save-news-config')?.addEventListener('click', saveNewsConfig);
+document.getElementById('news-hours-filter')?.addEventListener('change', refreshNews);
 
 // Keep WS alive
 setInterval(() => { if (ws?.readyState === WebSocket.OPEN) sendWS({ command: 'ping' }); }, 30000);

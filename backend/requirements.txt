@@ -10,6 +10,7 @@ pydantic>=2.9.0
 pandas>=2.2.0
 numpy>=2.1.0
 python-multipart>=0.0.12
+aiohttp>=3.10.0
 
 # Optional: live forex data (may fail on some systems — mock data is used as fallback)
 # yfinance>=0.2.40

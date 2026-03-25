@@ -116,6 +116,7 @@
         <button class="tab" data-tab="journal">📋 Journal</button>
         <button class="tab" data-tab="meetings">🗣️ Meetings</button>
         <button class="tab" data-tab="performance">📉 Performance</button>
+        <button class="tab" data-tab="news">📰 News</button>
         <button class="tab" data-tab="settings">⚙️ Settings</button>
       </div>
 
@@ -161,6 +162,17 @@
             <div id="open-trades-list">
               <div class="empty-state">No open trades</div>
             </div>
+          </div>
+        </div>
+
+        <!-- Upcoming News -->
+        <div class="card news-card">
+          <div class="card-header">
+            <h3>📰 Upcoming High-Impact News</h3>
+            <button class="btn btn-ghost btn-sm" id="btn-refresh-news">↻ Refresh</button>
+          </div>
+          <div id="news-preview-list">
+            <div class="empty-state">Loading calendar...</div>
           </div>
         </div>
 
@@ -239,6 +251,66 @@
               <tbody id="perf-tbody"></tbody>
             </table>
           </div>
+        </div>
+      </div>
+
+      <!-- News Tab -->
+      <div class="tab-content" id="tab-news">
+        <div class="card">
+          <div class="card-header">
+            <h3>📰 Economic Calendar</h3>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <select id="news-hours-filter" class="select-sm">
+                <option value="8">Next 8h</option>
+                <option value="24" selected>Next 24h</option>
+                <option value="48">Next 48h</option>
+                <option value="168">This week</option>
+              </select>
+              <button class="btn btn-ghost btn-sm" id="btn-refresh-news-tab">↻ Refresh</button>
+            </div>
+          </div>
+          <div id="news-block-banner" class="news-block-banner" style="display:none;"></div>
+          <div class="table-wrapper">
+            <table class="table" id="news-table">
+              <thead>
+                <tr>
+                  <th>Time (UTC)</th>
+                  <th>Currency</th>
+                  <th>Event</th>
+                  <th>Impact</th>
+                  <th>Forecast</th>
+                  <th>Previous</th>
+                  <th>Actual</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="news-tbody">
+                <tr><td colspan="8" class="empty-state">Loading...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><h3>⚙️ News Filter Settings</h3></div>
+          <div class="news-settings-grid">
+            <div class="form-group">
+              <label>Block minutes BEFORE event</label>
+              <input type="number" id="news-block-before" class="form-input" value="30" min="0" max="120" />
+            </div>
+            <div class="form-group">
+              <label>Block minutes AFTER event</label>
+              <input type="number" id="news-block-after" class="form-input" value="30" min="0" max="120" />
+            </div>
+            <div class="form-group">
+              <label>Block Medium-impact events</label>
+              <select id="news-block-medium" class="form-input">
+                <option value="false">No (High only)</option>
+                <option value="true">Yes (High + Medium)</option>
+              </select>
+            </div>
+          </div>
+          <button class="btn btn-primary" id="btn-save-news-config">💾 Save News Settings</button>
         </div>
       </div>
 
