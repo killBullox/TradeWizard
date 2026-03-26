@@ -75,17 +75,19 @@ class BacktestResult:
     trades:        list[SimTrade] = field(default_factory=list)
     equity:        list[dict]     = field(default_factory=list)
 
-    total_trades:  int   = 0
-    wins:          int   = 0
-    losses:        int   = 0
-    win_rate:      float = 0.0
-    total_pips:    float = 0.0
-    total_return:  float = 0.0
-    max_drawdown:  float = 0.0
-    profit_factor: float = 0.0
-    avg_rr:        float = 0.0
-    sharpe:        float = 0.0
-    expectancy:    float = 0.0
+    total_trades:    int   = 0
+    wins:            int   = 0
+    losses:          int   = 0
+    win_rate:        float = 0.0
+    total_pips:      float = 0.0
+    total_return:    float = 0.0
+    total_pnl_usd:   float = 0.0
+    max_drawdown:    float = 0.0
+    max_drawdown_usd:float = 0.0
+    profit_factor:   float = 0.0
+    avg_rr:          float = 0.0
+    sharpe:          float = 0.0
+    expectancy:      float = 0.0
 
     def compute_stats(self, pip: float):
         closed = [t for t in self.trades if t.result and t.result != "OPEN"]
@@ -96,6 +98,9 @@ class BacktestResult:
 
         pips = [t.pnl_pips for t in closed if t.pnl_pips is not None]
         self.total_pips = round(sum(pips), 1)
+
+        usd_vals = [t.pnl_usd for t in closed if t.pnl_usd is not None]
+        self.total_pnl_usd = round(sum(usd_vals), 2)
 
         gross_profit = sum(p for p in pips if p > 0)
         gross_loss   = abs(sum(p for p in pips if p < 0))
@@ -113,11 +118,14 @@ class BacktestResult:
             eq   = [e["equity"] for e in self.equity]
             peak = eq[0]
             dd   = 0.0
+            dd_usd = 0.0
             for v in eq:
                 if v > peak:
                     peak = v
-                dd = max(dd, (peak - v) / peak * 100)
-            self.max_drawdown = round(dd, 2)
+                dd     = max(dd,     (peak - v) / peak * 100)
+                dd_usd = max(dd_usd, peak - v)
+            self.max_drawdown     = round(dd, 2)
+            self.max_drawdown_usd = round(dd_usd, 2)
 
         rrs = [t.rr_actual for t in closed if t.rr_actual is not None]
         self.avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else 0.0
