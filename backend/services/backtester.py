@@ -452,6 +452,9 @@ class Backtester:
         self.pip             = (0.01 if "JPY" in symbol else
                                 1.0  if symbol in ("XAUUSD","US30","NAS100","US500") else
                                 0.0001)
+        # Dollar value of 1 pip for 1 standard lot
+        _pip_val_map = {"XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0}
+        self.pip_value = _pip_val_map.get(symbol, self.pip * 100_000)
 
     async def run(self) -> BacktestResult:
         from services.forex_data import fetch_ohlcv
@@ -545,8 +548,8 @@ class Backtester:
         if self.max_risk_usd is not None:
             risk_amount = min(risk_amount, self.max_risk_usd)
         pips_risk   = sl_dist / self.pip
-        lot_size    = round(risk_amount / (pips_risk * self.pip * 100_000), 3)
-        lot_size    = max(0.01, min(lot_size, 10.0))
+        lot_size    = round(risk_amount / (pips_risk * self.pip_value), 3)
+        lot_size    = max(0.001, min(lot_size, 100.0))
 
         label = {"FVG_BULL":"FVG↑","FVG_BEAR":"FVG↓",
                  "OB_BULL":"OB↑","OB_BEAR":"OB↓",
@@ -566,7 +569,7 @@ class Backtester:
         entry = trade.entry_price
         pips  = ((exit_price - entry) if trade.direction == "BUY" else (entry - exit_price)) / self.pip
         trade.pnl_pips = round(pips, 1)
-        pnl_usd        = pips * self.pip * trade.lot_size * 100_000
+        pnl_usd        = pips * self.pip_value * trade.lot_size
         trade.pnl_usd  = round(pnl_usd, 2)
         trade.pnl_pct  = round(pnl_usd / max(balance, 1) * 100, 3)
         sl_dist = abs(entry - trade.stop_loss) / self.pip

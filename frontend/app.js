@@ -1163,6 +1163,7 @@ function renderBtResults(run) {
         <td>${t.stop_loss}</td>
         <td>${t.take_profit}</td>
         <td>${t.exit_price ?? '—'}</td>
+        <td style="font-size:0.75rem">${t.lot_size != null ? t.lot_size.toFixed(3) : '—'}</td>
         <td>
           <span class="badge ${t.result==='WIN'?'badge-win':t.result==='LOSS'?'badge-loss':''}">
             ${t.result ?? 'OPEN'}
