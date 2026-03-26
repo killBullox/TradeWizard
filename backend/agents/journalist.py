@@ -6,7 +6,7 @@ Synthesizes insights for system self-improvement.
 
 import json
 from datetime import datetime
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, MODEL_STANDARD
 
 
 SYSTEM_PROMPT = """You are the Journalist (JR) — the institutional memory and performance analyst
@@ -85,6 +85,7 @@ class JournalistAgent(BaseAgent):
     name = "JR"
     emoji = "📝"
     color = "#92400E"
+    model = MODEL_STANDARD
 
     async def journal_trade_open(self, trade: dict, analysis: dict) -> dict:
         await self.broadcast_status("JOURNALING", f"Documenting trade open: {trade.get('symbol')}...")

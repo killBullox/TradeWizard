@@ -1,6 +1,6 @@
 """
 BaseAgent — shared interface for all TradeWizard agents.
-Each agent wraps a Claude claude-opus-4-6 call with its own system prompt.
+Each agent wraps a Claude call with its own system prompt.
 """
 
 import json
@@ -12,13 +12,17 @@ import anthropic
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-opus-4-6"
+# Model assignments by role — balance quality vs cost
+MODEL_ANALYST  = "claude-opus-4-6"       # ICT Advisor: needs deep reasoning
+MODEL_STANDARD = "claude-haiku-4-5-20251001"  # RM, Trader, AT, Journalist: fast & cheap
+MODEL = MODEL_ANALYST  # default fallback
 
 
 class BaseAgent:
     name: str = "BaseAgent"
     emoji: str = "🤖"
     color: str = "#666666"
+    model: str = MODEL_ANALYST   # override per-agent to MODEL_STANDARD to save cost
 
     def __init__(self, broadcast_fn: Optional[Callable[[dict], Awaitable[None]]] = None):
         self.client = anthropic.AsyncAnthropic(
@@ -46,13 +50,15 @@ class BaseAgent:
             "timestamp": datetime.utcnow().isoformat(),
         })
 
+        # Haiku doesn't support extended thinking — disable it automatically
+        supports_thinking = "opus" in self.model or "sonnet" in self.model
         kwargs: dict[str, Any] = {
-            "model": MODEL,
+            "model": self.model,
             "max_tokens": max_tokens,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_message}],
         }
-        if use_thinking:
+        if use_thinking and supports_thinking:
             kwargs["thinking"] = {"type": "adaptive"}
 
         response = await self.client.messages.create(**kwargs)

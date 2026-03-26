@@ -4,7 +4,7 @@ Generates precise trade execution parameters from ICTEA strategy + RM approval.
 """
 
 import json
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, MODEL_STANDARD
 
 
 SYSTEM_PROMPT = """You are the Trader (TR) — a precision trade execution specialist.
@@ -62,6 +62,7 @@ class TraderAgent(BaseAgent):
     name = "TR"
     emoji = "💹"
     color = "#059669"
+    model = MODEL_STANDARD
 
     async def generate_trade(
         self,

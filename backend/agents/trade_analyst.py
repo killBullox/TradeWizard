@@ -5,7 +5,7 @@ Validates proposed trades and monitors live trades for management decisions
 """
 
 import json
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, MODEL_STANDARD
 
 
 SYSTEM_PROMPT = """You are the Trade Analyst (AT) — the final gatekeeper and active trade manager.
@@ -60,6 +60,7 @@ class TradeAnalystAgent(BaseAgent):
     name = "AT"
     emoji = "🔬"
     color = "#7C3AED"
+    model = MODEL_STANDARD
 
     async def validate_trade(
         self,

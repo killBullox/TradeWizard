@@ -4,7 +4,7 @@ Evaluates risk for each proposed trade strategy.
 """
 
 import json
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, MODEL_STANDARD
 
 
 SYSTEM_PROMPT = """You are the Risk Manager (RM) for a professional forex trading operation.
@@ -83,6 +83,7 @@ class RiskManagerAgent(BaseAgent):
     name = "RM"
     emoji = "⚖️"
     color = "#DC2626"
+    model = MODEL_STANDARD
 
     async def evaluate(
         self,

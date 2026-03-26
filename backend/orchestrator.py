@@ -104,15 +104,23 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     #  Main Analysis Loop  (runs every analysis_interval seconds)
     # ------------------------------------------------------------------ #
+    def _in_kill_zone(self) -> bool:
+        """Return True only during ICT Kill Zones (UTC): London 07-10, NY 12-15."""
+        hour = datetime.utcnow().hour
+        return (7 <= hour < 10) or (12 <= hour < 15)
+
     async def _analysis_loop(self):
         # Brief startup delay so the WS clients can connect first
         await asyncio.sleep(10)
         while self._running:
-            try:
-                await self._run_analysis_cycle()
-            except Exception as e:
-                logger.error(f"Analysis loop error: {e}", exc_info=True)
-                await self.broadcast({"type": "error", "message": str(e)})
+            if self._in_kill_zone():
+                try:
+                    await self._run_analysis_cycle()
+                except Exception as e:
+                    logger.error(f"Analysis loop error: {e}", exc_info=True)
+                    await self.broadcast({"type": "error", "message": str(e)})
+            else:
+                logger.info("Outside Kill Zone — skipping analysis cycle")
             await asyncio.sleep(await self._get_interval())
 
     async def _get_interval(self) -> int:
