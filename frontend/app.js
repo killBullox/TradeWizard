@@ -1134,13 +1134,13 @@ function renderBtResults(run) {
       <div class="stat-card ${wr>=55?'win':''}"><div class="stat-value">${wr.toFixed(1)}%</div><div class="stat-label">Win Rate</div></div>
       <div class="stat-card"><div class="stat-value ${(run.total_pips??0)>=0?'text-win':'text-loss'}">${(run.total_pips??0).toFixed(1)}</div><div class="stat-label">Total Pips</div></div>
       <div class="stat-card">
-        <div class="stat-value ${ret>=0?'text-win':'text-loss'}">${ret.toFixed(2)}%</div>
-        <div class="stat-sub ${pnl>=0?'text-win':'text-loss'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div>
+        <div class="stat-value ${pnl>=0?'text-win':'text-loss'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div>
+        <div class="stat-sub ${ret>=0?'text-win':'text-loss'}">${ret.toFixed(2)}%</div>
         <div class="stat-label">Return</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value text-loss">${dd.toFixed(2)}%</div>
-        <div class="stat-sub text-loss">-$${ddUsd.toFixed(2)}</div>
+        <div class="stat-value text-loss">-$${ddUsd.toFixed(2)}</div>
+        <div class="stat-sub text-loss">${dd.toFixed(2)}%</div>
         <div class="stat-label">Max DD</div>
       </div>
       <div class="stat-card"><div class="stat-value">${pf === 999 ? '∞' : pf.toFixed(2)}</div><div class="stat-label">Profit Factor</div></div>
