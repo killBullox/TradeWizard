@@ -1142,6 +1142,9 @@ function renderBtResults(run) {
     renderBtEquity(run.equity);
   }
 
+  // By setup breakdown
+  if (run.trades) renderBtBySetup(run.trades);
+
   // Trades table
   const tbody = document.getElementById('bt-trades-tbody');
   const cnt   = document.getElementById('bt-trade-count');
@@ -1169,6 +1172,45 @@ function renderBtResults(run) {
       </tr>
     `).join('');
   }
+}
+
+function renderBtBySetup(trades) {
+  const tbody = document.getElementById('bt-setup-tbody');
+  if (!tbody) return;
+  const closed = trades.filter(t => t.result === 'WIN' || t.result === 'LOSS');
+  if (!closed.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No closed trades</td></tr>'; return; }
+
+  // Group by setup
+  const groups = {};
+  for (const t of closed) {
+    const s = t.setup || '—';
+    if (!groups[s]) groups[s] = { trades: 0, wins: 0, losses: 0, pips: 0, usd: 0, rrs: [] };
+    groups[s].trades++;
+    if (t.result === 'WIN') groups[s].wins++;
+    else groups[s].losses++;
+    groups[s].pips += t.pnl_pips ?? 0;
+    groups[s].usd  += t.pnl_usd  ?? 0;
+    if (t.rr_actual != null) groups[s].rrs.push(t.rr_actual);
+  }
+
+  tbody.innerHTML = Object.entries(groups)
+    .sort((a, b) => b[1].trades - a[1].trades)
+    .map(([setup, g]) => {
+      const wr     = g.trades ? (g.wins / g.trades * 100).toFixed(1) : '0.0';
+      const avgRR  = g.rrs.length ? (g.rrs.reduce((a,b) => a+b, 0) / g.rrs.length).toFixed(2) : '—';
+      const pClass = g.pips >= 0 ? 'text-win' : 'text-loss';
+      const uClass = g.usd  >= 0 ? 'text-win' : 'text-loss';
+      return `<tr>
+        <td><span class="badge">${setup}</span></td>
+        <td>${g.trades}</td>
+        <td class="text-win">${g.wins}</td>
+        <td class="text-loss">${g.losses}</td>
+        <td class="${parseFloat(wr) >= 50 ? 'text-win' : 'text-loss'}">${wr}%</td>
+        <td class="${pClass}">${g.pips.toFixed(1)}</td>
+        <td class="${uClass}">${g.usd >= 0 ? '+' : ''}$${g.usd.toFixed(2)}</td>
+        <td>${avgRR}</td>
+      </tr>`;
+    }).join('');
 }
 
 function renderBtEquity(equityData) {
