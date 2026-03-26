@@ -1152,6 +1152,8 @@ function renderBtResults(run) {
         <td>${i + 1}</td>
         <td><span class="badge">${t.setup}</span></td>
         <td class="${t.direction==='BUY'?'text-win':'text-loss'}">${t.direction}</td>
+        <td style="font-size:0.72rem;white-space:nowrap">${fmtDate(t.entry_time)}</td>
+        <td style="font-size:0.72rem;white-space:nowrap">${t.exit_time ? fmtDate(t.exit_time) : '—'}</td>
         <td>${t.entry_price}</td>
         <td>${t.stop_loss}</td>
         <td>${t.take_profit}</td>
