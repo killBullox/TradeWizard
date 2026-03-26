@@ -345,40 +345,46 @@ async def refresh_news():
 
 @app.post("/api/backtest/run")
 async def backtest_run(data: dict):
-    symbol       = data.get("symbol", "EURUSD").upper()
-    timeframe    = data.get("timeframe", "H1")
-    strategy     = data.get("strategy", "Mixed")
-    bars         = int(data.get("bars", 500))
-    risk_percent = float(data.get("risk_percent", 1.0))
-    rr_ratio     = float(data.get("rr_ratio", 2.0))
-    balance      = float(data.get("initial_balance", 10000.0))
-    max_risk_usd    = float(data["max_risk_usd"]) if data.get("max_risk_usd") else None
-    enabled_setups  = data.get("enabled_setups") or None  # list or None
+    try:
+        symbol       = data.get("symbol", "EURUSD").upper()
+        timeframe    = data.get("timeframe", "H1")
+        strategy     = data.get("strategy", "Mixed")
+        bars         = int(data.get("bars", 500))
+        risk_percent = float(data.get("risk_percent", 1.0))
+        rr_ratio     = float(data.get("rr_ratio", 2.0))
+        balance      = float(data.get("initial_balance", 10000.0))
+        max_risk_usd    = float(data["max_risk_usd"]) if data.get("max_risk_usd") else None
+        enabled_setups  = data.get("enabled_setups") or None  # list or None
 
-    valid_tf = {"M5","M15","M30","H1","H4","D1"}
-    valid_st = {"FVG","OrderBlock","Liquidity","Mixed"}
-    if timeframe not in valid_tf:
-        raise HTTPException(400, f"timeframe must be one of {valid_tf}")
-    if strategy not in valid_st:
-        raise HTTPException(400, f"strategy must be one of {valid_st}")
+        valid_tf = {"M5","M15","M30","H1","H4","D1"}
+        valid_st = {"FVG","OrderBlock","Liquidity","Mixed"}
+        if timeframe not in valid_tf:
+            raise HTTPException(400, f"timeframe must be one of {valid_tf}")
+        if strategy not in valid_st:
+            raise HTTPException(400, f"strategy must be one of {valid_st}")
 
-    # Create DB record
-    async with async_session_factory() as s:
-        run = BacktestRun(
-            symbol=symbol, timeframe=timeframe, strategy=strategy,
-            bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
-        )
-        s.add(run)
-        await s.commit()
-        await s.refresh(run)
-        run_id = run.id
+        # Create DB record
+        async with async_session_factory() as s:
+            run = BacktestRun(
+                symbol=symbol, timeframe=timeframe, strategy=strategy,
+                bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
+            )
+            s.add(run)
+            await s.commit()
+            await s.refresh(run)
+            run_id = run.id
 
-    # Execute in background so the HTTP call returns quickly
-    asyncio.create_task(_exec_backtest(
-        run_id, symbol, timeframe, strategy, bars,
-        risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups
-    ))
-    return {"run_id": run_id, "status": "RUNNING"}
+        # Execute in background so the HTTP call returns quickly
+        asyncio.create_task(_exec_backtest(
+            run_id, symbol, timeframe, strategy, bars,
+            risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups
+        ))
+        return {"run_id": run_id, "status": "RUNNING"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("backtest_run failed: %s", exc, exc_info=True)
+        raise HTTPException(500, str(exc))
 
 
 async def _exec_backtest(
