@@ -156,10 +156,25 @@ class MarketSession(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+def _migrate_backtest_runs(conn):
+    """Add columns that may be missing from older DB versions."""
+    from sqlalchemy import text as _text
+    new_cols = [
+        ("total_pnl_usd",    "FLOAT"),
+        ("max_drawdown_usd", "FLOAT"),
+    ]
+    cur = conn.execute(_text("PRAGMA table_info(backtest_runs)"))
+    existing = {row[1] for row in cur.fetchall()}
+    for col_name, col_type in new_cols:
+        if col_name not in existing:
+            conn.execute(_text(f"ALTER TABLE backtest_runs ADD COLUMN {col_name} {col_type}"))
+
+
 async def init_db():
     """Initialize the database, creating all tables."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_migrate_backtest_runs)
 
     # Insert default config values
     async with async_session_factory() as session:
