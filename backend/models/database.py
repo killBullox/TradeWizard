@@ -131,8 +131,10 @@ class BacktestRun(Base):
     losses       = Column(Integer, nullable=True)
     win_rate     = Column(Float,   nullable=True)
     total_pips   = Column(Float,   nullable=True)
-    total_return = Column(Float,   nullable=True)   # % return
-    max_drawdown = Column(Float,   nullable=True)   # % drawdown
+    total_return     = Column(Float, nullable=True)   # % return
+    total_pnl_usd    = Column(Float, nullable=True)   # $ profit/loss
+    max_drawdown     = Column(Float, nullable=True)   # % drawdown
+    max_drawdown_usd = Column(Float, nullable=True)   # $ drawdown
     profit_factor = Column(Float,  nullable=True)
     avg_rr       = Column(Float,   nullable=True)
     sharpe       = Column(Float,   nullable=True)

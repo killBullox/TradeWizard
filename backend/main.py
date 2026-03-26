@@ -401,8 +401,10 @@ async def _exec_backtest(
                 run.losses        = result.losses
                 run.win_rate      = result.win_rate
                 run.total_pips    = result.total_pips
-                run.total_return  = result.total_return
-                run.max_drawdown  = result.max_drawdown
+                run.total_return     = result.total_return
+                run.total_pnl_usd    = result.total_pnl_usd
+                run.max_drawdown     = result.max_drawdown
+                run.max_drawdown_usd = result.max_drawdown_usd
                 run.profit_factor = result.profit_factor if result.profit_factor != float("inf") else 999.0
                 run.avg_rr        = result.avg_rr
                 run.sharpe        = result.sharpe
@@ -544,8 +546,10 @@ def _bt_to_dict(r: BacktestRun) -> dict:
         "losses":       r.losses,
         "win_rate":     r.win_rate,
         "total_pips":   r.total_pips,
-        "total_return": r.total_return,
-        "max_drawdown": r.max_drawdown,
+        "total_return":     r.total_return,
+        "total_pnl_usd":    r.total_pnl_usd,
+        "max_drawdown":     r.max_drawdown,
+        "max_drawdown_usd": r.max_drawdown_usd,
         "profit_factor":r.profit_factor,
         "avg_rr":       r.avg_rr,
         "sharpe":       r.sharpe,
