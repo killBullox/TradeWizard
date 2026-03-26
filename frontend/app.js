@@ -1176,8 +1176,10 @@ function renderBtResults(run) {
 
 function renderBtBySetup(trades) {
   const tbody = document.getElementById('bt-setup-tbody');
+  console.log('[BtBySetup] tbody found:', !!tbody, '| trades:', trades?.length, '| sample result:', trades?.[0]?.result);
   if (!tbody) return;
   const closed = trades.filter(t => t.result === 'WIN' || t.result === 'LOSS');
+  console.log('[BtBySetup] closed trades:', closed.length);
   if (!closed.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No closed trades</td></tr>'; return; }
 
   // Group by setup
