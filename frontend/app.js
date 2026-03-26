@@ -1059,7 +1059,8 @@ let currentBtRunId = null;
 let btPollTimer = null;
 
 async function runBacktest() {
-  const maxRiskVal = document.getElementById('bt-max-risk-usd')?.value;
+  const maxRiskVal    = document.getElementById('bt-max-risk-usd')?.value;
+  const checkedSetups = [...document.querySelectorAll('.bt-setup-chk:checked')].map(el => el.value);
   const payload = {
     symbol:          document.getElementById('bt-symbol')?.value  || 'EURUSD',
     timeframe:       document.getElementById('bt-tf')?.value      || 'H1',
@@ -1069,6 +1070,7 @@ async function runBacktest() {
     rr_ratio:        parseFloat(document.getElementById('bt-rr')?.value    || 2.0),
     initial_balance: parseFloat(document.getElementById('bt-balance')?.value || 10000),
     max_risk_usd:    maxRiskVal ? parseFloat(maxRiskVal) : null,
+    enabled_setups:  checkedSetups.length === 6 ? null : checkedSetups,
   };
 
   setBtStatus('running', '⏳ Running…');
@@ -1176,10 +1178,8 @@ function renderBtResults(run) {
 
 function renderBtBySetup(trades) {
   const tbody = document.getElementById('bt-setup-tbody');
-  console.log('[BtBySetup] tbody found:', !!tbody, '| trades:', trades?.length, '| sample result:', trades?.[0]?.result);
   if (!tbody) return;
   const closed = trades.filter(t => t.result === 'WIN' || t.result === 'LOSS');
-  console.log('[BtBySetup] closed trades:', closed.length);
   if (!closed.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No closed trades</td></tr>'; return; }
 
   // Group by setup

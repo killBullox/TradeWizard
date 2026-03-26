@@ -438,7 +438,7 @@ class ICTAnalyzer:
 class Backtester:
     def __init__(self, symbol, timeframe, strategy="Mixed", bars=500,
                  risk_percent=1.0, rr_ratio=2.0, initial_balance=10_000.0,
-                 max_risk_usd=None):
+                 max_risk_usd=None, enabled_setups=None):
         self.symbol          = symbol
         self.timeframe       = timeframe
         self.strategy        = strategy
@@ -447,6 +447,8 @@ class Backtester:
         self.rr_ratio        = rr_ratio
         self.initial_balance = initial_balance
         self.max_risk_usd    = max_risk_usd  # None = no cap
+        # None = all setups enabled; otherwise a set of sig type strings
+        self.enabled_setups  = set(enabled_setups) if enabled_setups else None
         self.pip             = (0.01 if "JPY" in symbol else
                                 1.0  if symbol in ("XAUUSD","US30","NAS100","US500") else
                                 0.0001)
@@ -467,6 +469,8 @@ class Backtester:
                                   risk_percent=self.risk_percent, rr_ratio=self.rr_ratio)
         analyzer = ICTAnalyzer(candles, self.symbol, self.timeframe, self.strategy)
         signals  = analyzer.build_signals()
+        if self.enabled_setups:
+            signals = [s for s in signals if s["type"] in self.enabled_setups]
         sig_map: dict[int, list[dict]] = {}
         for sig in signals:
             sig_map.setdefault(sig["bar"], []).append(sig)
@@ -575,7 +579,9 @@ class Backtester:
 
 async def run_backtest(symbol, timeframe="H1", strategy="Mixed",
                        bars=500, risk_percent=1.0, rr_ratio=2.0,
-                       initial_balance=10_000.0, max_risk_usd=None) -> BacktestResult:
+                       initial_balance=10_000.0, max_risk_usd=None,
+                       enabled_setups=None) -> BacktestResult:
     return await Backtester(symbol=symbol, timeframe=timeframe, strategy=strategy,
                             bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
-                            initial_balance=initial_balance, max_risk_usd=max_risk_usd).run()
+                            initial_balance=initial_balance, max_risk_usd=max_risk_usd,
+                            enabled_setups=enabled_setups).run()

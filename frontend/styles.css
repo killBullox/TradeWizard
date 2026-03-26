@@ -604,3 +604,19 @@ body {
 .an-hour-bar-fill.positive { background: rgba(16,185,129,0.6); }
 .an-hour-bar-fill.negative { background: rgba(239,68,68,0.55); }
 .an-hour-bar-label { font-size: 0.55rem; color: var(--text-muted); margin-top: 3px; transform: rotate(-45deg); }
+
+/* Setup filter checkboxes */
+.setup-checks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.check-pill {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 12px; border-radius: 20px; cursor: pointer;
+  font-size: 0.82rem; font-weight: 500; user-select: none;
+  border: 1px solid var(--border); background: var(--bg-tertiary);
+  color: var(--text-secondary); transition: all 0.15s;
+}
+.check-pill:hover { border-color: var(--accent); color: var(--text-primary); }
+.check-pill input[type="checkbox"] { display: none; }
+.check-pill:has(input:checked) {
+  background: rgba(99,102,241,0.18); border-color: var(--accent);
+  color: var(--text-primary);
+}

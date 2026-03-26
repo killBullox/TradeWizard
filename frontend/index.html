@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TradeWizard — Multi-Agent ICT Forex</title>
-  <link rel="stylesheet" href="/static/styles.css?v=2" />
+  <link rel="stylesheet" href="/static/styles.css?v=3" />
   <!-- Lightweight Charts v4 (TradingView OSS) -->
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
@@ -476,6 +476,19 @@
               <input type="number" id="bt-max-risk-usd" class="form-input" placeholder="No cap" min="1" step="10" />
             </div>
           </div>
+          <!-- Setup filter -->
+          <div class="form-group" style="grid-column:1/-1">
+            <label>Setups to test</label>
+            <div class="setup-checks">
+              <label class="check-pill"><input type="checkbox" class="bt-setup-chk" value="FVG_BULL"  checked> FVG ↑</label>
+              <label class="check-pill"><input type="checkbox" class="bt-setup-chk" value="FVG_BEAR"  checked> FVG ↓</label>
+              <label class="check-pill"><input type="checkbox" class="bt-setup-chk" value="OB_BULL"   checked> OB ↑</label>
+              <label class="check-pill"><input type="checkbox" class="bt-setup-chk" value="OB_BEAR"   checked> OB ↓</label>
+              <label class="check-pill"><input type="checkbox" class="bt-setup-chk" value="LIQ_BULL"  checked> Liq ↑</label>
+              <label class="check-pill"><input type="checkbox" class="bt-setup-chk" value="LIQ_BEAR"  checked> Liq ↓</label>
+            </div>
+          </div>
+
           <button class="btn btn-primary" id="btn-bt-run">▶ Run Backtest</button>
           <span id="bt-run-status" style="margin-left:12px;font-size:0.8rem;color:var(--text-muted)"></span>
         </div>
@@ -658,6 +671,6 @@
   </div>
 
   <script src="/static/charts.js"></script>
-  <script src="/static/app.js?v=2"></script>
+  <script src="/static/app.js?v=3"></script>
 </body>
 </html>
