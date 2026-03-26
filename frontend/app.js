@@ -416,13 +416,38 @@ function renderPerformance(perf) {
 function renderConfig(cfg) {
   const form = document.getElementById('config-form');
   if (!form) return;
+
   const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval'];
+  const paperOn  = cfg['paper_mode'] === 'true' || cfg['paper_mode'] === true;
+
+  const ALL_PAIRS = ['EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','USDCAD','NZDUSD','XAUUSD','US30','NAS100','US500'];
+  let enabledPairs = [];
+  try { enabledPairs = JSON.parse(cfg['enabled_pairs'] || '[]'); } catch(e) {}
+
   form.innerHTML = editable.map(key => `
     <div class="config-field">
       <label>${key.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase())}</label>
       <input type="text" id="cfg-${key}" value="${escHtml(cfg[key]||'')}" />
     </div>
-  `).join('');
+  `).join('') + `
+    <div class="config-field" style="grid-column:1/-1">
+      <label>Paper Mode</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="cfg-paper_mode" ${paperOn ? 'checked' : ''}>
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+    <div class="config-field" style="grid-column:1/-1">
+      <label>Enabled Pairs</label>
+      <div class="setup-checks" id="cfg-pairs-grid">
+        ${ALL_PAIRS.map(p => `
+          <label class="check-pill">
+            <input type="checkbox" class="cfg-pair-chk" value="${p}" ${enabledPairs.includes(p)?'checked':''}>
+            ${p}
+          </label>`).join('')}
+      </div>
+    </div>
+  `;
 }
 
 function renderPairsGrid() {
@@ -506,7 +531,18 @@ async function saveConfig() {
     if (!el) continue;
     await fetchJSON(`/api/config/${key}`, { method: 'PUT', body: JSON.stringify({ value: el.value }) });
   }
+  // Paper mode toggle
+  const paperEl = document.getElementById('cfg-paper_mode');
+  if (paperEl) {
+    await fetchJSON('/api/config/paper_mode', { method: 'PUT', body: JSON.stringify({ value: paperEl.checked ? 'true' : 'false' }) });
+  }
+  // Enabled pairs
+  const checked = [...document.querySelectorAll('.cfg-pair-chk:checked')].map(el => el.value);
+  if (checked.length) {
+    await fetchJSON('/api/config/enabled_pairs', { method: 'PUT', body: JSON.stringify({ value: JSON.stringify(checked) }) });
+  }
   addActivity('⚙️ Configuration saved', 'success');
+  await refreshConfig();
 }
 
 // ── Utility ───────────────────────────────────────────────────────────
