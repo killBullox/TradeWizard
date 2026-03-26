@@ -103,10 +103,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static frontend files
+# Serve static frontend files — no-cache headers so browser always gets latest
 frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
 if os.path.exists(frontend_dir):
-    app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+    from fastapi.responses import FileResponse
+    from fastapi import Response
+
+    @app.get("/static/{file_path:path}")
+    async def static_files(file_path: str, response: Response):
+        full = os.path.join(frontend_dir, file_path)
+        if not os.path.exists(full):
+            raise HTTPException(404, "Not found")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        return FileResponse(full)
 
 
 # ------------------------------------------------------------------ #
