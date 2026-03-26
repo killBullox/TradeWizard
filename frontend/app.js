@@ -1059,6 +1059,7 @@ let currentBtRunId = null;
 let btPollTimer = null;
 
 async function runBacktest() {
+  const maxRiskVal = document.getElementById('bt-max-risk-usd')?.value;
   const payload = {
     symbol:          document.getElementById('bt-symbol')?.value  || 'EURUSD',
     timeframe:       document.getElementById('bt-tf')?.value      || 'H1',
@@ -1067,6 +1068,7 @@ async function runBacktest() {
     risk_percent:    parseFloat(document.getElementById('bt-risk')?.value  || 1.0),
     rr_ratio:        parseFloat(document.getElementById('bt-rr')?.value    || 2.0),
     initial_balance: parseFloat(document.getElementById('bt-balance')?.value || 10000),
+    max_risk_usd:    maxRiskVal ? parseFloat(maxRiskVal) : null,
   };
 
   setBtStatus('running', '⏳ Running…');
@@ -1160,6 +1162,7 @@ function renderBtResults(run) {
           </span>
         </td>
         <td class="${(t.pnl_pips??0)>=0?'text-win':'text-loss'}">${t.pnl_pips!=null?t.pnl_pips.toFixed(1):'—'}</td>
+        <td class="${(t.pnl_usd??0)>=0?'text-win':'text-loss'}">${t.pnl_usd!=null?'$'+t.pnl_usd.toFixed(2):'—'}</td>
         <td>${t.rr_actual!=null?t.rr_actual.toFixed(2):'—'}</td>
       </tr>
     `).join('');

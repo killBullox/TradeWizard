@@ -352,6 +352,7 @@ async def backtest_run(data: dict):
     risk_percent = float(data.get("risk_percent", 1.0))
     rr_ratio     = float(data.get("rr_ratio", 2.0))
     balance      = float(data.get("initial_balance", 10000.0))
+    max_risk_usd = float(data["max_risk_usd"]) if data.get("max_risk_usd") else None
 
     valid_tf = {"M5","M15","M30","H1","H4","D1"}
     valid_st = {"FVG","OrderBlock","Liquidity","Mixed"}
@@ -374,20 +375,20 @@ async def backtest_run(data: dict):
     # Execute in background so the HTTP call returns quickly
     asyncio.create_task(_exec_backtest(
         run_id, symbol, timeframe, strategy, bars,
-        risk_percent, rr_ratio, balance
+        risk_percent, rr_ratio, balance, max_risk_usd
     ))
     return {"run_id": run_id, "status": "RUNNING"}
 
 
 async def _exec_backtest(
     run_id, symbol, timeframe, strategy, bars,
-    risk_percent, rr_ratio, balance
+    risk_percent, rr_ratio, balance, max_risk_usd=None
 ):
     try:
         result = await run_backtest(
             symbol=symbol, timeframe=timeframe, strategy=strategy,
             bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
-            initial_balance=balance,
+            initial_balance=balance, max_risk_usd=max_risk_usd,
         )
         async with async_session_factory() as s:
             run = await s.get(BacktestRun, run_id)

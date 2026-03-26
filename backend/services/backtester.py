@@ -58,6 +58,7 @@ class SimTrade:
     result:      Optional[str]   = None
     pnl_pips:    Optional[float] = None
     pnl_pct:     Optional[float] = None
+    pnl_usd:     Optional[float] = None
     rr_actual:   Optional[float] = None
     confluence:  Optional[list]  = None
 
@@ -436,7 +437,8 @@ class ICTAnalyzer:
 
 class Backtester:
     def __init__(self, symbol, timeframe, strategy="Mixed", bars=500,
-                 risk_percent=1.0, rr_ratio=2.0, initial_balance=10_000.0):
+                 risk_percent=1.0, rr_ratio=2.0, initial_balance=10_000.0,
+                 max_risk_usd=None):
         self.symbol          = symbol
         self.timeframe       = timeframe
         self.strategy        = strategy
@@ -444,6 +446,7 @@ class Backtester:
         self.risk_percent    = risk_percent
         self.rr_ratio        = rr_ratio
         self.initial_balance = initial_balance
+        self.max_risk_usd    = max_risk_usd  # None = no cap
         self.pip             = (0.01 if "JPY" in symbol else
                                 1.0  if symbol in ("XAUUSD","US30","NAS100","US500") else
                                 0.0001)
@@ -535,6 +538,8 @@ class Backtester:
             return None
 
         risk_amount = balance * self.risk_percent / 100
+        if self.max_risk_usd is not None:
+            risk_amount = min(risk_amount, self.max_risk_usd)
         pips_risk   = sl_dist / self.pip
         lot_size    = round(risk_amount / (pips_risk * self.pip * 100_000), 3)
         lot_size    = max(0.01, min(lot_size, 10.0))
@@ -558,6 +563,7 @@ class Backtester:
         pips  = ((exit_price - entry) if trade.direction == "BUY" else (entry - exit_price)) / self.pip
         trade.pnl_pips = round(pips, 1)
         pnl_usd        = pips * self.pip * trade.lot_size * 100_000
+        trade.pnl_usd  = round(pnl_usd, 2)
         trade.pnl_pct  = round(pnl_usd / max(balance, 1) * 100, 3)
         sl_dist = abs(entry - trade.stop_loss) / self.pip
         if sl_dist > 0:
@@ -569,7 +575,7 @@ class Backtester:
 
 async def run_backtest(symbol, timeframe="H1", strategy="Mixed",
                        bars=500, risk_percent=1.0, rr_ratio=2.0,
-                       initial_balance=10_000.0) -> BacktestResult:
+                       initial_balance=10_000.0, max_risk_usd=None) -> BacktestResult:
     return await Backtester(symbol=symbol, timeframe=timeframe, strategy=strategy,
                             bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
-                            initial_balance=initial_balance).run()
+                            initial_balance=initial_balance, max_risk_usd=max_risk_usd).run()
