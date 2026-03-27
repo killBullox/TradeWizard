@@ -362,12 +362,22 @@ class Orchestrator:
         cc_result = await self.cc.close_trade(trade.mt5_ticket or "", trade.symbol)
 
         entry = trade.entry_price or 0
-        pip_val = 0.0001 if "JPY" not in trade.symbol else 0.01
+        sym = trade.symbol
+        pip_val = 0.01 if "JPY" in sym else (1.0 if sym in ("XAUUSD","US30","NAS100","US500") else 0.0001)
         if trade.direction == "BUY":
             pnl_pips = (close_price - entry) / pip_val
         else:
             pnl_pips = (entry - close_price) / pip_val
-        pnl_usd = pnl_pips * pip_val * (trade.lot_size or 1) * 100000
+        # USD value per pip per lot — JPY pairs need /rate correction
+        _pip_usd = {
+            "XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0,
+            "USDJPY": 6.5,  "EURJPY": 6.5,  "GBPJPY": 6.5,  "AUDJPY": 6.5,
+            "CHFJPY": 6.5,  "CADJPY": 6.5,  "NZDJPY": 6.5,
+            "USDCHF": 11.0, "EURCHF": 11.0, "GBPCHF": 11.0,
+            "USDCAD": 7.25, "EURCAD": 7.25, "GBPCAD": 7.25,
+        }
+        pip_value_usd = _pip_usd.get(sym, 10.0)  # default $10/pip/lot for USD-quote pairs
+        pnl_usd = pnl_pips * pip_value_usd * (trade.lot_size or 1)
 
         result_str = "WIN" if pnl_usd > 0 else ("LOSS" if pnl_usd < 0 else "BREAKEVEN")
 

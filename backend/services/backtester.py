@@ -461,8 +461,15 @@ class Backtester:
                                 1.0  if symbol in ("XAUUSD","US30","NAS100","US500") else
                                 0.0001)
         # Dollar value of 1 pip for 1 standard lot
-        _pip_val_map = {"XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0}
-        self.pip_value = _pip_val_map.get(symbol, self.pip * 100_000)
+        # JPY pairs: 1000 JPY/pip ÷ ~155 rate ≈ $6.50; CHF: ÷0.90 ≈ $11; CAD: ÷1.38 ≈ $7.25
+        _pip_val_map = {
+            "XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0,
+            "USDJPY": 6.5,  "EURJPY": 6.5,  "GBPJPY": 6.5,  "AUDJPY": 6.5,
+            "CHFJPY": 6.5,  "CADJPY": 6.5,  "NZDJPY": 6.5,
+            "USDCHF": 11.0, "EURCHF": 11.0, "GBPCHF": 11.0,
+            "USDCAD": 7.25, "EURCAD": 7.25, "GBPCAD": 7.25,
+        }
+        self.pip_value = _pip_val_map.get(symbol, 10.0)  # default $10/pip/lot for USD-quote pairs
 
     async def run(self) -> BacktestResult:
         from services.forex_data import fetch_ohlcv

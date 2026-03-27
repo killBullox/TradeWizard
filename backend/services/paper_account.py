@@ -224,16 +224,26 @@ class PaperAccount:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    _PIP_USD = {
+        "XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0,
+        "USDJPY": 6.5,  "EURJPY": 6.5,  "GBPJPY": 6.5,  "AUDJPY": 6.5,
+        "CHFJPY": 6.5,  "CADJPY": 6.5,  "NZDJPY": 6.5,
+        "USDCHF": 11.0, "EURCHF": 11.0, "GBPCHF": 11.0,
+        "USDCAD": 7.25, "EURCAD": 7.25, "GBPCAD": 7.25,
+    }
+
     @staticmethod
     def _calc_pnl(pos: dict, current_price: float) -> dict:
-        pip     = 0.0001 if "JPY" not in pos["symbol"] else 0.01
-        entry   = pos["entry_price"]
-        lots    = pos.get("lot_size", 0.01)
+        sym   = pos["symbol"]
+        pip   = 0.01 if "JPY" in sym else (1.0 if sym in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+        entry = pos["entry_price"]
+        lots  = pos.get("lot_size", 0.01)
         if pos["direction"] == "BUY":
             pips = (current_price - entry) / pip
         else:
             pips = (entry - current_price) / pip
-        usd = pips * pip * lots * 100_000
+        pip_value_usd = PaperAccount._PIP_USD.get(sym, 10.0)
+        usd = pips * pip_value_usd * lots
         return {"pips": round(pips, 1), "usd": round(usd, 2)}
 
     @staticmethod
@@ -288,16 +298,18 @@ class PaperAccount:
         try:
             from models.database import async_session_factory, Trade
             pos = self._positions.get(trade_id)  # already popped; use local copy
-            pip = 0.0001
             async with async_session_factory() as s:
                 t = await s.get(Trade, trade_id)
                 if t:
                     entry = t.entry_price or 0
+                    sym2  = t.symbol or ""
+                    pip2  = 0.01 if "JPY" in sym2 else (1.0 if sym2 in ("XAUUSD","US30","NAS100","US500") else 0.0001)
                     if t.direction == "BUY":
-                        pips = (close_price - entry) / pip
+                        pips = (close_price - entry) / pip2
                     else:
-                        pips = (entry - close_price) / pip
-                    usd = pips * pip * (t.lot_size or 0.01) * 100_000
+                        pips = (entry - close_price) / pip2
+                    pv   = PaperAccount._PIP_USD.get(sym2, 10.0)
+                    usd  = pips * pv * (t.lot_size or 0.01)
                     t.status      = "CLOSED"
                     t.close_price = close_price
                     t.close_time  = datetime.utcnow()
