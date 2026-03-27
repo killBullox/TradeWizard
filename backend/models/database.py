@@ -156,6 +156,20 @@ class MarketSession(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+def _migrate_trades(conn):
+    """Add columns to trades table that may be missing from older DB versions."""
+    from sqlalchemy import text as _text
+    new_cols = [
+        ("trailing_sl_updates", "INTEGER DEFAULT 0"),
+        ("is_paper",            "BOOLEAN DEFAULT 0"),
+    ]
+    cur = conn.execute(_text("PRAGMA table_info(trades)"))
+    existing = {row[1] for row in cur.fetchall()}
+    for col_name, col_type in new_cols:
+        if col_name not in existing:
+            conn.execute(_text(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}"))
+
+
 def _migrate_backtest_runs(conn):
     """Add columns that may be missing from older DB versions."""
     from sqlalchemy import text as _text
@@ -174,6 +188,7 @@ async def init_db():
     """Initialize the database, creating all tables."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_migrate_trades)
         await conn.run_sync(_migrate_backtest_runs)
 
     # Insert default config values
