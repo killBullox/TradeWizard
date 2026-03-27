@@ -53,7 +53,7 @@ class PendingOrder:
     take_profit: float
     lot_size:    float
     confluence:  list
-    max_wait:    int = 5   # cancel after this many bars if not filled
+    max_wait:    int = 20  # cancel after this many bars if not filled (20h for H1)
 
 
 @dataclass
@@ -564,15 +564,27 @@ class Backtester:
                         still_pending.append(order)
                 pending = still_pending
 
-            # ── 3. Detect new signals → create pending limit orders ────────
+            # ── 3. Detect new signals ─────────────────────────────────────
+            # Liq sweeps = market entry (reversal happens at signal bar)
+            # FVG / OB = limit order (wait for retracement to the level)
             if not open_trades and not pending:
                 for sig in sig_map.get(i, []):
                     if i in used_bars:
                         continue
-                    order = self._make_pending(trade_id, sig, i, candle, balance, analyzer)
-                    if order:
-                        trade_id += 1; used_bars.add(i)
-                        pending.append(order); break
+                    sig_type = sig.get("type", "")
+                    is_liq = "LIQ" in sig_type
+                    if is_liq:
+                        # Market entry: open trade immediately at candle close
+                        trade = self._make_market_trade(trade_id, sig, i, candle, balance, analyzer)
+                        if trade:
+                            trade_id += 1; used_bars.add(i)
+                            open_trades.append(trade); break
+                    else:
+                        # Limit entry: wait for price to reach entry level
+                        order = self._make_pending(trade_id, sig, i, candle, balance, analyzer)
+                        if order:
+                            trade_id += 1; used_bars.add(i)
+                            pending.append(order); break
 
             result.equity.append({"bar": i, "time": candle.time, "equity": round(balance, 2)})
 
@@ -585,6 +597,19 @@ class Backtester:
 
         result.compute_stats(self.pip)
         return result
+
+    def _make_market_trade(self, trade_id, sig, bar, candle, balance, analyzer) -> Optional[SimTrade]:
+        """Market entry at signal bar close (used for Liquidity sweep signals)."""
+        order = self._make_pending(trade_id, sig, bar, candle, balance, analyzer)
+        if not order:
+            return None
+        return SimTrade(
+            id=order.id, setup=order.setup, direction=order.direction,
+            entry_bar=bar, entry_time=candle.time,
+            entry_price=order.entry_price,
+            stop_loss=order.stop_loss, take_profit=order.take_profit,
+            lot_size=order.lot_size, confluence=order.confluence,
+        )
 
     def _make_pending(self, trade_id, sig, bar, candle, balance, analyzer) -> Optional[PendingOrder]:
         """Create a pending limit order from a signal. Fills only when price reaches entry_price."""
