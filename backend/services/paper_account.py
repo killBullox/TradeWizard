@@ -80,6 +80,7 @@ class PaperAccount:
             "take_profit": float(trade_params.get("take_profit_1", 0)),
             "lot_size":    float(trade_params.get("lot_size", 0.01)),
             "open_time":   datetime.now(timezone.utc).isoformat(),
+            "opened_at":   datetime.now(timezone.utc),  # for min-hold check
             "current_price": entry,
             "unrealised_pnl_usd":  0.0,
             "unrealised_pnl_pips": 0.0,
@@ -187,8 +188,9 @@ class PaperAccount:
                     pos["unrealised_pnl_usd"]  = pnl["usd"]
                     pos["unrealised_pnl_pips"] = pnl["pips"]
 
-                    # Check SL / TP auto-close
-                    hit = self._check_sl_tp(pos, price)
+                    # Check SL / TP auto-close — skip if trade opened < 60s ago
+                    age = (datetime.now(timezone.utc) - pos.get("opened_at", datetime.now(timezone.utc))).total_seconds()
+                    hit = self._check_sl_tp(pos, price) if age >= 60 else None
                     if hit:
                         result = self.close_position(tid, price)
                         updates.append({
