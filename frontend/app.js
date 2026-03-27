@@ -297,8 +297,9 @@ function renderTradesTable(trades) {
       <td class="${t.direction==='BUY'?'text-win':'text-loss'}">${t.direction}</td>
       <td><span class="badge">${t.ict_setup||'-'}</span></td>
       <td style="font-size:0.78rem;color:var(--text-secondary)">${fmtDate(t.open_time)}</td>
-      <td style="font-size:0.78rem;color:var(--text-secondary)">${t.close_time ? fmtDate(t.close_time) : '-'}</td>
       <td>${t.entry_price ?? '-'}</td>
+      <td style="font-size:0.78rem;color:var(--text-secondary)">${t.close_time ? fmtDate(t.close_time) : '-'}</td>
+      <td>${t.close_price ?? '-'}</td>
       <td>${t.stop_loss ?? '-'}</td>
       <td>${t.take_profit_1 ?? '-'}</td>
       <td>${t.lot_size ?? '-'}</td>
