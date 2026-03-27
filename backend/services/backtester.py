@@ -42,6 +42,21 @@ class Candle:
 
 
 @dataclass
+class PendingOrder:
+    """Limit order waiting to be filled when price reaches entry_price."""
+    id:          int
+    setup:       str
+    direction:   str
+    signal_bar:  int       # bar where signal was detected
+    entry_price: float
+    stop_loss:   float
+    take_profit: float
+    lot_size:    float
+    confluence:  list
+    max_wait:    int = 5   # cancel after this many bars if not filled
+
+
+@dataclass
 class SimTrade:
     id:          int
     setup:       str
@@ -493,12 +508,14 @@ class Backtester:
         for sig in signals:
             sig_map.setdefault(sig["bar"], []).append(sig)
 
-        balance     = self.initial_balance
-        open_trades: list[SimTrade] = []
-        trade_id    = 0
-        used_bars: set  = set()
+        balance      = self.initial_balance
+        open_trades: list[SimTrade]    = []
+        pending:     list[PendingOrder] = []
+        trade_id     = 0
+        used_bars: set = set()
 
         for i, candle in enumerate(candles):
+            # ── 1. Check open trades for SL / TP ──────────────────────────
             still_open = []
             for t in open_trades:
                 closed = False
@@ -522,14 +539,40 @@ class Backtester:
                     still_open.append(t)
             open_trades = still_open
 
+            # ── 2. Try to fill pending limit orders ────────────────────────
             if not open_trades:
+                still_pending = []
+                for order in pending:
+                    bars_waiting = i - order.signal_bar
+                    if bars_waiting > order.max_wait:
+                        continue  # expired — discard
+                    # Fill if current candle's range includes entry price
+                    filled = (
+                        (order.direction == "BUY"  and candle.low  <= order.entry_price <= candle.high) or
+                        (order.direction == "SELL" and candle.low  <= order.entry_price <= candle.high)
+                    )
+                    if filled and not open_trades:
+                        trade = SimTrade(
+                            id=order.id, setup=order.setup, direction=order.direction,
+                            entry_bar=i, entry_time=candle.time,
+                            entry_price=order.entry_price,
+                            stop_loss=order.stop_loss, take_profit=order.take_profit,
+                            lot_size=order.lot_size, confluence=order.confluence,
+                        )
+                        open_trades.append(trade)
+                    else:
+                        still_pending.append(order)
+                pending = still_pending
+
+            # ── 3. Detect new signals → create pending limit orders ────────
+            if not open_trades and not pending:
                 for sig in sig_map.get(i, []):
                     if i in used_bars:
                         continue
-                    trade = self._make_trade(trade_id, sig, i, candle, balance, analyzer)
-                    if trade:
+                    order = self._make_pending(trade_id, sig, i, candle, balance, analyzer)
+                    if order:
                         trade_id += 1; used_bars.add(i)
-                        open_trades.append(trade); break
+                        pending.append(order); break
 
             result.equity.append({"bar": i, "time": candle.time, "equity": round(balance, 2)})
 
@@ -538,11 +581,13 @@ class Backtester:
             for t in open_trades:
                 t = self._close(t, last.close, "OPEN", len(candles)-1, last.time, balance)
                 result.trades.append(t)
+        # Pending orders at end of simulation are simply discarded (never filled)
 
         result.compute_stats(self.pip)
         return result
 
-    def _make_trade(self, trade_id, sig, bar, candle, balance, analyzer) -> Optional[SimTrade]:
+    def _make_pending(self, trade_id, sig, bar, candle, balance, analyzer) -> Optional[PendingOrder]:
+        """Create a pending limit order from a signal. Fills only when price reaches entry_price."""
         sig_type  = sig["type"]
         direction = "SELL" if "BEAR" in sig_type else "BUY"
         atr       = analyzer.atr(bar)
@@ -570,11 +615,10 @@ class Backtester:
                  "OB_BULL":"OB↑","OB_BEAR":"OB↓",
                  "LIQ_BULL":"Liq↑","LIQ_BEAR":"Liq↓"}.get(sig_type, sig_type)
 
-        return SimTrade(id=trade_id, setup=label, direction=direction,
-                        entry_bar=bar, entry_time=candle.time,
-                        entry_price=round(entry, 5),
-                        stop_loss=round(sl, 5), take_profit=round(tp, 5),
-                        lot_size=lot_size, confluence=sig.get("confluence", []))
+        return PendingOrder(id=trade_id, setup=label, direction=direction,
+                            signal_bar=bar, entry_price=round(entry, 5),
+                            stop_loss=round(sl, 5), take_profit=round(tp, 5),
+                            lot_size=lot_size, confluence=sig.get("confluence", []))
 
     def _close(self, trade, exit_price, result, bar, time, balance) -> SimTrade:
         trade.exit_bar   = bar
