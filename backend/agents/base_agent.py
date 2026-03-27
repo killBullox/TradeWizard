@@ -13,7 +13,7 @@ import anthropic
 logger = logging.getLogger(__name__)
 
 # Model assignments by role — balance quality vs cost
-MODEL_ANALYST  = "claude-opus-4-6"       # ICT Advisor: needs deep reasoning
+MODEL_ANALYST  = "claude-sonnet-4-6"         # ICT Advisor: strong reasoning, 5× cheaper than Opus
 MODEL_STANDARD = "claude-haiku-4-5-20251001"  # RM, Trader, AT, Journalist: fast & cheap
 MODEL = MODEL_ANALYST  # default fallback
 

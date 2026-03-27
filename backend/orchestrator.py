@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional, Callable, Awaitable
 from sqlalchemy import select
 
@@ -104,16 +105,37 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     #  Main Analysis Loop  (runs every analysis_interval seconds)
     # ------------------------------------------------------------------ #
-    def _in_kill_zone(self) -> bool:
-        """Return True only during ICT Kill Zones (UTC): London 07-10, NY 12-15."""
-        hour = datetime.utcnow().hour
-        return (7 <= hour < 10) or (12 <= hour < 15)
+    async def _in_kill_zone(self) -> bool:
+        """Check if current Rome time falls within any configured Kill Zone window."""
+        async with async_session_factory() as s:
+            raw = await get_config("kill_zones", s)
+
+        # Default: London 07-11, NY 13-18 ora di Roma
+        windows = [{"start": "07:00", "end": "11:00"}, {"start": "13:00", "end": "18:00"}]
+        if raw:
+            try:
+                windows = json.loads(raw)
+            except Exception:
+                pass
+
+        rome = datetime.now(ZoneInfo("Europe/Rome"))
+        current_min = rome.hour * 60 + rome.minute
+
+        for w in windows:
+            try:
+                sh, sm = map(int, w["start"].split(":"))
+                eh, em = map(int, w["end"].split(":"))
+                if sh * 60 + sm <= current_min < eh * 60 + em:
+                    return True
+            except Exception:
+                continue
+        return False
 
     async def _analysis_loop(self):
         # Brief startup delay so the WS clients can connect first
         await asyncio.sleep(10)
         while self._running:
-            if self._in_kill_zone():
+            if await self._in_kill_zone():
                 try:
                     await self._run_analysis_cycle()
                 except Exception as e:

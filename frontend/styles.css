@@ -622,6 +622,20 @@ body {
   color: var(--text-primary);
 }
 
+/* Kill Zone rows */
+.kz-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+}
+.kz-row input[type="time"] {
+  background: var(--bg-input); border: 1px solid var(--border); color: var(--text-primary);
+  border-radius: var(--radius); padding: 5px 10px; font-size: 0.9rem;
+  width: 110px; cursor: pointer;
+}
+.kz-row input[type="time"]:focus { outline: none; border-color: var(--accent-blue); }
+.kz-sep { color: var(--text-muted); font-size: 1rem; }
+.btn-xs { padding: 3px 8px; font-size: 0.75rem; }
+.btn-sm { padding: 5px 12px; font-size: 0.82rem; }
+
 /* Toggle switch */
 .toggle-switch { position: relative; display: inline-block; width: 48px; height: 26px; }
 .toggle-switch input { opacity: 0; width: 0; height: 0; }

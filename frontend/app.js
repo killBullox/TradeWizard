@@ -424,6 +424,9 @@ function renderConfig(cfg) {
   let enabledPairs = [];
   try { enabledPairs = JSON.parse(cfg['enabled_pairs'] || '[]'); } catch(e) {}
 
+  let killZones = [{"start":"07:00","end":"11:00"},{"start":"13:00","end":"18:00"}];
+  try { if (cfg['kill_zones']) killZones = JSON.parse(cfg['kill_zones']); } catch(e) {}
+
   form.innerHTML = editable.map(key => `
     <div class="config-field">
       <label>${key.replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase())}</label>
@@ -438,6 +441,19 @@ function renderConfig(cfg) {
       </label>
     </div>
     <div class="config-field" style="grid-column:1/-1">
+      <label>Kill Zones <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(ora di Roma)</span></label>
+      <div id="cfg-kill-zones">
+        ${killZones.map((w,i) => `
+          <div class="kz-row" data-idx="${i}">
+            <input type="time" class="kz-start" value="${w.start}" />
+            <span class="kz-sep">→</span>
+            <input type="time" class="kz-end" value="${w.end}" />
+            <button class="btn btn-ghost btn-xs kz-remove" onclick="removeKillZone(${i})">✕</button>
+          </div>`).join('')}
+      </div>
+      <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="addKillZone()">+ Aggiungi fascia</button>
+    </div>
+    <div class="config-field" style="grid-column:1/-1">
       <label>Enabled Pairs</label>
       <div class="setup-checks" id="cfg-pairs-grid">
         ${ALL_PAIRS.map(p => `
@@ -449,6 +465,35 @@ function renderConfig(cfg) {
     </div>
   `;
 }
+
+window.addKillZone = function() {
+  const container = document.getElementById('cfg-kill-zones');
+  if (!container) return;
+  const idx = container.querySelectorAll('.kz-row').length;
+  const row = document.createElement('div');
+  row.className = 'kz-row';
+  row.dataset.idx = idx;
+  row.innerHTML = `
+    <input type="time" class="kz-start" value="09:00" />
+    <span class="kz-sep">→</span>
+    <input type="time" class="kz-end" value="12:00" />
+    <button class="btn btn-ghost btn-xs kz-remove" onclick="removeKillZone(${idx})">✕</button>`;
+  container.appendChild(row);
+};
+
+window.removeKillZone = function(idx) {
+  const container = document.getElementById('cfg-kill-zones');
+  if (!container) return;
+  const rows = container.querySelectorAll('.kz-row');
+  if (rows.length <= 1) return; // keep at least one
+  rows[idx]?.remove();
+  // re-index remaining rows
+  container.querySelectorAll('.kz-row').forEach((r, i) => {
+    r.dataset.idx = i;
+    const btn = r.querySelector('.kz-remove');
+    if (btn) btn.setAttribute('onclick', `removeKillZone(${i})`);
+  });
+};
 
 function renderPairsGrid() {
   const grid = document.getElementById('pairs-grid');
@@ -535,6 +580,15 @@ async function saveConfig() {
   const paperEl = document.getElementById('cfg-paper_mode');
   if (paperEl) {
     await fetchJSON('/api/config/paper_mode', { method: 'PUT', body: JSON.stringify({ value: paperEl.checked ? 'true' : 'false' }) });
+  }
+  // Kill zones
+  const kzRows = document.querySelectorAll('#cfg-kill-zones .kz-row');
+  if (kzRows.length) {
+    const zones = [...kzRows].map(row => ({
+      start: row.querySelector('.kz-start')?.value || '07:00',
+      end:   row.querySelector('.kz-end')?.value   || '11:00',
+    })).filter(z => z.start && z.end);
+    await fetchJSON('/api/config/kill_zones', { method: 'PUT', body: JSON.stringify({ value: JSON.stringify(zones) }) });
   }
   // Enabled pairs
   const checked = [...document.querySelectorAll('.cfg-pair-chk:checked')].map(el => el.value);
