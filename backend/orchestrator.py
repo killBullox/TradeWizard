@@ -211,6 +211,13 @@ class Orchestrator:
             if isinstance(final_trade, dict) and not final_trade.get("error"):
                 trade_params = {**trade_params, **final_trade}
 
+            # Hard mathematical sanity check — reject before execution if params are invalid
+            rejection = self._sanity_check_trade(trade_params, market_data)
+            if rejection:
+                await self._log_agent("SYS", "REJECTED", f"Sanity check failed: {rejection}", trade_params)
+                await self.broadcast({"type": "trade_rejected", "symbol": symbol, "reason": rejection, "agent": "SYS"})
+                return
+
             # 6. Save to DB — mark as paper if paper mode is on
             paper_on = await self._is_paper_mode()
             trade_id = await self._save_trade(
@@ -634,6 +641,52 @@ class Orchestrator:
         async with async_session_factory() as s:
             val = await get_config("paper_mode", s)
         return (val or "false").lower() == "true"
+
+    def _sanity_check_trade(self, trade_params: dict, market_data: dict) -> str | None:
+        """Return rejection reason string if trade params are mathematically invalid, else None."""
+        direction   = trade_params.get("direction", "")
+        entry       = float(trade_params.get("entry_price") or 0)
+        sl          = float(trade_params.get("stop_loss") or 0)
+        tp          = float(trade_params.get("take_profit_1") or 0)
+        symbol      = trade_params.get("symbol", "")
+
+        if not entry or not sl or not tp:
+            return "Missing entry/SL/TP values"
+
+        # Pip size per symbol
+        pip = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+
+        sl_pips  = abs(entry - sl)  / pip
+        tp_pips  = abs(entry - tp)  / pip
+
+        # Minimum distances
+        min_sl_pips = 5.0
+        if sl_pips < min_sl_pips:
+            return f"SL too tight: {sl_pips:.1f} pips (min {min_sl_pips})"
+        if tp_pips < sl_pips:
+            return f"TP ({tp_pips:.1f}p) closer than SL ({sl_pips:.1f}p) — RR < 1"
+
+        # Direction logic: for BUY sl must be below entry, tp above; for SELL opposite
+        if direction == "BUY":
+            if sl >= entry:
+                return f"BUY trade SL ({sl}) must be below entry ({entry})"
+            if tp <= entry:
+                return f"BUY trade TP ({tp}) must be above entry ({entry})"
+        elif direction == "SELL":
+            if sl <= entry:
+                return f"SELL trade SL ({sl}) must be above entry ({entry})"
+            if tp >= entry:
+                return f"SELL trade TP ({tp}) must be below entry ({entry})"
+
+        # Current price must not already be past SL
+        current = float((market_data.get("H1") or {}).get("indicators", {}).get("current_price") or 0)
+        if current:
+            if direction == "BUY"  and current <= sl:
+                return f"Current price {current} already at/below SL {sl}"
+            if direction == "SELL" and current >= sl:
+                return f"Current price {current} already at/above SL {sl}"
+
+        return None
 
     async def _get_config_value(self, key: str) -> str:
         async with async_session_factory() as s:

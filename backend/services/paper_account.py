@@ -188,9 +188,8 @@ class PaperAccount:
                     pos["unrealised_pnl_usd"]  = pnl["usd"]
                     pos["unrealised_pnl_pips"] = pnl["pips"]
 
-                    # Check SL / TP auto-close — skip if trade opened < 60s ago
-                    age = (datetime.now(timezone.utc) - pos.get("opened_at", datetime.now(timezone.utc))).total_seconds()
-                    hit = self._check_sl_tp(pos, price) if age >= 60 else None
+                    # Check SL / TP auto-close
+                    hit = self._check_sl_tp(pos, price)
                     if hit:
                         result = self.close_position(tid, price)
                         updates.append({
