@@ -998,7 +998,7 @@ function renderPaperTrades(trades) {
   const tbody = document.getElementById('paper-trades-tbody');
   if (!tbody) return;
   if (!trades.length) {
-    tbody.innerHTML = '<tr><td colspan="12" class="empty-state">No paper trades yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" class="empty-state">No paper trades yet</td></tr>';
     return;
   }
   tbody.innerHTML = trades.map(t => `
@@ -1007,6 +1007,8 @@ function renderPaperTrades(trades) {
       <td><b>${t.symbol}</b></td>
       <td class="${t.direction==='BUY'?'text-win':'text-loss'}">${t.direction}</td>
       <td><span class="badge">${t.ict_setup||'—'}</span></td>
+      <td style="font-size:0.72rem;white-space:nowrap">${t.open_time ? fmtDate(t.open_time) : '—'}</td>
+      <td style="font-size:0.72rem;white-space:nowrap">${t.close_time ? fmtDate(t.close_time) : '—'}</td>
       <td>${t.entry_price??'—'}</td>
       <td>${t.stop_loss??'—'}</td>
       <td>${t.take_profit_1??'—'}</td>
