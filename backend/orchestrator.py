@@ -212,7 +212,7 @@ class Orchestrator:
                 trade_params = {**trade_params, **final_trade}
 
             # Hard mathematical sanity check — reject before execution if params are invalid
-            rejection = self._sanity_check_trade(trade_params, market_data)
+            rejection = self._sanity_check_trade(trade_params, market_data, config)
             if rejection:
                 await self._log_agent("SYS", "REJECTED", f"Sanity check failed: {rejection}", trade_params)
                 await self.broadcast({"type": "trade_rejected", "symbol": symbol, "reason": rejection, "agent": "SYS"})
@@ -642,13 +642,13 @@ class Orchestrator:
             val = await get_config("paper_mode", s)
         return (val or "false").lower() == "true"
 
-    def _sanity_check_trade(self, trade_params: dict, market_data: dict) -> str | None:
+    def _sanity_check_trade(self, trade_params: dict, market_data: dict, config: dict | None = None) -> str | None:
         """Return rejection reason string if trade params are mathematically invalid, else None."""
-        direction   = trade_params.get("direction", "")
-        entry       = float(trade_params.get("entry_price") or 0)
-        sl          = float(trade_params.get("stop_loss") or 0)
-        tp          = float(trade_params.get("take_profit_1") or 0)
-        symbol      = trade_params.get("symbol", "")
+        direction = trade_params.get("direction", "")
+        entry     = float(trade_params.get("entry_price") or 0)
+        sl        = float(trade_params.get("stop_loss") or 0)
+        tp        = float(trade_params.get("take_profit_1") or 0)
+        symbol    = trade_params.get("symbol", "")
 
         if not entry or not sl or not tp:
             return "Missing entry/SL/TP values"
@@ -656,27 +656,32 @@ class Orchestrator:
         # Pip size per symbol
         pip = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
 
-        sl_pips  = abs(entry - sl)  / pip
-        tp_pips  = abs(entry - tp)  / pip
+        sl_pips = abs(entry - sl) / pip
+        tp_pips = abs(entry - tp) / pip
 
-        # Minimum distances
-        min_sl_pips = 5.0
+        # Min SL = 0.5 × ATR (same logic as backtester)
+        atr_pips = float((market_data.get("H1") or {}).get("indicators", {}).get("atr_pips") or 0)
+        min_sl_pips = max(atr_pips * 0.5, pip * 10 / pip)  # at least 0.5 ATR, fallback 10 pips
         if sl_pips < min_sl_pips:
-            return f"SL too tight: {sl_pips:.1f} pips (min {min_sl_pips})"
-        if tp_pips < sl_pips:
-            return f"TP ({tp_pips:.1f}p) closer than SL ({sl_pips:.1f}p) — RR < 1"
+            return f"SL too tight: {sl_pips:.1f} pips (min {min_sl_pips:.1f} = 0.5×ATR)"
 
-        # Direction logic: for BUY sl must be below entry, tp above; for SELL opposite
+        # RR must meet configured minimum (default 2.0)
+        required_rr = float((config or {}).get("rr_ratio") or 2.0)
+        actual_rr   = tp_pips / sl_pips if sl_pips else 0
+        if actual_rr < required_rr:
+            return f"RR {actual_rr:.2f} below required {required_rr} (SL={sl_pips:.1f}p TP={tp_pips:.1f}p)"
+
+        # Direction logic
         if direction == "BUY":
             if sl >= entry:
-                return f"BUY trade SL ({sl}) must be below entry ({entry})"
+                return f"BUY: SL {sl} must be below entry {entry}"
             if tp <= entry:
-                return f"BUY trade TP ({tp}) must be above entry ({entry})"
+                return f"BUY: TP {tp} must be above entry {entry}"
         elif direction == "SELL":
             if sl <= entry:
-                return f"SELL trade SL ({sl}) must be above entry ({entry})"
+                return f"SELL: SL {sl} must be above entry {entry}"
             if tp >= entry:
-                return f"SELL trade TP ({tp}) must be below entry ({entry})"
+                return f"SELL: TP {tp} must be below entry {entry}"
 
         # Current price must not already be past SL
         current = float((market_data.get("H1") or {}).get("indicators", {}).get("current_price") or 0)
