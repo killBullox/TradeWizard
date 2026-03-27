@@ -421,7 +421,8 @@ function renderConfig(cfg) {
   if (!form) return;
 
   const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval'];
-  const paperOn  = cfg['paper_mode'] === 'true' || cfg['paper_mode'] === true;
+  const paperOn      = cfg['paper_mode'] === 'true' || cfg['paper_mode'] === true;
+  const weekendOn    = cfg['trade_on_weekend'] === 'true';
 
   const ALL_PAIRS = ['EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','USDCAD','NZDUSD','XAUUSD','US30','NAS100','US500'];
   let enabledPairs = [];
@@ -442,6 +443,14 @@ function renderConfig(cfg) {
         <input type="checkbox" id="cfg-paper_mode" ${paperOn ? 'checked' : ''}>
         <span class="toggle-slider"></span>
       </label>
+    </div>
+    <div class="config-field" style="grid-column:1/-1">
+      <label>Trading nel Weekend</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="cfg-trade_on_weekend" ${weekendOn ? 'checked' : ''}>
+        <span class="toggle-slider"></span>
+      </label>
+      <span style="font-size:0.75rem;color:var(--text-muted);margin-left:10px">OFF = sistema in pausa sab/dom (consigliato)</span>
     </div>
     <div class="config-field" style="grid-column:1/-1">
       <label>Kill Zones <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(ora di Roma)</span></label>
@@ -583,6 +592,11 @@ async function saveConfig() {
   const paperEl = document.getElementById('cfg-paper_mode');
   if (paperEl) {
     await fetchJSON('/api/config/paper_mode', { method: 'PUT', body: JSON.stringify({ value: paperEl.checked ? 'true' : 'false' }) });
+  }
+  // Weekend trading toggle
+  const weekendEl = document.getElementById('cfg-trade_on_weekend');
+  if (weekendEl) {
+    await fetchJSON('/api/config/trade_on_weekend', { method: 'PUT', body: JSON.stringify({ value: weekendEl.checked ? 'true' : 'false' }) });
   }
   // Kill zones
   const kzRows = document.querySelectorAll('#cfg-kill-zones .kz-row');

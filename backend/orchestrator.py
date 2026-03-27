@@ -106,9 +106,19 @@ class Orchestrator:
     #  Main Analysis Loop  (runs every analysis_interval seconds)
     # ------------------------------------------------------------------ #
     async def _in_kill_zone(self) -> bool:
-        """Check if current Rome time falls within any configured Kill Zone window."""
+        """Check if current Rome time falls within any configured Kill Zone window.
+        Respects the trade_on_weekend setting (default: off)."""
         async with async_session_factory() as s:
-            raw = await get_config("kill_zones", s)
+            raw             = await get_config("kill_zones", s)
+            trade_weekend   = await get_config("trade_on_weekend", s)
+
+        rome = datetime.now(ZoneInfo("Europe/Rome"))
+
+        # Weekend check: Saturday=5, Sunday=6
+        is_weekend = rome.weekday() >= 5
+        allow_weekend = (trade_weekend or "false").lower() == "true"
+        if is_weekend and not allow_weekend:
+            return False
 
         # Default: London 07-11, NY 13-18 ora di Roma
         windows = [{"start": "07:00", "end": "11:00"}, {"start": "13:00", "end": "18:00"}]
@@ -118,9 +128,7 @@ class Orchestrator:
             except Exception:
                 pass
 
-        rome = datetime.now(ZoneInfo("Europe/Rome"))
         current_min = rome.hour * 60 + rome.minute
-
         for w in windows:
             try:
                 sh, sm = map(int, w["start"].split(":"))
