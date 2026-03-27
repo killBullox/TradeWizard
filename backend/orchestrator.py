@@ -668,7 +668,7 @@ class Orchestrator:
         # RR must meet configured minimum (default 2.0)
         required_rr = float((config or {}).get("rr_ratio") or 2.0)
         actual_rr   = tp_pips / sl_pips if sl_pips else 0
-        if actual_rr < required_rr:
+        if actual_rr < required_rr - 0.001:  # small tolerance for floating-point
             return f"RR {actual_rr:.2f} below required {required_rr} (SL={sl_pips:.1f}p TP={tp_pips:.1f}p)"
 
         # Direction logic
