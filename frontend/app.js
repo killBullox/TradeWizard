@@ -560,7 +560,7 @@ function setEl(id, val) {
 
 function fmtDate(iso) {
   if (!iso) return '-';
-  try { return new Date(iso).toLocaleString('it-IT', {dateStyle:'short',timeStyle:'short'}); }
+  try { return new Date(iso).toLocaleString('it-IT', {dateStyle:'short',timeStyle:'medium'}); }
   catch { return iso; }
 }
 
