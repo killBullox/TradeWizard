@@ -20,7 +20,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Requ
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, delete
 
 load_dotenv()
 
@@ -493,6 +493,24 @@ async def paper_reset(data: dict | None = None):
     balance = float((data or {}).get("balance", 10000.0))
     await orchestrator.paper_account.reset(balance)
     await orchestrator.enable_paper_mode(balance)
+    return {"status": "reset", "balance": balance}
+
+
+@app.post("/api/reset-all")
+async def reset_all(data: dict | None = None):
+    """Full reset: delete all trades, agent logs, journal entries, meetings and reset performance stats."""
+    balance = float((data or {}).get("balance", 5000.0))
+    async with async_session_factory() as s:
+        await s.execute(delete(AgentLog))
+        await s.execute(delete(JournalEntry))
+        await s.execute(delete(Meeting))
+        await s.execute(delete(Trade))
+        await set_config("system_performance", "{}", s)
+        await s.commit()
+    # Reset paper account in memory
+    if orchestrator and orchestrator.paper_account:
+        await orchestrator.paper_account.reset(balance)
+    await orchestrator.broadcast({"type": "full_reset", "balance": balance})
     return {"status": "reset", "balance": balance}
 
 

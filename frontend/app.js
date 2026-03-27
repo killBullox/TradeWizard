@@ -296,6 +296,8 @@ function renderTradesTable(trades) {
       <td><strong>${t.symbol}</strong></td>
       <td class="${t.direction==='BUY'?'text-win':'text-loss'}">${t.direction}</td>
       <td><span class="badge">${t.ict_setup||'-'}</span></td>
+      <td style="font-size:0.78rem;color:var(--text-secondary)">${fmtDate(t.open_time)}</td>
+      <td style="font-size:0.78rem;color:var(--text-secondary)">${t.close_time ? fmtDate(t.close_time) : '-'}</td>
       <td>${t.entry_price ?? '-'}</td>
       <td>${t.stop_loss ?? '-'}</td>
       <td>${t.take_profit_1 ?? '-'}</td>
@@ -1131,6 +1133,14 @@ document.getElementById('btn-paper-reset')?.addEventListener('click', async () =
   await fetchJSON('/api/paper/reset', { method: 'POST', body: JSON.stringify({ balance: bal }) });
   addActivity(`📄 Paper account reset to $${bal}`, 'info');
   await refreshPaper();
+});
+
+document.getElementById('btn-reset-all')?.addEventListener('click', async () => {
+  const bal = parseFloat(document.getElementById('paper-reset-balance')?.value || 5000);
+  if (!confirm(`RESET TOTALE: verranno eliminati tutti i trade, log, journal e statistiche.\nIl saldo paper verrà reimpostato a $${bal}.\n\nConfermi?`)) return;
+  await fetchJSON('/api/reset-all', { method: 'POST', body: JSON.stringify({ balance: bal }) });
+  addActivity(`🗑 Reset totale eseguito — saldo $${bal}`, 'warning');
+  await Promise.all([refreshPaper(), refreshTrades(), refreshConfig()]);
 });
 
 document.getElementById('btn-paper-refresh')?.addEventListener('click', refreshPaper);
