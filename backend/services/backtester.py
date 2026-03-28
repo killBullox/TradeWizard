@@ -525,17 +525,17 @@ class Backtester:
                 closed = False
                 if t.direction == "BUY":
                     if candle.low <= t.stop_loss:
-                        t = self._close(t, t.stop_loss, "LOSS", i, candle.time, balance)
+                        t = self._close(t, t.stop_loss, "LOSS", i, candle.time, balance, candle)
                         balance += balance * t.pnl_pct / 100; closed = True
                     elif candle.high >= t.take_profit:
-                        t = self._close(t, t.take_profit, "WIN", i, candle.time, balance)
+                        t = self._close(t, t.take_profit, "WIN", i, candle.time, balance, candle)
                         balance += balance * t.pnl_pct / 100; closed = True
                 else:
                     if candle.high >= t.stop_loss:
-                        t = self._close(t, t.stop_loss, "LOSS", i, candle.time, balance)
+                        t = self._close(t, t.stop_loss, "LOSS", i, candle.time, balance, candle)
                         balance += balance * t.pnl_pct / 100; closed = True
                     elif candle.low <= t.take_profit:
-                        t = self._close(t, t.take_profit, "WIN", i, candle.time, balance)
+                        t = self._close(t, t.take_profit, "WIN", i, candle.time, balance, candle)
                         balance += balance * t.pnl_pct / 100; closed = True
                 if closed:
                     result.trades.append(t)
@@ -558,7 +558,7 @@ class Backtester:
                     if filled and not open_trades:
                         trade = SimTrade(
                             id=order.id, setup=order.setup, direction=order.direction,
-                            entry_bar=i, entry_time=candle.time,
+                            entry_bar=i, entry_time=self._intrabar_time(candle.time, order.entry_price, candle),
                             entry_price=order.entry_price,
                             stop_loss=order.stop_loss, take_profit=order.take_profit,
                             lot_size=order.lot_size, confluence=order.confluence,
@@ -595,7 +595,7 @@ class Backtester:
         if open_trades and candles:
             last = candles[-1]
             for t in open_trades:
-                t = self._close(t, last.close, "OPEN", len(candles)-1, last.time, balance)
+                t = self._close(t, last.close, "OPEN", len(candles)-1, last.time, balance, last)
                 result.trades.append(t)
         # Pending orders at end of simulation are simply discarded (never filled)
 
@@ -609,7 +609,7 @@ class Backtester:
             return None
         return SimTrade(
             id=order.id, setup=order.setup, direction=order.direction,
-            entry_bar=bar, entry_time=candle.time,
+            entry_bar=bar, entry_time=self._intrabar_time(candle.time, order.entry_price, candle),
             entry_price=order.entry_price,
             stop_loss=order.stop_loss, take_profit=order.take_profit,
             lot_size=order.lot_size, confluence=order.confluence,
@@ -654,9 +654,23 @@ class Backtester:
                             lot_size=lot_size, confluence=sig.get("confluence", []),
                             max_wait=max_wait)
 
-    def _close(self, trade, exit_price, result, bar, time, balance) -> SimTrade:
+    @staticmethod
+    def _intrabar_time(candle_time: str, price: float, candle, candle_secs: int = 3600) -> str:
+        """Estimate the timestamp within a candle when a price level was touched."""
+        try:
+            from datetime import datetime, timedelta
+            dt  = datetime.fromisoformat(candle_time)
+            rng = candle.high - candle.low
+            if rng < 1e-8:
+                return candle_time
+            frac = min(max(abs(price - candle.open) / rng, 0.05), 0.95)
+            return (dt + timedelta(seconds=int(frac * candle_secs))).isoformat()
+        except Exception:
+            return candle_time
+
+    def _close(self, trade, exit_price, result, bar, time, balance, candle=None) -> SimTrade:
         trade.exit_bar   = bar
-        trade.exit_time  = time
+        trade.exit_time  = self._intrabar_time(time, exit_price, candle) if candle else time
         trade.exit_price = round(exit_price, 5)
         trade.result     = result
         entry = trade.entry_price
