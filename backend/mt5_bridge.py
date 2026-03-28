@@ -325,6 +325,67 @@ class MT5Bridge:
             return mt5.ORDER_FILLING_IOC
         return mt5.ORDER_FILLING_RETURN
 
+    # ── Historical data ────────────────────────────────────────────────────────
+
+    _TF_MAP = {
+        "M1": 1, "M5": 5, "M15": 15, "M30": 30,
+        "H1": 16385, "H4": 16388, "D1": 16408,
+    }
+
+    def get_candles(self, symbol: str, timeframe: str, count: int = 500) -> list[dict]:
+        """
+        Return the last `count` closed OHLCV bars for symbol/timeframe.
+        Falls back to empty list in simulation mode.
+        """
+        if not MT5_AVAILABLE:
+            return []
+
+        norm = self._normalise_symbol(symbol)
+        if not norm:
+            logger.warning("get_candles: symbol not found: %s", symbol)
+            return []
+
+        tf_id = self._TF_MAP.get(timeframe.upper(), 16385)  # default H1
+        rates = mt5.copy_rates_from_pos(norm, tf_id, 0, min(count, 50000))
+        if rates is None or len(rates) == 0:
+            logger.warning("get_candles: no data for %s %s", symbol, timeframe)
+            return []
+
+        return self._rates_to_list(rates)
+
+    def get_candles_range(self, symbol: str, timeframe: str,
+                          from_dt: datetime, to_dt: datetime) -> list[dict]:
+        """Return bars between from_dt and to_dt (UTC)."""
+        if not MT5_AVAILABLE:
+            return []
+
+        norm = self._normalise_symbol(symbol)
+        if not norm:
+            return []
+
+        tf_id = self._TF_MAP.get(timeframe.upper(), 1)
+        rates = mt5.copy_rates_range(norm, tf_id, from_dt, to_dt)
+        if rates is None or len(rates) == 0:
+            return []
+
+        return self._rates_to_list(rates)
+
+    @staticmethod
+    def _rates_to_list(rates) -> list[dict]:
+        result = []
+        for r in rates:
+            # r.time is a Unix timestamp (seconds, UTC)
+            ts = datetime.utcfromtimestamp(int(r[0])).strftime("%Y-%m-%dT%H:%M:%S")
+            result.append({
+                "time":   ts,
+                "open":   round(float(r[1]), 6),
+                "high":   round(float(r[2]), 6),
+                "low":    round(float(r[3]), 6),
+                "close":  round(float(r[4]), 6),
+                "volume": int(r[5]),
+            })
+        return result
+
     # ── Account info ───────────────────────────────────────────────────────────
 
     def get_account_info(self) -> dict:
@@ -407,6 +468,29 @@ def _make_app(bridge: MT5Bridge):
     async def health():
         return {"status": "ok", "mt5_available": MT5_AVAILABLE,
                 "connected": bridge.connected}
+
+    @app.get("/candles")
+    async def candles(symbol: str = "EURUSD", timeframe: str = "H1", count: int = 500):
+        """Return the last `count` OHLCV bars for symbol/timeframe."""
+        bars = bridge.get_candles(symbol, timeframe, count)
+        return {"symbol": symbol, "timeframe": timeframe,
+                "candles": bars, "count": len(bars)}
+
+    @app.get("/candles/range")
+    async def candles_range(symbol: str = "EURUSD", timeframe: str = "M1",
+                             from_ts: str = "", to_ts: str = ""):
+        """
+        Return bars between from_ts and to_ts (ISO format UTC).
+        Example: ?symbol=EURUSD&timeframe=M1&from_ts=2024-01-15T14:00:00&to_ts=2024-01-15T15:00:00
+        """
+        try:
+            from_dt = datetime.fromisoformat(from_ts)
+            to_dt   = datetime.fromisoformat(to_ts)
+        except Exception:
+            return JSONResponse({"error": "Invalid from_ts/to_ts format (use ISO: YYYY-MM-DDTHH:MM:SS)"}, 400)
+        bars = bridge.get_candles_range(symbol, timeframe, from_dt, to_dt)
+        return {"symbol": symbol, "timeframe": timeframe,
+                "candles": bars, "count": len(bars)}
 
     return app
 

@@ -467,7 +467,8 @@ class Backtester:
     def __init__(self, symbol, timeframe, strategy="Mixed", bars=500,
                  risk_percent=1.0, rr_ratio=2.0, initial_balance=10_000.0,
                  max_risk_usd=None, enabled_setups=None,
-                 oanda_api_key: str = "", oanda_practice: bool = True):
+                 oanda_api_key: str = "", oanda_practice: bool = True,
+                 mt5_bridge_url: str = ""):
         self.symbol          = symbol
         self.timeframe       = timeframe
         self.strategy        = strategy
@@ -477,6 +478,7 @@ class Backtester:
         self.initial_balance = initial_balance
         self.max_risk_usd    = max_risk_usd
         self.enabled_setups  = set(enabled_setups) if enabled_setups else None
+        self.mt5_bridge_url  = mt5_bridge_url or os.getenv("MT5_BRIDGE_URL", "")
         self.oanda_api_key   = oanda_api_key or os.getenv("OANDA_API_KEY", "")
         self.oanda_practice  = oanda_practice
         self.m1_index: dict[str, list[dict]] = {}   # hour_key → [m1 candles]
@@ -494,28 +496,47 @@ class Backtester:
         self.pip_value = _pip_val_map.get(symbol, 10.0)
 
     async def run(self) -> BacktestResult:
-        from services.oanda_data import fetch_ohlcv, fetch_m1_for_period, build_m1_index
-        raw     = await fetch_ohlcv(self.symbol, self.timeframe, self.bars,
-                                    api_key=self.oanda_api_key,
-                                    practice=self.oanda_practice)
+        from services.oanda_data import build_m1_index
+
+        # ── 1. Fetch H1 candles — MT5 bridge first, then OANDA, then yfinance ──
+        if self.mt5_bridge_url:
+            from services.mt5_data import fetch_ohlcv as _mt5_fetch
+            raw = await _mt5_fetch(self.symbol, self.timeframe, self.bars,
+                                   bridge_url=self.mt5_bridge_url)
+        else:
+            from services.oanda_data import fetch_ohlcv as _oanda_fetch
+            raw = await _oanda_fetch(self.symbol, self.timeframe, self.bars,
+                                     api_key=self.oanda_api_key,
+                                     practice=self.oanda_practice)
+
         candles = [Candle(**c) for c in raw.get("candles", [])]
         if len(candles) < 50:
             return BacktestResult(symbol=self.symbol, timeframe=self.timeframe,
                                   strategy=self.strategy, bars_used=len(candles),
                                   risk_percent=self.risk_percent, rr_ratio=self.rr_ratio)
 
-        # Fetch M1 data for precise intra-candle timing (only when OANDA key is set)
-        if self.oanda_api_key:
-            try:
-                first_dt = datetime.fromisoformat(candles[0].time)
-                last_dt  = datetime.fromisoformat(candles[-1].time) + timedelta(hours=1)
-                m1_raw   = await fetch_m1_for_period(
-                    self.symbol, first_dt, last_dt,
-                    api_key=self.oanda_api_key, practice=self.oanda_practice)
+        # ── 2. Fetch M1 for precise intra-candle timing ────────────────────────
+        try:
+            first_dt = datetime.fromisoformat(candles[0].time)
+            last_dt  = datetime.fromisoformat(candles[-1].time) + timedelta(hours=1)
+
+            if self.mt5_bridge_url:
+                from services.mt5_data import fetch_m1_for_period as _m1_fetch
+                m1_raw = await _m1_fetch(self.symbol, first_dt, last_dt,
+                                         bridge_url=self.mt5_bridge_url)
+            elif self.oanda_api_key:
+                from services.oanda_data import fetch_m1_for_period as _m1_fetch
+                m1_raw = await _m1_fetch(self.symbol, first_dt, last_dt,
+                                         api_key=self.oanda_api_key,
+                                         practice=self.oanda_practice)
+            else:
+                m1_raw = []
+
+            if m1_raw:
                 self.m1_index = build_m1_index(m1_raw)
                 log.info("M1 index: %d hour buckets for %s", len(self.m1_index), self.symbol)
-            except Exception as exc:
-                log.warning("M1 fetch skipped: %s", exc)
+        except Exception as exc:
+            log.warning("M1 fetch skipped: %s", exc)
 
         return self._simulate(candles)
 
@@ -726,11 +747,13 @@ async def run_backtest(symbol, timeframe="H1", strategy="Mixed",
                        bars=500, risk_percent=1.0, rr_ratio=2.0,
                        initial_balance=10_000.0, max_risk_usd=None,
                        enabled_setups=None,
-                       oanda_api_key: str = "", oanda_practice: bool = True) -> BacktestResult:
+                       oanda_api_key: str = "", oanda_practice: bool = True,
+                       mt5_bridge_url: str = "") -> BacktestResult:
     return await Backtester(
         symbol=symbol, timeframe=timeframe, strategy=strategy,
         bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
         initial_balance=initial_balance, max_risk_usd=max_risk_usd,
         enabled_setups=enabled_setups,
         oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
+        mt5_bridge_url=mt5_bridge_url,
     ).run()

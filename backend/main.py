@@ -373,10 +373,11 @@ async def backtest_run(data: dict):
         if strategy not in valid_st:
             raise HTTPException(400, f"strategy must be one of {valid_st}")
 
-        # Read OANDA credentials from DB config
+        # Read data source config from DB
         async with async_session_factory() as s:
             oanda_key      = await get_config("oanda_api_key", s) or ""
             oanda_practice = (await get_config("oanda_practice", s) or "true") != "false"
+            mt5_bridge_url = await get_config("mt5_bridge_url", s) or ""
 
         # Create DB record
         async with async_session_factory() as s:
@@ -393,7 +394,7 @@ async def backtest_run(data: dict):
         asyncio.create_task(_exec_backtest(
             run_id, symbol, timeframe, strategy, bars,
             risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups,
-            oanda_key, oanda_practice,
+            oanda_key, oanda_practice, mt5_bridge_url,
         ))
         return {"run_id": run_id, "status": "RUNNING"}
     except HTTPException:
@@ -406,7 +407,7 @@ async def backtest_run(data: dict):
 async def _exec_backtest(
     run_id, symbol, timeframe, strategy, bars,
     risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None,
-    oanda_api_key="", oanda_practice=True,
+    oanda_api_key="", oanda_practice=True, mt5_bridge_url="",
 ):
     try:
         result = await run_backtest(
@@ -415,6 +416,7 @@ async def _exec_backtest(
             initial_balance=balance, max_risk_usd=max_risk_usd,
             enabled_setups=enabled_setups,
             oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
+            mt5_bridge_url=mt5_bridge_url,
         )
         async with async_session_factory() as s:
             run = await s.get(BacktestRun, run_id)
@@ -541,6 +543,17 @@ async def paper_close(trade_id: int):
                 t.result      = "WIN" if (t.pnl_usd or 0) > 0 else "LOSS"
                 await s.commit()
     return result
+
+
+@app.get("/api/mt5/health")
+async def mt5_health():
+    """Check if the MT5 bridge is reachable."""
+    async with async_session_factory() as s:
+        bridge_url = await get_config("mt5_bridge_url", s) or ""
+    if not bridge_url:
+        return {"status": "not_configured"}
+    from services.mt5_data import check_bridge
+    return await check_bridge(bridge_url)
 
 
 @app.get("/api/backtest")

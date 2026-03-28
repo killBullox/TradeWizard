@@ -423,6 +423,7 @@ function renderConfig(cfg) {
   const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval'];
   const paperOn      = cfg['paper_mode'] === 'true' || cfg['paper_mode'] === true;
   const weekendOn    = cfg['trade_on_weekend'] === 'true';
+  const mt5BridgeUrl = cfg['mt5_bridge_url'] || '';
   const oandaKey     = cfg['oanda_api_key'] || '';
   const oandaPractice = (cfg['oanda_practice'] || 'true') !== 'false';
 
@@ -468,7 +469,14 @@ function renderConfig(cfg) {
       <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="addKillZone()">+ Aggiungi fascia</button>
     </div>
     <div class="config-field" style="grid-column:1/-1">
-      <label>OANDA API Key <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(lascia vuoto per dati Yahoo Finance)</span></label>
+      <label>MT5 Bridge URL <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(bridge Python su Windows con MT5 aperto — priorità su tutto)</span></label>
+      <input type="text" id="cfg-mt5_bridge_url" value="${escHtml(mt5BridgeUrl)}"
+             placeholder="es. http://192.168.1.10:5001 oppure http://localhost:5001"
+             style="width:100%;max-width:480px" />
+      <span style="font-size:0.75rem;color:var(--text-muted);margin-left:8px">Lascia vuoto se non usi MT5</span>
+    </div>
+    <div class="config-field" style="grid-column:1/-1">
+      <label>OANDA API Key <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(usato solo se MT5 bridge non disponibile)</span></label>
       <input type="password" id="cfg-oanda_api_key" value="${escHtml(oandaKey)}"
              placeholder="Bearer token OANDA practice/live"
              style="font-family:monospace;width:100%;max-width:480px" />
@@ -619,6 +627,11 @@ async function saveConfig() {
       end:   row.querySelector('.kz-end')?.value   || '11:00',
     })).filter(z => z.start && z.end);
     await fetchJSON('/api/config/kill_zones', { method: 'PUT', body: JSON.stringify({ value: JSON.stringify(zones) }) });
+  }
+  // MT5 bridge URL
+  const mt5El = document.getElementById('cfg-mt5_bridge_url');
+  if (mt5El) {
+    await fetchJSON('/api/config/mt5_bridge_url', { method: 'PUT', body: JSON.stringify({ value: mt5El.value.trim() }) });
   }
   // OANDA credentials
   const oandaKeyEl  = document.getElementById('cfg-oanda_api_key');
