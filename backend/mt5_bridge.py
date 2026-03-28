@@ -519,4 +519,5 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, _shutdown)
 
     logger.info("MT5 Python Bridge starting on port %s", port)
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port,
+                forwarded_allow_ips="*", proxy_headers=False)
