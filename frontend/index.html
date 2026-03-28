@@ -695,5 +695,31 @@
 
   <script src="/static/charts.js?v=20260328"></script>
   <script src="/static/app.js?v=20260328"></script>
+  <script>
+  // Inline — indipendente dalla cache di app.js
+  document.addEventListener('DOMContentLoaded', async function() {
+    // Carica valori attuali
+    try {
+      const cfg = await fetch('/api/config').then(r=>r.json());
+      const u = document.getElementById('static-mt5-url');
+      const k = document.getElementById('static-oanda-key');
+      const p = document.getElementById('static-oanda-practice');
+      if(u) u.value = cfg['mt5_bridge_url'] || '';
+      if(k) k.value = cfg['oanda_api_key']  || '';
+      if(p) p.checked = (cfg['oanda_practice']||'true') !== 'false';
+    } catch(e){}
+  });
+  window.saveDataSources = async function() {
+    const url  = (document.getElementById('static-mt5-url')?.value||'').trim();
+    const key  = (document.getElementById('static-oanda-key')?.value||'').trim();
+    const prac = document.getElementById('static-oanda-practice')?.checked !== false;
+    const h = {'Content-Type':'application/json'};
+    await fetch('/api/config/mt5_bridge_url', {method:'PUT',headers:h,body:JSON.stringify({value:url})});
+    await fetch('/api/config/oanda_api_key',  {method:'PUT',headers:h,body:JSON.stringify({value:key})});
+    await fetch('/api/config/oanda_practice', {method:'PUT',headers:h,body:JSON.stringify({value:prac?'true':'false'})});
+    const ok = document.getElementById('static-save-ok');
+    if(ok){ok.style.display='inline';setTimeout(()=>ok.style.display='none',3000);}
+  };
+  </script>
 </body>
 </html>
