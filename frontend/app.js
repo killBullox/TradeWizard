@@ -1,30 +1,6 @@
 /* ====== TradeWizard Frontend ====== */
 'use strict';
 
-async function saveDataSources() {
-  const url  = document.getElementById('static-mt5-url')?.value.trim() || '';
-  const key  = document.getElementById('static-oanda-key')?.value.trim() || '';
-  const prac = document.getElementById('static-oanda-practice')?.checked !== false;
-  await fetch('/api/config/mt5_bridge_url', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:url})});
-  await fetch('/api/config/oanda_api_key',  {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:key})});
-  await fetch('/api/config/oanda_practice', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:prac?'true':'false'})});
-  const ok = document.getElementById('static-save-ok');
-  if (ok) { ok.style.display='inline'; setTimeout(()=>ok.style.display='none',3000); }
-}
-
-async function loadDataSources() {
-  try {
-    const cfg = await fetch('/api/config').then(r=>r.json());
-    const u = document.getElementById('static-mt5-url');
-    const k = document.getElementById('static-oanda-key');
-    const p = document.getElementById('static-oanda-practice');
-    if (u) u.value = cfg['mt5_bridge_url'] || '';
-    if (k) k.value = cfg['oanda_api_key']  || '';
-    if (p) p.checked = (cfg['oanda_practice'] || 'true') !== 'false';
-  } catch(e) {}
-}
-window.saveDataSources = saveDataSources;
-
 const WS_URL = `ws://${location.host}/ws`;
 const API    = '';
 
@@ -1489,7 +1465,6 @@ async function boot() {
   renderPairsGrid();
   connectWS();
   await refreshAll();
-  loadDataSources();
   // Periodic auto-refresh (every 30s)
   setInterval(refreshTrades, 30000);
 }

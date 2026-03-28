@@ -629,26 +629,6 @@
 
       <!-- Settings Tab -->
       <div class="tab-content" id="tab-settings">
-        <div class="card" style="margin-bottom:16px">
-          <div class="card-header"><h3>🔌 MT5 Bridge &amp; Dati</h3></div>
-          <div style="padding:16px;display:grid;gap:12px">
-            <div>
-              <label style="display:block;margin-bottom:6px;font-weight:500">MT5 Bridge URL</label>
-              <small style="color:var(--text-muted)">Bridge Python su Windows con MT5 aperto. Es: http://localhost:5002</small>
-              <input type="text" id="static-mt5-url" style="width:100%;margin-top:6px;padding:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)" placeholder="http://localhost:5002" />
-            </div>
-            <div>
-              <label style="display:block;margin-bottom:6px;font-weight:500">OANDA API Key <small style="color:var(--text-muted)">(fallback se MT5 non disponibile)</small></label>
-              <input type="password" id="static-oanda-key" style="width:100%;padding:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:monospace" placeholder="Bearer token OANDA" />
-              <label style="display:flex;align-items:center;gap:8px;margin-top:8px">
-                <input type="checkbox" id="static-oanda-practice" checked />
-                <span style="font-size:0.85rem">Account Practice (deseleziona per Live)</span>
-              </label>
-            </div>
-            <button onclick="saveDataSources()" class="btn btn-primary" style="width:fit-content">💾 Salva Sorgenti Dati</button>
-            <span id="static-save-ok" style="color:#4ade80;display:none">✅ Salvato!</span>
-          </div>
-        </div>
         <div class="card">
           <div class="card-header"><h3>⚙️ System Configuration</h3></div>
           <div id="config-form" class="config-form"></div>
@@ -695,31 +675,5 @@
 
   <script src="/static/charts.js?v=20260328"></script>
   <script src="/static/app.js?v=20260328"></script>
-  <script>
-  // Inline — indipendente dalla cache di app.js
-  document.addEventListener('DOMContentLoaded', async function() {
-    // Carica valori attuali
-    try {
-      const cfg = await fetch('/api/config').then(r=>r.json());
-      const u = document.getElementById('static-mt5-url');
-      const k = document.getElementById('static-oanda-key');
-      const p = document.getElementById('static-oanda-practice');
-      if(u) u.value = cfg['mt5_bridge_url'] || '';
-      if(k) k.value = cfg['oanda_api_key']  || '';
-      if(p) p.checked = (cfg['oanda_practice']||'true') !== 'false';
-    } catch(e){}
-  });
-  window.saveDataSources = async function() {
-    const url  = (document.getElementById('static-mt5-url')?.value||'').trim();
-    const key  = (document.getElementById('static-oanda-key')?.value||'').trim();
-    const prac = document.getElementById('static-oanda-practice')?.checked !== false;
-    const h = {'Content-Type':'application/json'};
-    await fetch('/api/config/mt5_bridge_url', {method:'PUT',headers:h,body:JSON.stringify({value:url})});
-    await fetch('/api/config/oanda_api_key',  {method:'PUT',headers:h,body:JSON.stringify({value:key})});
-    await fetch('/api/config/oanda_practice', {method:'PUT',headers:h,body:JSON.stringify({value:prac?'true':'false'})});
-    const ok = document.getElementById('static-save-ok');
-    if(ok){ok.style.display='inline';setTimeout(()=>ok.style.display='none',3000);}
-  };
-  </script>
 </body>
 </html>
