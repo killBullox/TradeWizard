@@ -198,23 +198,22 @@ async function save() {{
 
 
 @app.get("/", response_class=HTMLResponse)
-async def root(response: Response):
+async def root():
+    import re, time
     index = os.path.join(frontend_dir, "index.html")
     if os.path.exists(index):
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        # Read and patch the HTML to bust JS cache
-        with open(index, "r") as f:
+        with open(index, "r", encoding="utf-8") as f:
             html = f.read()
-        import time
         v = str(int(time.time()))
-        html = html.replace('src="/static/app.js"', f'src="/static/app.js?v={v}"')
-        html = html.replace('href="/static/styles.css"', f'href="/static/styles.css?v={v}"')
+        # Replace static asset URLs with versioned ones (handles existing ?v=... too)
+        html = re.sub(r'src="/static/app\.js[^"]*"', f'src="/static/app.js?v={v}"', html)
+        html = re.sub(r'href="/static/styles\.css[^"]*"', f'href="/static/styles.css?v={v}"', html)
+        html = re.sub(r'src="/static/charts\.js[^"]*"', f'src="/static/charts.js?v={v}"', html)
         return HTMLResponse(content=html, headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Pragma": "no-cache",
         })
-    return {"message": "TradeWizard API", "docs": "/docs"}
+    return HTMLResponse(content='{"message":"TradeWizard API"}')
 
 
 @app.get("/api/status")
