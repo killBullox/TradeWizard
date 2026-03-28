@@ -155,8 +155,8 @@ class BacktestResult:
 
 class ICTAnalyzer:
     SWING_W         = 5
-    DISP_MULT       = 1.3
-    MIN_FVG_ATR     = 0.25
+    DISP_MULT       = 0.5    # body ≥ 0.5×ATR = realistic H1 displacement
+    MIN_FVG_ATR     = 0.15   # gap ≥ 0.15×ATR (was 0.25 — too strict for H1)
     EQ_TOL          = 0.20
     MIN_CONFLUENCE  = 2
     KILL_ZONES      = [(7, 10), (12, 15), (15, 17)]
@@ -376,77 +376,81 @@ class ICTAnalyzer:
     # ── Build final entry signals ─────────────────────────────────────────────────
     def build_signals(self) -> list[dict]:
         structure = self.market_structure()
-        fvgs   = self.detect_fvgs()   if self.strategy in ("FVG",        "Mixed") else []
+        fvgs   = self.detect_fvgs()         if self.strategy in ("FVG",        "Mixed") else []
         obs    = self.detect_obs(structure) if self.strategy in ("OrderBlock", "Mixed") else []
-        sweeps = self.detect_sweeps() if self.strategy in ("Liquidity",  "Mixed") else []
+        sweeps = self.detect_sweeps()       if self.strategy in ("Liquidity",  "Mixed") else []
 
         signals: list[dict] = []
 
+        # ── FVG: signal fires at FORMATION bar (ICT correct approach)
+        # The pending order system handles waiting for price to return to the level.
         for fvg in fvgs:
-            formed  = fvg["formed_at"]
-            max_bar = fvg["mitigated_at"] or self.n
-            for i in range(formed + 1, min(max_bar, self.n)):
-                c = self.candles[i]; b = self.bias(i); z = self.zone(i)
-                tags = ["FVG"]
-                if fvg["type"] == "FVG_BULL":
-                    if not (c.low <= fvg["top"] and c.low >= fvg["bottom"]): continue
-                    if b == "bullish":  tags.append("BIAS")
-                    if z == "discount": tags.append("DISCOUNT")
-                    if self.in_kz(i):  tags.append("KILLZONE")
-                    if len(tags) >= self.MIN_CONFLUENCE:
-                        signals.append({"bar": i, "type": "FVG_BULL",
-                                        "top": fvg["top"], "bottom": fvg["bottom"],
-                                        "mid": fvg["mid"], "confluence": tags}); break
-                elif fvg["type"] == "FVG_BEAR":
-                    if not (c.high >= fvg["bottom"] and c.high <= fvg["top"]): continue
-                    if b == "bearish": tags.append("BIAS")
-                    if z == "premium": tags.append("PREMIUM")
-                    if self.in_kz(i): tags.append("KILLZONE")
-                    if len(tags) >= self.MIN_CONFLUENCE:
-                        signals.append({"bar": i, "type": "FVG_BEAR",
-                                        "top": fvg["top"], "bottom": fvg["bottom"],
-                                        "mid": fvg["mid"], "confluence": tags}); break
+            i = fvg["formed_at"]
+            if i >= self.n:
+                continue
+            b = self.bias(i); z = self.zone(i)
+            tags = ["FVG"]
+            if fvg["type"] == "FVG_BULL":
+                if b == "bullish":  tags.append("BIAS")
+                if z == "discount": tags.append("DISCOUNT")
+                if self.in_kz(i):  tags.append("KILLZONE")
+                if len(tags) >= self.MIN_CONFLUENCE:
+                    signals.append({"bar": i, "type": "FVG_BULL",
+                                    "top": fvg["top"], "bottom": fvg["bottom"],
+                                    "mid": fvg["mid"], "confluence": tags,
+                                    "expires_at": fvg["mitigated_at"]})
+            elif fvg["type"] == "FVG_BEAR":
+                if b == "bearish": tags.append("BIAS")
+                if z == "premium": tags.append("PREMIUM")
+                if self.in_kz(i): tags.append("KILLZONE")
+                if len(tags) >= self.MIN_CONFLUENCE:
+                    signals.append({"bar": i, "type": "FVG_BEAR",
+                                    "top": fvg["top"], "bottom": fvg["bottom"],
+                                    "mid": fvg["mid"], "confluence": tags,
+                                    "expires_at": fvg["mitigated_at"]})
 
+        # ── OB: signal fires at FORMATION bar
         for ob in obs:
-            formed  = ob["formed_at"]
-            max_bar = ob["mitigated_at"] or self.n
-            for i in range(formed + 1, min(max_bar, self.n)):
-                c = self.candles[i]; b = self.bias(i); z = self.zone(i)
-                tags = ["OB"]
-                if ob["type"] == "OB_BULL":
-                    if not (c.low <= ob["top"] and c.high >= ob["bottom"]): continue
-                    if b == "bullish":  tags.append("BIAS")
-                    if z == "discount": tags.append("DISCOUNT")
-                    if self.in_kz(i):  tags.append("KILLZONE")
-                    if len(tags) >= self.MIN_CONFLUENCE:
-                        signals.append({"bar": i, "type": "OB_BULL",
-                                        "top": ob["top"], "bottom": ob["bottom"],
-                                        "mid": ob["mid"], "confluence": tags}); break
-                elif ob["type"] == "OB_BEAR":
-                    if not (c.high >= ob["bottom"] and c.low <= ob["top"]): continue
-                    if b == "bearish": tags.append("BIAS")
-                    if z == "premium": tags.append("PREMIUM")
-                    if self.in_kz(i): tags.append("KILLZONE")
-                    if len(tags) >= self.MIN_CONFLUENCE:
-                        signals.append({"bar": i, "type": "OB_BEAR",
-                                        "top": ob["top"], "bottom": ob["bottom"],
-                                        "mid": ob["mid"], "confluence": tags}); break
+            i = ob["formed_at"]
+            if i >= self.n:
+                continue
+            b = self.bias(i); z = self.zone(i)
+            tags = ["OB"]
+            if ob["type"] == "OB_BULL":
+                if b == "bullish":  tags.append("BIAS")
+                if z == "discount": tags.append("DISCOUNT")
+                if self.in_kz(i):  tags.append("KILLZONE")
+                if len(tags) >= self.MIN_CONFLUENCE:
+                    signals.append({"bar": i, "type": "OB_BULL",
+                                    "top": ob["top"], "bottom": ob["bottom"],
+                                    "mid": ob["mid"], "confluence": tags,
+                                    "expires_at": ob["mitigated_at"]})
+            elif ob["type"] == "OB_BEAR":
+                if b == "bearish": tags.append("BIAS")
+                if z == "premium": tags.append("PREMIUM")
+                if self.in_kz(i): tags.append("KILLZONE")
+                if len(tags) >= self.MIN_CONFLUENCE:
+                    signals.append({"bar": i, "type": "OB_BEAR",
+                                    "top": ob["top"], "bottom": ob["bottom"],
+                                    "mid": ob["mid"], "confluence": tags,
+                                    "expires_at": ob["mitigated_at"]})
 
+        # ── Liquidity sweeps: market entry at sweep bar
         for sw in sweeps:
             i = sw["bar"]; b = self.bias(i); z = self.zone(i)
             tags = ["SWEEP"]
             if sw["type"] == "LIQ_BULL":
-                if b == "bullish":               tags.append("BIAS")
+                if b == "bullish":                  tags.append("BIAS")
                 if z in ("discount","equilibrium"): tags.append("DISCOUNT")
-                if self.in_kz(i):               tags.append("KILLZONE")
+                if self.in_kz(i):                  tags.append("KILLZONE")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "LIQ_BULL",
                                     "top": sw["top"], "bottom": sw["bottom"],
                                     "mid": sw["mid"], "confluence": tags})
             elif sw["type"] == "LIQ_BEAR":
-                if b == "bearish":               tags.append("BIAS")
-                if z in ("premium","equilibrium"): tags.append("PREMIUM")
-                if self.in_kz(i):               tags.append("KILLZONE")
+                if b == "bearish":                  tags.append("BIAS")
+                if z in ("premium","equilibrium"):  tags.append("PREMIUM")
+                if self.in_kz(i):                  tags.append("KILLZONE")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "LIQ_BEAR",
                                     "top": sw["top"], "bottom": sw["bottom"],
@@ -640,10 +644,15 @@ class Backtester:
                  "OB_BULL":"OB↑","OB_BEAR":"OB↓",
                  "LIQ_BULL":"Liq↑","LIQ_BEAR":"Liq↓"}.get(sig_type, sig_type)
 
+        # max_wait: use expires_at from signal (FVG mitigated) or 48 bars
+        expires_at = sig.get("expires_at")
+        max_wait = max(1, (expires_at - bar)) if expires_at else 48
+
         return PendingOrder(id=trade_id, setup=label, direction=direction,
                             signal_bar=bar, entry_price=round(entry, 5),
                             stop_loss=round(sl, 5), take_profit=round(tp, 5),
-                            lot_size=lot_size, confluence=sig.get("confluence", []))
+                            lot_size=lot_size, confluence=sig.get("confluence", []),
+                            max_wait=max_wait)
 
     def _close(self, trade, exit_price, result, bar, time, balance) -> SimTrade:
         trade.exit_bar   = bar
