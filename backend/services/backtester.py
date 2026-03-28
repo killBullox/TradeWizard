@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from typing import Literal, Optional
@@ -465,7 +466,8 @@ class ICTAnalyzer:
 class Backtester:
     def __init__(self, symbol, timeframe, strategy="Mixed", bars=500,
                  risk_percent=1.0, rr_ratio=2.0, initial_balance=10_000.0,
-                 max_risk_usd=None, enabled_setups=None):
+                 max_risk_usd=None, enabled_setups=None,
+                 oanda_api_key: str = "", oanda_practice: bool = True):
         self.symbol          = symbol
         self.timeframe       = timeframe
         self.strategy        = strategy
@@ -473,14 +475,15 @@ class Backtester:
         self.risk_percent    = risk_percent
         self.rr_ratio        = rr_ratio
         self.initial_balance = initial_balance
-        self.max_risk_usd    = max_risk_usd  # None = no cap
-        # None = all setups enabled; otherwise a set of sig type strings
+        self.max_risk_usd    = max_risk_usd
         self.enabled_setups  = set(enabled_setups) if enabled_setups else None
+        self.oanda_api_key   = oanda_api_key or os.getenv("OANDA_API_KEY", "")
+        self.oanda_practice  = oanda_practice
+        self.m1_index: dict[str, list[dict]] = {}   # hour_key → [m1 candles]
+
         self.pip             = (0.01 if "JPY" in symbol else
                                 1.0  if symbol in ("XAUUSD","US30","NAS100","US500") else
                                 0.0001)
-        # Dollar value of 1 pip for 1 standard lot
-        # JPY pairs: 1000 JPY/pip ÷ ~155 rate ≈ $6.50; CHF: ÷0.90 ≈ $11; CAD: ÷1.38 ≈ $7.25
         _pip_val_map = {
             "XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0,
             "USDJPY": 6.5,  "EURJPY": 6.5,  "GBPJPY": 6.5,  "AUDJPY": 6.5,
@@ -488,16 +491,32 @@ class Backtester:
             "USDCHF": 11.0, "EURCHF": 11.0, "GBPCHF": 11.0,
             "USDCAD": 7.25, "EURCAD": 7.25, "GBPCAD": 7.25,
         }
-        self.pip_value = _pip_val_map.get(symbol, 10.0)  # default $10/pip/lot for USD-quote pairs
+        self.pip_value = _pip_val_map.get(symbol, 10.0)
 
     async def run(self) -> BacktestResult:
-        from services.forex_data import fetch_ohlcv
-        raw     = await fetch_ohlcv(self.symbol, self.timeframe, self.bars)
+        from services.oanda_data import fetch_ohlcv, fetch_m1_for_period, build_m1_index
+        raw     = await fetch_ohlcv(self.symbol, self.timeframe, self.bars,
+                                    api_key=self.oanda_api_key,
+                                    practice=self.oanda_practice)
         candles = [Candle(**c) for c in raw.get("candles", [])]
         if len(candles) < 50:
             return BacktestResult(symbol=self.symbol, timeframe=self.timeframe,
                                   strategy=self.strategy, bars_used=len(candles),
                                   risk_percent=self.risk_percent, rr_ratio=self.rr_ratio)
+
+        # Fetch M1 data for precise intra-candle timing (only when OANDA key is set)
+        if self.oanda_api_key:
+            try:
+                first_dt = datetime.fromisoformat(candles[0].time)
+                last_dt  = datetime.fromisoformat(candles[-1].time) + timedelta(hours=1)
+                m1_raw   = await fetch_m1_for_period(
+                    self.symbol, first_dt, last_dt,
+                    api_key=self.oanda_api_key, practice=self.oanda_practice)
+                self.m1_index = build_m1_index(m1_raw)
+                log.info("M1 index: %d hour buckets for %s", len(self.m1_index), self.symbol)
+            except Exception as exc:
+                log.warning("M1 fetch skipped: %s", exc)
+
         return self._simulate(candles)
 
     def _simulate(self, candles: list[Candle]) -> BacktestResult:
@@ -654,11 +673,27 @@ class Backtester:
                             lot_size=lot_size, confluence=sig.get("confluence", []),
                             max_wait=max_wait)
 
-    @staticmethod
-    def _intrabar_time(candle_time: str, price: float, candle, candle_secs: int = 3600) -> str:
-        """Estimate the timestamp within a candle when a price level was touched."""
+    def _intrabar_time(self, candle_time: str, price: float, candle,
+                       candle_secs: int = 3600) -> str:
+        """
+        Find the precise timestamp when `price` was touched inside a candle.
+
+        If M1 data is available (OANDA key set), scans the M1 candles for
+        that hour and returns the time of the first bar that contains `price`.
+        Falls back to OHLC-fraction estimation when M1 data is absent.
+        """
+        # ── M1 lookup (precise) ────────────────────────────────────────────
+        hour_key = candle_time[:13]   # "2024-01-15T14"
+        m1_list  = self.m1_index.get(hour_key, [])
+        if m1_list:
+            for m1 in m1_list:
+                if m1["low"] <= price <= m1["high"]:
+                    return m1["time"]
+            # Price not found exactly — use last M1 bar of the hour
+            return m1_list[-1]["time"]
+
+        # ── OHLC-fraction fallback ─────────────────────────────────────────
         try:
-            from datetime import datetime, timedelta
             dt  = datetime.fromisoformat(candle_time)
             rng = candle.high - candle.low
             if rng < 1e-8:
@@ -690,8 +725,12 @@ class Backtester:
 async def run_backtest(symbol, timeframe="H1", strategy="Mixed",
                        bars=500, risk_percent=1.0, rr_ratio=2.0,
                        initial_balance=10_000.0, max_risk_usd=None,
-                       enabled_setups=None) -> BacktestResult:
-    return await Backtester(symbol=symbol, timeframe=timeframe, strategy=strategy,
-                            bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
-                            initial_balance=initial_balance, max_risk_usd=max_risk_usd,
-                            enabled_setups=enabled_setups).run()
+                       enabled_setups=None,
+                       oanda_api_key: str = "", oanda_practice: bool = True) -> BacktestResult:
+    return await Backtester(
+        symbol=symbol, timeframe=timeframe, strategy=strategy,
+        bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
+        initial_balance=initial_balance, max_risk_usd=max_risk_usd,
+        enabled_setups=enabled_setups,
+        oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
+    ).run()

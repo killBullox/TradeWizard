@@ -373,6 +373,11 @@ async def backtest_run(data: dict):
         if strategy not in valid_st:
             raise HTTPException(400, f"strategy must be one of {valid_st}")
 
+        # Read OANDA credentials from DB config
+        async with async_session_factory() as s:
+            oanda_key      = await get_config("oanda_api_key", s) or ""
+            oanda_practice = (await get_config("oanda_practice", s) or "true") != "false"
+
         # Create DB record
         async with async_session_factory() as s:
             run = BacktestRun(
@@ -387,7 +392,8 @@ async def backtest_run(data: dict):
         # Execute in background so the HTTP call returns quickly
         asyncio.create_task(_exec_backtest(
             run_id, symbol, timeframe, strategy, bars,
-            risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups
+            risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups,
+            oanda_key, oanda_practice,
         ))
         return {"run_id": run_id, "status": "RUNNING"}
     except HTTPException:
@@ -399,7 +405,8 @@ async def backtest_run(data: dict):
 
 async def _exec_backtest(
     run_id, symbol, timeframe, strategy, bars,
-    risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None
+    risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None,
+    oanda_api_key="", oanda_practice=True,
 ):
     try:
         result = await run_backtest(
@@ -407,6 +414,7 @@ async def _exec_backtest(
             bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
             initial_balance=balance, max_risk_usd=max_risk_usd,
             enabled_setups=enabled_setups,
+            oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
         )
         async with async_session_factory() as s:
             run = await s.get(BacktestRun, run_id)

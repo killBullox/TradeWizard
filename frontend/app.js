@@ -423,6 +423,8 @@ function renderConfig(cfg) {
   const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval'];
   const paperOn      = cfg['paper_mode'] === 'true' || cfg['paper_mode'] === true;
   const weekendOn    = cfg['trade_on_weekend'] === 'true';
+  const oandaKey     = cfg['oanda_api_key'] || '';
+  const oandaPractice = (cfg['oanda_practice'] || 'true') !== 'false';
 
   const ALL_PAIRS = ['EURUSD','GBPUSD','USDJPY','USDCHF','AUDUSD','USDCAD','NZDUSD','XAUUSD','US30','NAS100','US500'];
   let enabledPairs = [];
@@ -464,6 +466,17 @@ function renderConfig(cfg) {
           </div>`).join('')}
       </div>
       <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="addKillZone()">+ Aggiungi fascia</button>
+    </div>
+    <div class="config-field" style="grid-column:1/-1">
+      <label>OANDA API Key <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(lascia vuoto per dati Yahoo Finance)</span></label>
+      <input type="password" id="cfg-oanda_api_key" value="${escHtml(oandaKey)}"
+             placeholder="Bearer token OANDA practice/live"
+             style="font-family:monospace;width:100%;max-width:480px" />
+      <label class="toggle-switch" style="margin-top:8px">
+        <input type="checkbox" id="cfg-oanda_practice" ${oandaPractice ? 'checked' : ''}>
+        <span class="toggle-slider"></span>
+      </label>
+      <span style="font-size:0.75rem;color:var(--text-muted);margin-left:10px">Account Practice (deseleziona per Live)</span>
     </div>
     <div class="config-field" style="grid-column:1/-1">
       <label>Enabled Pairs</label>
@@ -606,6 +619,15 @@ async function saveConfig() {
       end:   row.querySelector('.kz-end')?.value   || '11:00',
     })).filter(z => z.start && z.end);
     await fetchJSON('/api/config/kill_zones', { method: 'PUT', body: JSON.stringify({ value: JSON.stringify(zones) }) });
+  }
+  // OANDA credentials
+  const oandaKeyEl  = document.getElementById('cfg-oanda_api_key');
+  const oandaPracEl = document.getElementById('cfg-oanda_practice');
+  if (oandaKeyEl) {
+    await fetchJSON('/api/config/oanda_api_key', { method: 'PUT', body: JSON.stringify({ value: oandaKeyEl.value.trim() }) });
+  }
+  if (oandaPracEl) {
+    await fetchJSON('/api/config/oanda_practice', { method: 'PUT', body: JSON.stringify({ value: oandaPracEl.checked ? 'true' : 'false' }) });
   }
   // Enabled pairs
   const checked = [...document.querySelectorAll('.cfg-pair-chk:checked')].map(el => el.value);
