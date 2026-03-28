@@ -629,6 +629,26 @@
 
       <!-- Settings Tab -->
       <div class="tab-content" id="tab-settings">
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-header"><h3>🔌 MT5 Bridge &amp; Dati</h3></div>
+          <div style="padding:16px;display:grid;gap:12px">
+            <div>
+              <label style="display:block;margin-bottom:6px;font-weight:500">MT5 Bridge URL</label>
+              <small style="color:var(--text-muted)">Bridge Python su Windows con MT5 aperto. Es: http://localhost:5002</small>
+              <input type="text" id="static-mt5-url" style="width:100%;margin-top:6px;padding:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)" placeholder="http://localhost:5002" />
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:6px;font-weight:500">OANDA API Key <small style="color:var(--text-muted)">(fallback se MT5 non disponibile)</small></label>
+              <input type="password" id="static-oanda-key" style="width:100%;padding:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary);font-family:monospace" placeholder="Bearer token OANDA" />
+              <label style="display:flex;align-items:center;gap:8px;margin-top:8px">
+                <input type="checkbox" id="static-oanda-practice" checked />
+                <span style="font-size:0.85rem">Account Practice (deseleziona per Live)</span>
+              </label>
+            </div>
+            <button onclick="saveDataSources()" class="btn btn-primary" style="width:fit-content">💾 Salva Sorgenti Dati</button>
+            <span id="static-save-ok" style="color:#4ade80;display:none">✅ Salvato!</span>
+          </div>
+        </div>
         <div class="card">
           <div class="card-header"><h3>⚙️ System Configuration</h3></div>
           <div id="config-form" class="config-form"></div>
