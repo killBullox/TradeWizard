@@ -161,9 +161,11 @@ async def handle_ws_command(ws: WebSocket, msg: dict):
 #  REST API Endpoints
 # ------------------------------------------------------------------ #
 @app.get("/")
-async def root():
+async def root(response: Response):
     index = os.path.join(frontend_dir, "index.html")
     if os.path.exists(index):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
         return FileResponse(index)
     return {"message": "TradeWizard API", "docs": "/docs"}
 
