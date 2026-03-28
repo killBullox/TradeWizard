@@ -484,6 +484,7 @@ async def _exec_backtest(
                 run.sharpe        = result.sharpe
                 run.trades_json   = json.dumps([t.__dict__ for t in result.trades], default=str)
                 run.equity_json   = json.dumps(result.equity)
+                run.data_warning  = result.data_warning or None
                 run.completed_at  = datetime.utcnow()
                 await s.commit()
     except Exception as exc:
@@ -657,6 +658,7 @@ def _bt_to_dict(r: BacktestRun) -> dict:
         "avg_rr":       r.avg_rr,
         "sharpe":       r.sharpe,
         "error":        r.error,
+        "data_warning": r.data_warning,
         "created_at":   r.created_at.isoformat() if r.created_at else None,
         "completed_at": r.completed_at.isoformat() if r.completed_at else None,
     }

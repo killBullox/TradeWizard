@@ -104,6 +104,7 @@ class BacktestResult:
     avg_rr:          float = 0.0
     sharpe:          float = 0.0
     expectancy:      float = 0.0
+    data_warning:    str   = ""
 
     def compute_stats(self, pip: float):
         closed = [t for t in self.trades if t.result and t.result != "OPEN"]
@@ -516,6 +517,7 @@ class Backtester:
                                   risk_percent=self.risk_percent, rr_ratio=self.rr_ratio)
 
         # ── 2. Fetch M1 for precise intra-candle timing ────────────────────────
+        m1_source = None
         try:
             first_dt = datetime.fromisoformat(candles[0].time)
             last_dt  = datetime.fromisoformat(candles[-1].time) + timedelta(hours=1)
@@ -524,21 +526,43 @@ class Backtester:
                 from services.mt5_data import fetch_m1_for_period as _m1_fetch
                 m1_raw = await _m1_fetch(self.symbol, first_dt, last_dt,
                                          bridge_url=self.mt5_bridge_url)
+                m1_source = "MT5"
             elif self.oanda_api_key:
                 from services.oanda_data import fetch_m1_for_period as _m1_fetch
                 m1_raw = await _m1_fetch(self.symbol, first_dt, last_dt,
                                          api_key=self.oanda_api_key,
                                          practice=self.oanda_practice)
+                m1_source = "OANDA"
             else:
                 m1_raw = []
 
             if m1_raw:
                 self.m1_index = build_m1_index(m1_raw)
-                log.info("M1 index: %d hour buckets for %s", len(self.m1_index), self.symbol)
+                logger.info("M1 index: %d hour buckets from %s for %s",
+                            len(self.m1_index), m1_source, self.symbol)
+            else:
+                logger.warning("M1 data empty from %s — timestamps will be H1 resolution", m1_source or "no source")
         except Exception as exc:
-            log.warning("M1 fetch skipped: %s", exc)
+            logger.warning("M1 fetch failed (%s): %s", m1_source, exc)
 
-        return self._simulate(candles)
+        result = self._simulate(candles)
+
+        # ── 3. Set data_warning if no precise timestamps ───────────────────────
+        if not self.m1_index:
+            if not self.mt5_bridge_url and not self.oanda_api_key:
+                result.data_warning = (
+                    "⚠️ Nessuna sorgente dati M1 configurata. "
+                    "I timestamp di entry/exit mostrano solo l'inizio dell'ora H1, non il momento preciso. "
+                    "Configura MT5 Bridge URL (o OANDA API Key) nei Settings per timestamps reali al minuto."
+                )
+            else:
+                result.data_warning = (
+                    f"⚠️ Dati M1 non disponibili da {m1_source or 'sorgente configurata'}. "
+                    "I timestamp mostrano l'inizio dell'ora H1. "
+                    "Verifica che MT5 Bridge sia attivo e raggiungibile."
+                )
+
+        return result
 
     def _simulate(self, candles: list[Candle]) -> BacktestResult:
         result   = BacktestResult(symbol=self.symbol, timeframe=self.timeframe,
@@ -697,32 +721,21 @@ class Backtester:
     def _intrabar_time(self, candle_time: str, price: float, candle,
                        candle_secs: int = 3600) -> str:
         """
-        Find the precise timestamp when `price` was touched inside a candle.
-
-        If M1 data is available (OANDA key set), scans the M1 candles for
-        that hour and returns the time of the first bar that contains `price`.
-        Falls back to OHLC-fraction estimation when M1 data is absent.
+        Return the precise M1 timestamp when `price` was touched inside a candle.
+        If M1 data is not available, returns the H1 candle open time as-is (no estimation).
         """
-        # ── M1 lookup (precise) ────────────────────────────────────────────
         hour_key = candle_time[:13]   # "2024-01-15T14"
         m1_list  = self.m1_index.get(hour_key, [])
         if m1_list:
             for m1 in m1_list:
                 if m1["low"] <= price <= m1["high"]:
                     return m1["time"]
-            # Price not found exactly — use last M1 bar of the hour
-            return m1_list[-1]["time"]
+            # Price not found in any M1 bar — use closest by price distance
+            closest = min(m1_list, key=lambda m: min(abs(price - m["low"]), abs(price - m["high"])))
+            return closest["time"]
 
-        # ── OHLC-fraction fallback ─────────────────────────────────────────
-        try:
-            dt  = datetime.fromisoformat(candle_time)
-            rng = candle.high - candle.low
-            if rng < 1e-8:
-                return candle_time
-            frac = min(max(abs(price - candle.open) / rng, 0.05), 0.95)
-            return (dt + timedelta(seconds=int(frac * candle_secs))).isoformat()
-        except Exception:
-            return candle_time
+        # No M1 data — return candle open time (H1 resolution, no estimates)
+        return candle_time
 
     def _close(self, trade, exit_price, result, bar, time, balance, candle=None) -> SimTrade:
         trade.exit_bar   = bar

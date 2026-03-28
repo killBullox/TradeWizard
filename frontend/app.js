@@ -1272,6 +1272,21 @@ function renderBtResults(run) {
   if (!resultsEl) return;
   resultsEl.style.display = 'block';
 
+  // ── Data warning banner ───────────────────────────────────────────────
+  let warnEl = document.getElementById('bt-data-warning');
+  if (!warnEl) {
+    warnEl = document.createElement('div');
+    warnEl.id = 'bt-data-warning';
+    warnEl.style.cssText = 'display:none;margin-bottom:12px;padding:12px 16px;border-radius:8px;background:#422006;border:1px solid #f97316;color:#fed7aa;font-size:0.875rem;line-height:1.5';
+    resultsEl.prepend(warnEl);
+  }
+  if (run.data_warning) {
+    warnEl.textContent = run.data_warning;
+    warnEl.style.display = 'block';
+  } else {
+    warnEl.style.display = 'none';
+  }
+
   // Stats row
   const statsEl = document.getElementById('bt-stats-row');
   if (statsEl) {

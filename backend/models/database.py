@@ -141,6 +141,7 @@ class BacktestRun(Base):
     trades_json  = Column(Text,    nullable=True)   # JSON list of sim trades
     equity_json  = Column(Text,    nullable=True)   # JSON equity curve
     error        = Column(Text,    nullable=True)
+    data_warning = Column(Text,    nullable=True)   # set when M1 data unavailable
     created_at   = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
 
