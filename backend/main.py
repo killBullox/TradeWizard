@@ -18,7 +18,7 @@ from typing import Set
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, desc, delete
 
@@ -160,8 +160,43 @@ async def handle_ws_command(ws: WebSocket, msg: dict):
 # ------------------------------------------------------------------ #
 #  REST API Endpoints
 # ------------------------------------------------------------------ #
-@app.get("/")
-async def root(response: Response):
+@app.get("/mt5-setup", response_class=HTMLResponse)
+async def mt5_setup_page():
+    async with async_session_factory() as s:
+        current_url = await get_config("mt5_bridge_url", s) or ""
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>MT5 Bridge Setup</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 600px; margin: 60px auto; padding: 20px; background:#1a1a2e; color:#eee; }}
+  h2 {{ color:#a78bfa; }}
+  input {{ width:100%; padding:10px; font-size:16px; background:#2d2d44; border:1px solid #555; color:#eee; border-radius:6px; box-sizing:border-box; margin:10px 0; }}
+  button {{ padding:12px 28px; background:#7c3aed; color:#fff; border:none; border-radius:6px; font-size:16px; cursor:pointer; }}
+  button:hover {{ background:#6d28d9; }}
+  .ok {{ color:#4ade80; margin-top:12px; display:none; }}
+  .info {{ color:#94a3b8; font-size:0.85rem; margin-bottom:20px; }}
+</style>
+</head><body>
+<h2>⚙️ MT5 Bridge URL</h2>
+<p class="info">Inserisci l'URL del bridge MT5 Python che gira sul PC Windows con MetaTrader 5 aperto.<br>
+Esempio: <code>http://192.168.1.10:5001</code> oppure <code>http://localhost:5001</code></p>
+<input type="text" id="url" value="{current_url}" placeholder="http://192.168.1.10:5001" />
+<br>
+<button onclick="save()">💾 Salva</button>
+<p class="ok" id="ok">✅ Salvato!</p>
+<br><br>
+<a href="/" style="color:#a78bfa">← Torna all'app</a>
+<script>
+async function save() {{
+  const val = document.getElementById('url').value.trim();
+  await fetch('/api/config/mt5_bridge_url', {{method:'PUT', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{value:val}})}});
+  document.getElementById('ok').style.display='block';
+  setTimeout(()=>document.getElementById('ok').style.display='none', 3000);
+}}
+</script>
+</body></html>"""
+
+
     index = os.path.join(frontend_dir, "index.html")
     if os.path.exists(index):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
