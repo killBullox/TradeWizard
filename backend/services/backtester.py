@@ -160,10 +160,11 @@ class ICTAnalyzer:
     DISP_MULT       = 0.5    # body ≥ 0.5×ATR
     MIN_FVG_ATR     = 0.15   # gap ≥ 0.15×ATR
     EQ_TOL          = 0.20
-    MIN_CONFLUENCE  = 2      # 2 tags minimum
-    BIAS_STABLE_N   = 1      # bias must be non-neutral
-    KILL_ZONES      = [(7, 10), (12, 15), (15, 17)]
-    MAX_HOLD_BARS   = 16     # force-close after 16 H1 bars (no overnight drift)
+    MIN_CONFLUENCE  = 2
+    BIAS_STABLE_N   = 1
+    # ICT Kill Zones (UTC): Asian 00-03, London 07-10, NY 13-16
+    KILL_ZONES      = [(0, 3), (7, 10), (13, 16)]
+    MAX_HOLD_BARS   = 16     # force-close after 16 H1 bars
 
     def __init__(self, candles: list[Candle], symbol: str, timeframe: str, strategy: str = "Mixed"):
         self.candles  = candles
@@ -194,24 +195,34 @@ class ICTAnalyzer:
         v = self._atr[min(i, self.n - 1)] if self._atr else self.pip * 10
         return max(v, self.pip * 2)
 
-    # ── HTF Bias ────────────────────────────────────────────────────────────────
-    def _calc_bias(self) -> list[str]:
-        e50  = [self.candles[0].close] * self.n
-        e200 = [self.candles[0].close] * self.n
-        k50, k200 = 2 / 51, 2 / 201
-        for i in range(1, self.n):
-            c = self.candles[i].close
-            e50[i]  = c * k50  + e50[i - 1]  * (1 - k50)
-            e200[i] = c * k200 + e200[i - 1] * (1 - k200)
-        out = []
-        for i in range(self.n):
-            c = self.candles[i].close
-            if c > e50[i] and e50[i] > e200[i]:
-                out.append("bullish")
-            elif c < e50[i] and e50[i] < e200[i]:
-                out.append("bearish")
-            else:
-                out.append("neutral")
+    # ── HTF Bias (ICT: swing structure HH/HL = bullish, LH/LL = bearish) ────────
+    def _calc_bias(self, lb: int = 40) -> list[str]:
+        """
+        ICT daily bias via market structure:
+        - Bullish:  recent swing structure shows HH and HL
+        - Bearish:  recent swing structure shows LH and LL
+        - Neutral:  mixed / insufficient data
+        Uses a rolling lookback of `lb` bars to track last 2 swing highs & lows.
+        """
+        out = ["neutral"] * self.n
+        for i in range(lb * 2, self.n):
+            s = max(0, i - lb)
+            # Collect swing highs and lows in lookback window
+            sw_highs = [self.candles[j].high for j in self.sh(s, i + 1)]
+            sw_lows  = [self.candles[j].low  for j in self.sl(s, i + 1)]
+            if len(sw_highs) >= 2 and len(sw_lows) >= 2:
+                hh = sw_highs[-1] > sw_highs[-2]   # Higher High
+                hl = sw_lows[-1]  > sw_lows[-2]    # Higher Low
+                lh = sw_highs[-1] < sw_highs[-2]   # Lower High
+                ll = sw_lows[-1]  < sw_lows[-2]    # Lower Low
+                if hh and hl:
+                    out[i] = "bullish"
+                elif lh and ll:
+                    out[i] = "bearish"
+                elif hh or hl:
+                    out[i] = "bullish"   # partial bullish structure
+                elif lh or ll:
+                    out[i] = "bearish"   # partial bearish structure
         return out
 
     def bias(self, i: int) -> str:
@@ -704,13 +715,25 @@ class Backtester:
         sig_type  = sig["type"]
         direction = "SELL" if "BEAR" in sig_type else "BUY"
         atr       = analyzer.atr(bar)
-        entry     = sig.get("mid", candle.close)
+
+        # ICT OTE: entry at 70.5% retracement of the FVG/OB zone (optimal trade entry)
+        top    = sig.get("top",    candle.close)
+        bottom = sig.get("bottom", candle.close)
+        rng    = top - bottom
+        if direction == "BUY":
+            # 70.5% retracement from top down into the gap = discount entry
+            entry = top - rng * 0.705
+        else:
+            # 70.5% retracement from bottom up into the gap = premium entry
+            entry = bottom + rng * 0.705
 
         if direction == "BUY":
-            sl = sig.get("bottom", entry - atr) - atr * 0.3
+            # SL: just below the structural low (FVG bottom) with small buffer
+            sl = bottom - atr * 0.2
             tp = entry + (entry - sl) * self.rr_ratio
         else:
-            sl = sig.get("top", entry + atr) + atr * 0.3
+            # SL: just above the structural high (FVG top) with small buffer
+            sl = top + atr * 0.2
             tp = entry - (sl - entry) * self.rr_ratio
 
         sl_dist = abs(entry - sl)
