@@ -230,18 +230,50 @@ async function save() {{
 </body></html>"""
 
 
+_MT5_STATUS_DIV = (
+    '<div class="status-indicator" id="mt5-status" style="margin-left:16px">'
+    '<span class="dot disconnected" id="mt5-dot"></span>'
+    '<span id="mt5-label">MT5 &#8212;</span>'
+    '</div>'
+)
+_MT5_STATUS_JS = (
+    '<script>'
+    'async function checkMt5Status(){'
+    'var dot=document.getElementById("mt5-dot");'
+    'var lbl=document.getElementById("mt5-label");'
+    'if(!dot||!lbl)return;'
+    'try{'
+    'var r=await fetch("/api/mt5/health");'
+    'var d=await r.json();'
+    'if(d.connected){dot.className="dot connected";lbl.textContent="MT5 \u2713";}'
+    'else{dot.className="dot connecting";lbl.textContent="MT5 \u2014 no MT5";}'
+    '}catch(e){dot.className="dot disconnected";lbl.textContent="MT5 \u2014";}'
+    '}'
+    'checkMt5Status();setInterval(checkMt5Status,15000);'
+    '</script>'
+)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     import re, time
     index = os.path.join(frontend_dir, "index.html")
     if os.path.exists(index):
-        with open(index, "r", encoding="utf-8") as f:
+        with open(index, "r", encoding="utf-8", errors="replace") as f:
             html = f.read()
         v = str(int(time.time()))
-        # Replace static asset URLs with versioned ones (handles existing ?v=... too)
-        html = re.sub(r'src="/static/app\.js[^"]*"', f'src="/static/app.js?v={v}"', html)
+        html = re.sub(r'src="/static/app\.js[^"]*"',    f'src="/static/app.js?v={v}"',    html)
         html = re.sub(r'href="/static/styles\.css[^"]*"', f'href="/static/styles.css?v={v}"', html)
         html = re.sub(r'src="/static/charts\.js[^"]*"', f'src="/static/charts.js?v={v}"', html)
+        # Inject MT5 status dot next to WS dot (server-side — never edit HTML on disk)
+        html = re.sub(
+            r'(<div class="status-indicator" id="ws-status">.*?</div>)',
+            r'\1' + _MT5_STATUS_DIV,
+            html, flags=re.DOTALL
+        )
+        # Inject MT5 polling JS (idempotent)
+        if 'checkMt5Status' not in html:
+            html = html.replace('</body>', _MT5_STATUS_JS + '</body>')
         return HTMLResponse(content=html, headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Pragma": "no-cache",
