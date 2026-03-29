@@ -157,10 +157,11 @@ class BacktestResult:
 
 class ICTAnalyzer:
     SWING_W         = 5
-    DISP_MULT       = 0.5    # body ≥ 0.5×ATR = realistic H1 displacement
-    MIN_FVG_ATR     = 0.15   # gap ≥ 0.15×ATR (was 0.25 — too strict for H1)
+    DISP_MULT       = 0.6    # body ≥ 0.6×ATR — stronger displacement required
+    MIN_FVG_ATR     = 0.25   # gap ≥ 0.25×ATR — filter weak/noise gaps
     EQ_TOL          = 0.20
-    MIN_CONFLUENCE  = 2
+    MIN_CONFLUENCE  = 3      # require 3 tags minimum (was 2)
+    BIAS_STABLE_N   = 1      # bias must be non-neutral (1=current bar only)
     KILL_ZONES      = [(7, 10), (12, 15), (15, 17)]
 
     def __init__(self, candles: list[Candle], symbol: str, timeframe: str, strategy: str = "Mixed"):
@@ -214,6 +215,14 @@ class ICTAnalyzer:
 
     def bias(self, i: int) -> str:
         return self._bias[min(i, self.n - 1)]
+
+    def bias_stable(self, i: int) -> bool:
+        """Return True only if bias has been the same direction for BIAS_STABLE_N bars."""
+        b = self.bias(i)
+        if b == "neutral":
+            return False
+        start = max(0, i - self.BIAS_STABLE_N + 1)
+        return all(self._bias[j] == b for j in range(start, i + 1))
 
     # ── Kill zone ────────────────────────────────────────────────────────────────
     def in_kz(self, i: int) -> bool:
@@ -384,18 +393,19 @@ class ICTAnalyzer:
 
         signals: list[dict] = []
 
-        # ── FVG: signal fires at FORMATION bar (ICT correct approach)
-        # The pending order system handles waiting for price to return to the level.
+        # ── FVG signals — bias must be stable; kill zone checked at fill time
         for fvg in fvgs:
             i = fvg["formed_at"]
             if i >= self.n:
+                continue
+            if not self.bias_stable(i):
                 continue
             b = self.bias(i); z = self.zone(i)
             tags = ["FVG"]
             if fvg["type"] == "FVG_BULL":
                 if b == "bullish":  tags.append("BIAS")
                 if z == "discount": tags.append("DISCOUNT")
-                if self.in_kz(i):  tags.append("KILLZONE")
+                if self.in_kz(i):   tags.append("KILLZONE")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "FVG_BULL",
                                     "top": fvg["top"], "bottom": fvg["bottom"],
@@ -404,24 +414,26 @@ class ICTAnalyzer:
             elif fvg["type"] == "FVG_BEAR":
                 if b == "bearish": tags.append("BIAS")
                 if z == "premium": tags.append("PREMIUM")
-                if self.in_kz(i): tags.append("KILLZONE")
+                if self.in_kz(i):  tags.append("KILLZONE")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "FVG_BEAR",
                                     "top": fvg["top"], "bottom": fvg["bottom"],
                                     "mid": fvg["mid"], "confluence": tags,
                                     "expires_at": fvg["mitigated_at"]})
 
-        # ── OB: signal fires at FORMATION bar
+        # ── OB signals
         for ob in obs:
             i = ob["formed_at"]
             if i >= self.n:
+                continue
+            if not self.bias_stable(i):
                 continue
             b = self.bias(i); z = self.zone(i)
             tags = ["OB"]
             if ob["type"] == "OB_BULL":
                 if b == "bullish":  tags.append("BIAS")
                 if z == "discount": tags.append("DISCOUNT")
-                if self.in_kz(i):  tags.append("KILLZONE")
+                if self.in_kz(i):   tags.append("KILLZONE")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "OB_BULL",
                                     "top": ob["top"], "bottom": ob["bottom"],
@@ -430,21 +442,25 @@ class ICTAnalyzer:
             elif ob["type"] == "OB_BEAR":
                 if b == "bearish": tags.append("BIAS")
                 if z == "premium": tags.append("PREMIUM")
-                if self.in_kz(i): tags.append("KILLZONE")
+                if self.in_kz(i):  tags.append("KILLZONE")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "OB_BEAR",
                                     "top": ob["top"], "bottom": ob["bottom"],
                                     "mid": ob["mid"], "confluence": tags,
                                     "expires_at": ob["mitigated_at"]})
 
-        # ── Liquidity sweeps: market entry at sweep bar
+        # ── Liquidity sweeps — market entry, kill zone checked at signal bar
         for sw in sweeps:
-            i = sw["bar"]; b = self.bias(i); z = self.zone(i)
-            tags = ["SWEEP"]
+            i = sw["bar"]
+            if not self.in_kz(i):      # sweeps must happen inside sessions
+                continue
+            if not self.bias_stable(i):
+                continue
+            b = self.bias(i); z = self.zone(i)
+            tags = ["SWEEP", "KILLZONE"]
             if sw["type"] == "LIQ_BULL":
                 if b == "bullish":                  tags.append("BIAS")
                 if z in ("discount","equilibrium"): tags.append("DISCOUNT")
-                if self.in_kz(i):                  tags.append("KILLZONE")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "LIQ_BULL",
                                     "top": sw["top"], "bottom": sw["bottom"],
@@ -452,7 +468,6 @@ class ICTAnalyzer:
             elif sw["type"] == "LIQ_BEAR":
                 if b == "bearish":                  tags.append("BIAS")
                 if z in ("premium","equilibrium"):  tags.append("PREMIUM")
-                if self.in_kz(i):                  tags.append("KILLZONE")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "LIQ_BEAR",
                                     "top": sw["top"], "bottom": sw["bottom"],
@@ -614,6 +629,10 @@ class Backtester:
                     bars_waiting = i - order.signal_bar
                     if bars_waiting > order.max_wait:
                         continue  # expired — discard
+                    # ICT: fills only execute during kill zone sessions
+                    if not analyzer.in_kz(i):
+                        still_pending.append(order)
+                        continue
                     # Fill if current candle's range includes entry price
                     filled = (
                         (order.direction == "BUY"  and candle.low  <= order.entry_price <= candle.high) or
