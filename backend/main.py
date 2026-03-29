@@ -76,16 +76,49 @@ orchestrator: Orchestrator | None = None
 # ------------------------------------------------------------------ #
 #  App Lifecycle
 # ------------------------------------------------------------------ #
+_bridge_proc = None
+
+
+def _start_mt5_bridge():
+    """Launch mt5_bridge.py as a subprocess if not already running."""
+    import subprocess
+    global _bridge_proc
+    bridge_script = os.path.join(os.path.dirname(__file__), "mt5_bridge.py")
+    if not os.path.exists(bridge_script):
+        return
+    port = os.getenv("MT5_BRIDGE_PORT", "5002")
+    env = {**os.environ, "MT5_BRIDGE_PORT": port}
+    try:
+        _bridge_proc = subprocess.Popen(
+            [sys.executable, bridge_script],
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+        logger.info("MT5 bridge started (PID %s) on port %s", _bridge_proc.pid, port)
+    except Exception as exc:
+        logger.warning("Could not start MT5 bridge: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global orchestrator
     await init_db()
+    _start_mt5_bridge()
+    # Set default MT5 bridge URL if not already configured
+    async with async_session_factory() as s:
+        existing = await get_config("mt5_bridge_url", s)
+        if not existing:
+            await set_config("mt5_bridge_url", "http://localhost:5002", s)
+            await s.commit()
     orchestrator = Orchestrator(broadcast_fn=manager.broadcast)
     await orchestrator.start()
     logger.info("TradeWizard system started ✅")
     yield
     if orchestrator:
         await orchestrator.stop()
+    if _bridge_proc and _bridge_proc.poll() is None:
+        _bridge_proc.terminate()
+        logger.info("MT5 bridge stopped")
     logger.info("TradeWizard system stopped")
 
 
