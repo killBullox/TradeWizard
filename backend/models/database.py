@@ -177,6 +177,7 @@ def _migrate_backtest_runs(conn):
     new_cols = [
         ("total_pnl_usd",    "FLOAT"),
         ("max_drawdown_usd", "FLOAT"),
+        ("data_warning",     "TEXT"),
     ]
     cur = conn.execute(_text("PRAGMA table_info(backtest_runs)"))
     existing = {row[1] for row in cur.fetchall()}
