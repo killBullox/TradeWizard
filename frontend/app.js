@@ -1485,26 +1485,3 @@ async function boot() {
 }
 
 boot();
-
-// ── MT5 Bridge status polling ─────────────────────────────────────────
-async function checkMt5Status() {
-  const dot   = document.getElementById('mt5-dot');
-  const label = document.getElementById('mt5-label');
-  if (!dot || !label) return;
-  try {
-    const r = await fetch('/api/mt5/health');
-    const d = await r.json();
-    if (d.mt5_connected) {
-      dot.className = 'dot connected';
-      label.textContent = 'MT5 ✓';
-    } else {
-      dot.className = 'dot connecting';
-      label.textContent = 'MT5 Bridge — no MT5';
-    }
-  } catch {
-    dot.className = 'dot disconnected';
-    label.textContent = 'MT5 —';
-  }
-}
-checkMt5Status();
-setInterval(checkMt5Status, 15000);
