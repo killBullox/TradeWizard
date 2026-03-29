@@ -157,12 +157,13 @@ class BacktestResult:
 
 class ICTAnalyzer:
     SWING_W         = 5
-    DISP_MULT       = 0.6    # body ≥ 0.6×ATR — stronger displacement required
-    MIN_FVG_ATR     = 0.25   # gap ≥ 0.25×ATR — filter weak/noise gaps
+    DISP_MULT       = 0.5    # body ≥ 0.5×ATR
+    MIN_FVG_ATR     = 0.15   # gap ≥ 0.15×ATR
     EQ_TOL          = 0.20
-    MIN_CONFLUENCE  = 3      # require 3 tags minimum (was 2)
-    BIAS_STABLE_N   = 1      # bias must be non-neutral (1=current bar only)
+    MIN_CONFLUENCE  = 2      # 2 tags minimum
+    BIAS_STABLE_N   = 1      # bias must be non-neutral
     KILL_ZONES      = [(7, 10), (12, 15), (15, 17)]
+    MAX_HOLD_BARS   = 16     # force-close after 16 H1 bars (no overnight drift)
 
     def __init__(self, candles: list[Candle], symbol: str, timeframe: str, strategy: str = "Mixed"):
         self.candles  = candles
@@ -616,6 +617,10 @@ class Backtester:
                     elif candle.low <= t.take_profit:
                         t = self._close(t, t.take_profit, "WIN", i, candle.time, balance, candle)
                         balance += balance * t.pnl_pct / 100; closed = True
+                if not closed and (i - t.entry_bar) >= analyzer.MAX_HOLD_BARS:
+                    # Force-close at market after max hold time
+                    t = self._close(t, candle.close, "LOSS", i, candle.time, balance, candle)
+                    balance += balance * t.pnl_pct / 100; closed = True
                 if closed:
                     result.trades.append(t)
                 else:
@@ -629,10 +634,6 @@ class Backtester:
                     bars_waiting = i - order.signal_bar
                     if bars_waiting > order.max_wait:
                         continue  # expired — discard
-                    # ICT: fills only execute during kill zone sessions
-                    if not analyzer.in_kz(i):
-                        still_pending.append(order)
-                        continue
                     # Fill if current candle's range includes entry price
                     filled = (
                         (order.direction == "BUY"  and candle.low  <= order.entry_price <= candle.high) or
