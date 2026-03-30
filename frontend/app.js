@@ -1635,9 +1635,9 @@ class PnlCalendar {
         const wr  = tot ? Math.round(data.wins / tot * 100) : 0;
         const pnlFmt = (isPos ? '+' : '-') + '$' + Math.abs(data.pnl).toFixed(2);
         cell.innerHTML = `
-          <div class="cal-day">${day}</div>
-          <div class="cal-pnl ${isPos ? 'text-win' : 'text-loss'}">${pnlFmt}</div>
-          <div class="cal-wr">${wr}%</div>`;
+          <div class="cal-day" style="color:#ffffffcc">${day}</div>
+          <div class="cal-pnl" style="color:#fff;font-weight:700">${pnlFmt}</div>
+          <div class="cal-wr" style="color:#ffffffbb">${wr}%</div>`;
       } else {
         cell.innerHTML = `<div class="cal-day">${day}</div>`;
       }
