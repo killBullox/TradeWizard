@@ -868,32 +868,27 @@ class Backtester:
         direction = "SELL" if "BEAR" in sig_type else "BUY"
         atr       = analyzer.atr(bar)
 
-        # ICT OTE: entry at 79% retracement of the FVG/OB zone (deepest OTE = best discount/premium)
+        # ICT OTE: entry at 70.5% retracement of the FVG/OB zone (optimal trade entry)
         top    = sig.get("top",    candle.close)
         bottom = sig.get("bottom", candle.close)
         rng    = top - bottom
         if rng < self.pip:
             return None
         if direction == "BUY":
-            # 79% retracement from top down = deepest discount, best R:R
-            entry = top - rng * 0.79
+            # 70.5% retracement from top down into the gap = discount entry
+            entry = top - rng * 0.705
         else:
-            # 79% retracement from bottom up = deepest premium, best R:R
-            entry = bottom + rng * 0.79
+            # 70.5% retracement from bottom up into the gap = premium entry
+            entry = bottom + rng * 0.705
 
         if direction == "BUY":
             # SL: just below the structural low (zone bottom) with small ATR buffer
             sl = bottom - atr * 0.2
-            min_tp = entry + (entry - sl) * max(self.rr_ratio, 1.5)
-            # ICT: TP targets nearest liquidity pool (EQH, PDH) if it improves R:R
-            liq = analyzer.nearest_liq(bar, direction)
-            tp = liq if (liq is not None and liq >= min_tp) else (entry + (entry - sl) * self.rr_ratio)
+            tp = entry + (entry - sl) * self.rr_ratio
         else:
             # SL: just above the structural high (zone top) with small ATR buffer
             sl = top + atr * 0.2
-            min_tp = entry - (sl - entry) * max(self.rr_ratio, 1.5)
-            liq = analyzer.nearest_liq(bar, direction)
-            tp = liq if (liq is not None and liq <= min_tp) else (entry - (sl - entry) * self.rr_ratio)
+            tp = entry - (sl - entry) * self.rr_ratio
 
         sl_dist = abs(entry - sl)
         if sl_dist < self.pip:
