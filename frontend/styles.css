@@ -651,3 +651,40 @@ body {
 }
 .toggle-switch input:checked + .toggle-slider { background: var(--accent); border-color: var(--accent); }
 .toggle-switch input:checked + .toggle-slider:before { transform: translateX(22px); background: #fff; }
+
+/* ── PNL Calendar ────────────────────────────────────────────────────────── */
+.pnl-cal-wrap { user-select: none; }
+.pnl-cal-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px;
+}
+.pnl-cal-title { font-weight: 600; font-size: 1rem; color: var(--text-primary); }
+.pnl-cal-filter {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 14px;
+}
+.pnl-cal-filter .check-pill {
+  font-size: 0.78rem; padding: 3px 10px; cursor: pointer;
+}
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+.cal-head {
+  text-align: center; font-size: 0.72rem; font-weight: 600;
+  color: var(--text-muted); padding: 4px 0;
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.cal-cell {
+  min-height: 74px; border-radius: 8px;
+  background: var(--bg-secondary); border: 1px solid var(--border);
+  padding: 6px 8px; display: flex; flex-direction: column; gap: 2px;
+  transition: transform .12s;
+}
+.cal-cell:hover { transform: scale(1.03); z-index: 1; }
+.cal-cell.cal-empty { background: transparent; border-color: transparent; }
+.cal-cell.cal-today { border-color: var(--accent-blue) !important; }
+.cal-day { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); }
+.cal-pnl { font-size: 0.88rem; font-weight: 700; margin-top: 4px; }
+.cal-wr  { font-size: 0.75rem; color: var(--text-muted); }

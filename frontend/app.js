@@ -237,6 +237,9 @@ async function refreshTrades() {
     state.trades = trades;
     renderTradesTable(trades);
     renderOpenTrades(trades.filter(t => t.status === 'ACTIVE'));
+    // PNL Calendar — trades tab
+    const calTrades = trades.filter(t => t.result === 'WIN' || t.result === 'LOSS');
+    if (calTrades.length) _tradesCal.setTrades(calTrades);
     // Update stats
     const closed = trades.filter(t => t.status === 'CLOSED');
     const wins   = closed.filter(t => t.result === 'WIN').length;
@@ -414,6 +417,9 @@ function renderPerformance(perf) {
       </tr>
     `).join('');
   }
+  // PNL Calendar — feed from all closed trades in state
+  const closed = (state.trades || []).filter(t => t.result === 'WIN' || t.result === 'LOSS');
+  if (closed.length) _perfCal.setTrades(closed);
 }
 
 function renderConfig(cfg) {
@@ -1324,6 +1330,9 @@ function renderBtResults(run) {
   // By setup breakdown
   if (run.trades) renderBtBySetup(run.trades);
 
+  // PNL Calendar
+  if (run.trades && run.trades.length) _btCal.setTrades(run.trades);
+
   // Trades table
   const tbody = document.getElementById('bt-trades-tbody');
   const cnt   = document.getElementById('bt-trade-count');
@@ -1500,3 +1509,157 @@ async function boot() {
 }
 
 boot();
+
+// ── PNL Calendar ──────────────────────────────────────────────────────────────
+class PnlCalendar {
+  constructor(containerId) {
+    this.containerId  = containerId;
+    this.trades       = [];
+    this.year         = new Date().getFullYear();
+    this.month        = new Date().getMonth();
+    this.activeSetups = null; // null = all
+  }
+
+  setTrades(trades) {
+    this.trades = trades;
+    // Jump to most recent month with trades
+    const dates = trades
+      .filter(t => t.exit_time && (t.result === 'WIN' || t.result === 'LOSS'))
+      .map(t => this._parseDate(t.exit_time)).filter(Boolean);
+    if (dates.length) {
+      const latest = new Date(Math.max(...dates.map(d => d.getTime())));
+      this.year  = latest.getFullYear();
+      this.month = latest.getMonth();
+    }
+    this._buildFilter();
+    this.render();
+  }
+
+  _parseDate(s) {
+    if (!s) return null;
+    // "16/06/25, 18:00:00" → dd/mm/yy
+    const m = s.match(/^(\d{2})\/(\d{2})\/(\d{2})[, ]/);
+    if (m) return new Date(2000 + +m[3], +m[2] - 1, +m[1]);
+    // ISO / other
+    const d = new Date(s);
+    return isNaN(d) ? null : d;
+  }
+
+  _buildFilter() {
+    const container = document.getElementById(this.containerId);
+    if (!container) return;
+    const setups = [...new Set(this.trades.map(t => t.setup).filter(Boolean))].sort();
+    if (setups.length < 2) { this.activeSetups = null; return; }
+
+    const wrap = document.createElement('div');
+    wrap.className = 'pnl-cal-filter';
+    wrap.innerHTML = setups.map(s =>
+      `<label class="check-pill"><input type="checkbox" class="cal-setup-chk" value="${s}" checked> ${s}</label>`
+    ).join('');
+    container.innerHTML = '';
+    container.appendChild(wrap);
+
+    wrap.querySelectorAll('.cal-setup-chk').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const checked = [...wrap.querySelectorAll('.cal-setup-chk:checked')].map(c => c.value);
+        this.activeSetups = checked.length === setups.length ? null : new Set(checked);
+        this.render(true); // re-render grid only
+      });
+    });
+  }
+
+  _buildDayMap() {
+    const map = {};
+    const today = new Date();
+    for (const t of this.trades) {
+      if (t.result !== 'WIN' && t.result !== 'LOSS') continue;
+      if (this.activeSetups && !this.activeSetups.has(t.setup)) continue;
+      const d = this._parseDate(t.exit_time);
+      if (!d || d.getFullYear() !== this.year || d.getMonth() !== this.month) continue;
+      const day = d.getDate();
+      if (!map[day]) map[day] = { pnl: 0, wins: 0, losses: 0 };
+      map[day].pnl    += t.pnl_usd || 0;
+      map[day].wins   += t.result === 'WIN' ? 1 : 0;
+      map[day].losses += t.result === 'LOSS' ? 1 : 0;
+    }
+    return map;
+  }
+
+  render(gridOnly = false) {
+    const container = document.getElementById(this.containerId);
+    if (!container) return;
+
+    // Remove old grid if exists
+    const oldGrid = container.querySelector('.cal-grid-wrap');
+    if (oldGrid) oldGrid.remove();
+
+    const dayMap  = this._buildDayMap();
+    const first   = new Date(this.year, this.month, 1).getDay();
+    const total   = new Date(this.year, this.month + 1, 0).getDate();
+    const today   = new Date();
+    const todayD  = today.getFullYear() === this.year && today.getMonth() === this.month ? today.getDate() : -1;
+    const maxAbs  = Math.max(1, ...Object.values(dayMap).map(d => Math.abs(d.pnl)));
+    const mName   = new Date(this.year, this.month).toLocaleString('default', { month: 'long', year: 'numeric' });
+    const DAYS    = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
+
+    const wrap = document.createElement('div');
+    wrap.className = 'cal-grid-wrap';
+
+    // Nav row
+    const nav = document.createElement('div');
+    nav.className = 'pnl-cal-nav';
+    nav.innerHTML = `
+      <button class="btn btn-ghost btn-sm cal-prev">←</button>
+      <span class="pnl-cal-title">${mName}</span>
+      <button class="btn btn-ghost btn-sm cal-next">→</button>`;
+    wrap.appendChild(nav);
+
+    // Grid
+    const grid = document.createElement('div');
+    grid.className = 'cal-grid';
+    grid.innerHTML = DAYS.map(d => `<div class="cal-head">${d}</div>`).join('');
+
+    // Empty prefix cells
+    for (let i = 0; i < first; i++) grid.innerHTML += `<div class="cal-cell cal-empty"></div>`;
+
+    for (let day = 1; day <= total; day++) {
+      const data = dayMap[day];
+      const cell = document.createElement('div');
+      cell.className = 'cal-cell' + (day === todayD ? ' cal-today' : '');
+      if (data) {
+        const isPos = data.pnl >= 0;
+        const intens = Math.min(0.85, 0.18 + 0.67 * Math.abs(data.pnl) / maxAbs);
+        cell.style.background = isPos
+          ? `rgba(34,197,94,${intens})` : `rgba(239,68,68,${intens})`;
+        const tot = data.wins + data.losses;
+        const wr  = tot ? Math.round(data.wins / tot * 100) : 0;
+        const pnlFmt = (isPos ? '+' : '-') + '$' + Math.abs(data.pnl).toFixed(2);
+        cell.innerHTML = `
+          <div class="cal-day">${day}</div>
+          <div class="cal-pnl ${isPos ? 'text-win' : 'text-loss'}">${pnlFmt}</div>
+          <div class="cal-wr">${wr}%</div>`;
+      } else {
+        cell.innerHTML = `<div class="cal-day">${day}</div>`;
+      }
+      grid.appendChild(cell);
+    }
+    wrap.appendChild(grid);
+    container.appendChild(wrap);
+
+    nav.querySelector('.cal-prev').onclick = () => {
+      this.month--;
+      if (this.month < 0) { this.month = 11; this.year--; }
+      this.render();
+    };
+    nav.querySelector('.cal-next').onclick = () => {
+      this.month++;
+      if (this.month > 11) { this.month = 0; this.year++; }
+      this.render();
+    };
+  }
+}
+
+// Calendar instances
+const _perfCal   = new PnlCalendar('perf-cal');
+const _tradesCal = new PnlCalendar('trades-cal');
+const _btCal     = new PnlCalendar('bt-cal');
