@@ -1533,8 +1533,8 @@ class PnlCalendar {
     this.trades = trades;
     // Jump to most recent month with trades
     const dates = trades
-      .filter(t => t.exit_time && this._isClosed(t))
-      .map(t => this._parseDate(t.exit_time)).filter(Boolean);
+      .filter(t => (t.exit_time || t.close_time) && this._isClosed(t))
+      .map(t => this._parseDate(t.exit_time || t.close_time)).filter(Boolean);
     if (dates.length) {
       const latest = new Date(Math.max(...dates.map(d => d.getTime())));
       this.year  = latest.getFullYear();
@@ -1582,7 +1582,7 @@ class PnlCalendar {
     for (const t of this.trades) {
       if (!this._isClosed(t)) continue;
       if (this.activeSetups && !this.activeSetups.has(t.setup)) continue;
-      const d = this._parseDate(t.exit_time);
+      const d = this._parseDate(t.exit_time || t.close_time);
       if (!d || d.getFullYear() !== this.year || d.getMonth() !== this.month) continue;
       const day = d.getDate();
       if (!map[day]) map[day] = { pnl: 0, wins: 0, losses: 0 };
