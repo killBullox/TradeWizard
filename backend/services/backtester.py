@@ -177,6 +177,7 @@ class ICTAnalyzer:
                          0.0001)
         self._atr   = self._calc_atr()
         self._bias  = self._calc_bias()
+        self._pdhl  = self._calc_pdhl()
 
     # ── ATR ─────────────────────────────────────────────────────────────────────
     def _calc_atr(self, p: int = 14) -> list[float]:
@@ -235,6 +236,112 @@ class ICTAnalyzer:
             return False
         start = max(0, i - self.BIAS_STABLE_N + 1)
         return all(self._bias[j] == b for j in range(start, i + 1))
+
+    # ── Previous Day High/Low (IPDA reference levels) ───────────────────────────
+    def _calc_pdhl(self) -> list:
+        """Compute (prev_day_high, prev_day_low) for each bar. Returns list of tuples or None."""
+        day_data: dict[str, tuple] = {}
+        for c in self.candles:
+            day = c.time[:10]
+            if day not in day_data:
+                day_data[day] = (c.high, c.low)
+            else:
+                ph, pl = day_data[day]
+                day_data[day] = (max(ph, c.high), min(pl, c.low))
+        sorted_days = sorted(day_data.keys())
+        prev_map: dict[str, tuple] = {}
+        for idx, d in enumerate(sorted_days):
+            if idx > 0:
+                prev_map[d] = day_data[sorted_days[idx - 1]]
+        return [prev_map.get(c.time[:10]) for c in self.candles]
+
+    def pdhl(self, i: int):
+        return self._pdhl[i] if i < len(self._pdhl) else None
+
+    def near_pdh(self, i: int) -> bool:
+        """Price is within 0.5×ATR of previous day high."""
+        v = self.pdhl(i)
+        if not v:
+            return False
+        pdh, _ = v
+        return abs(self.candles[i].close - pdh) <= self.atr(i) * 0.5
+
+    def near_pdl(self, i: int) -> bool:
+        """Price is within 0.5×ATR of previous day low."""
+        v = self.pdhl(i)
+        if not v:
+            return False
+        _, pdl = v
+        return abs(self.candles[i].close - pdl) <= self.atr(i) * 0.5
+
+    def pdl_swept(self, i: int) -> bool:
+        """Turtle Soup / Judas: candle swept PDL wick but closed above it → long reversal."""
+        v = self.pdhl(i)
+        if not v:
+            return False
+        _, pdl = v
+        c = self.candles[i]
+        return c.low < pdl <= c.close
+
+    def pdh_swept(self, i: int) -> bool:
+        """Turtle Soup / Judas: candle swept PDH wick but closed below it → short reversal."""
+        v = self.pdhl(i)
+        if not v:
+            return False
+        pdh, _ = v
+        c = self.candles[i]
+        return c.high > pdh >= c.close
+
+    def nearest_liq(self, i: int, direction: str, look: int = 80) -> Optional[float]:
+        """
+        Nearest liquidity pool (EQH, EQL, PDH, PDL) in the trade direction.
+        Used for dynamic TP targeting — ICT: price is always drawn to the nearest pool.
+        """
+        price = self.candles[i].close
+        candidates: list[float] = []
+
+        v = self.pdhl(i)
+        if v:
+            pdh, pdl = v
+            if direction == "BUY"  and pdh > price: candidates.append(pdh)
+            if direction == "SELL" and pdl < price: candidates.append(pdl)
+
+        s = max(0, i - look)
+        if direction == "BUY":
+            for j in self.sh(s, i):
+                lv = self.candles[j].high
+                if lv > price:
+                    candidates.append(lv)
+        else:
+            for j in self.sl(s, i):
+                lv = self.candles[j].low
+                if lv < price:
+                    candidates.append(lv)
+
+        if not candidates:
+            return None
+        return min(candidates) if direction == "BUY" else max(candidates)
+
+    def detect_breakers(self, obs: list[dict]) -> list[dict]:
+        """
+        ICT Breaker Blocks: a mitigated OB becomes a breaker in the opposite direction.
+        OB_BULL that is fully violated → BREAK_BEAR (old support becomes resistance)
+        OB_BEAR that is fully violated → BREAK_BULL (old resistance becomes support)
+        """
+        breakers = []
+        for ob in obs:
+            if ob.get("mitigated_at") is None:
+                continue
+            mit = ob["mitigated_at"]
+            if ob["type"] == "OB_BULL":
+                breakers.append({"formed_at": mit + 1, "type": "BREAK_BEAR",
+                                  "top": ob["top"], "bottom": ob["bottom"],
+                                  "mid": ob["mid"], "mitigated_at": None})
+            else:
+                breakers.append({"formed_at": mit + 1, "type": "BREAK_BULL",
+                                  "top": ob["top"], "bottom": ob["bottom"],
+                                  "mid": ob["mid"], "mitigated_at": None})
+        return breakers
 
     # ── Kill zone ────────────────────────────────────────────────────────────────
     def in_kz(self, i: int) -> bool:
@@ -399,9 +506,10 @@ class ICTAnalyzer:
     # ── Build final entry signals ─────────────────────────────────────────────────
     def build_signals(self) -> list[dict]:
         structure = self.market_structure()
-        fvgs   = self.detect_fvgs()         if self.strategy in ("FVG",        "Mixed") else []
-        obs    = self.detect_obs(structure) if self.strategy in ("OrderBlock", "Mixed") else []
-        sweeps = self.detect_sweeps()       if self.strategy in ("Liquidity",  "Mixed") else []
+        fvgs     = self.detect_fvgs()         if self.strategy in ("FVG",        "Mixed") else []
+        obs      = self.detect_obs(structure) if self.strategy in ("OrderBlock", "Mixed") else []
+        breakers = self.detect_breakers(obs)  if self.strategy in ("OrderBlock", "Mixed") else []
+        sweeps   = self.detect_sweeps()       if self.strategy in ("Liquidity",  "Mixed") else []
 
         signals: list[dict] = []
 
@@ -415,18 +523,22 @@ class ICTAnalyzer:
             b = self.bias(i); z = self.zone(i)
             tags = ["FVG"]
             if fvg["type"] == "FVG_BULL":
-                if b == "bullish":  tags.append("BIAS")
-                if z == "discount": tags.append("DISCOUNT")
-                if self.in_kz(i):   tags.append("KILLZONE")
+                if b == "bullish":    tags.append("BIAS")
+                if z == "discount":  tags.append("DISCOUNT")
+                if self.in_kz(i):    tags.append("KILLZONE")
+                if self.near_pdl(i): tags.append("PDL")
+                if self.pdl_swept(i): tags.append("PDL_SWEEP")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "FVG_BULL",
                                     "top": fvg["top"], "bottom": fvg["bottom"],
                                     "mid": fvg["mid"], "confluence": tags,
                                     "expires_at": fvg["mitigated_at"]})
             elif fvg["type"] == "FVG_BEAR":
-                if b == "bearish": tags.append("BIAS")
-                if z == "premium": tags.append("PREMIUM")
-                if self.in_kz(i):  tags.append("KILLZONE")
+                if b == "bearish":   tags.append("BIAS")
+                if z == "premium":   tags.append("PREMIUM")
+                if self.in_kz(i):   tags.append("KILLZONE")
+                if self.near_pdh(i): tags.append("PDH")
+                if self.pdh_swept(i): tags.append("PDH_SWEEP")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "FVG_BEAR",
                                     "top": fvg["top"], "bottom": fvg["bottom"],
@@ -443,43 +555,83 @@ class ICTAnalyzer:
             b = self.bias(i); z = self.zone(i)
             tags = ["OB"]
             if ob["type"] == "OB_BULL":
-                if b == "bullish":  tags.append("BIAS")
-                if z == "discount": tags.append("DISCOUNT")
-                if self.in_kz(i):   tags.append("KILLZONE")
+                if b == "bullish":    tags.append("BIAS")
+                if z == "discount":   tags.append("DISCOUNT")
+                if self.in_kz(i):     tags.append("KILLZONE")
+                if self.near_pdl(i):  tags.append("PDL")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "OB_BULL",
                                     "top": ob["top"], "bottom": ob["bottom"],
                                     "mid": ob["mid"], "confluence": tags,
                                     "expires_at": ob["mitigated_at"]})
             elif ob["type"] == "OB_BEAR":
-                if b == "bearish": tags.append("BIAS")
-                if z == "premium": tags.append("PREMIUM")
-                if self.in_kz(i):  tags.append("KILLZONE")
+                if b == "bearish":   tags.append("BIAS")
+                if z == "premium":   tags.append("PREMIUM")
+                if self.in_kz(i):    tags.append("KILLZONE")
+                if self.near_pdh(i): tags.append("PDH")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "OB_BEAR",
                                     "top": ob["top"], "bottom": ob["bottom"],
                                     "mid": ob["mid"], "confluence": tags,
                                     "expires_at": ob["mitigated_at"]})
 
-        # ── Liquidity sweeps — market entry, kill zone checked at signal bar
-        for sw in sweeps:
-            i = sw["bar"]
-            if not self.in_kz(i):      # sweeps must happen inside sessions
+        # ── Breaker block signals (mitigated OBs that flip polarity)
+        for brk in breakers:
+            i = brk["formed_at"]
+            if i >= self.n:
                 continue
             if not self.bias_stable(i):
                 continue
             b = self.bias(i); z = self.zone(i)
+            tags = ["BREAKER"]
+            if brk["type"] == "BREAK_BULL":
+                if b == "bullish":    tags.append("BIAS")
+                if z == "discount":   tags.append("DISCOUNT")
+                if self.in_kz(i):     tags.append("KILLZONE")
+                if self.near_pdl(i):  tags.append("PDL")
+                if len(tags) >= self.MIN_CONFLUENCE:
+                    signals.append({"bar": i, "type": "BREAK_BULL",
+                                    "top": brk["top"], "bottom": brk["bottom"],
+                                    "mid": brk["mid"], "confluence": tags})
+            elif brk["type"] == "BREAK_BEAR":
+                if b == "bearish":    tags.append("BIAS")
+                if z == "premium":    tags.append("PREMIUM")
+                if self.in_kz(i):     tags.append("KILLZONE")
+                if self.near_pdh(i):  tags.append("PDH")
+                if len(tags) >= self.MIN_CONFLUENCE:
+                    signals.append({"bar": i, "type": "BREAK_BEAR",
+                                    "top": brk["top"], "bottom": brk["bottom"],
+                                    "mid": brk["mid"], "confluence": tags})
+
+        # ── Liquidity sweeps — market entry, kill zone checked at signal bar
+        for sw in sweeps:
+            i = sw["bar"]
+            if not self.in_kz(i):
+                continue
+            if not self.bias_stable(i):
+                continue
+            b = self.bias(i); z = self.zone(i)
+            # London session (07-10 UTC) sweeps → Judas Swing label
+            try:
+                h = datetime.fromisoformat(self.candles[i].time.replace("Z", "+00:00")).hour
+                is_london = 7 <= h < 10
+            except Exception:
+                is_london = False
             tags = ["SWEEP", "KILLZONE"]
             if sw["type"] == "LIQ_BULL":
-                if b == "bullish":                  tags.append("BIAS")
-                if z in ("discount","equilibrium"): tags.append("DISCOUNT")
+                if b == "bullish":                   tags.append("BIAS")
+                if z in ("discount","equilibrium"):  tags.append("DISCOUNT")
+                if self.pdl_swept(i):                tags.append("PDL_SWEEP")
+                if is_london:                        tags.append("JUDAS")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "LIQ_BULL",
                                     "top": sw["top"], "bottom": sw["bottom"],
                                     "mid": sw["mid"], "confluence": tags})
             elif sw["type"] == "LIQ_BEAR":
-                if b == "bearish":                  tags.append("BIAS")
-                if z in ("premium","equilibrium"):  tags.append("PREMIUM")
+                if b == "bearish":                   tags.append("BIAS")
+                if z in ("premium","equilibrium"):   tags.append("PREMIUM")
+                if self.pdh_swept(i):                tags.append("PDH_SWEEP")
+                if is_london:                        tags.append("JUDAS")
                 if len(tags) >= self.MIN_CONFLUENCE:
                     signals.append({"bar": i, "type": "LIQ_BEAR",
                                     "top": sw["top"], "bottom": sw["bottom"],
@@ -716,25 +868,32 @@ class Backtester:
         direction = "SELL" if "BEAR" in sig_type else "BUY"
         atr       = analyzer.atr(bar)
 
-        # ICT OTE: entry at 70.5% retracement of the FVG/OB zone (optimal trade entry)
+        # ICT OTE: entry at 79% retracement of the FVG/OB zone (deepest OTE = best discount/premium)
         top    = sig.get("top",    candle.close)
         bottom = sig.get("bottom", candle.close)
         rng    = top - bottom
+        if rng < self.pip:
+            return None
         if direction == "BUY":
-            # 70.5% retracement from top down into the gap = discount entry
-            entry = top - rng * 0.705
+            # 79% retracement from top down = deepest discount, best R:R
+            entry = top - rng * 0.79
         else:
-            # 70.5% retracement from bottom up into the gap = premium entry
-            entry = bottom + rng * 0.705
+            # 79% retracement from bottom up = deepest premium, best R:R
+            entry = bottom + rng * 0.79
 
         if direction == "BUY":
-            # SL: just below the structural low (FVG bottom) with small buffer
+            # SL: just below the structural low (zone bottom) with small ATR buffer
             sl = bottom - atr * 0.2
-            tp = entry + (entry - sl) * self.rr_ratio
+            min_tp = entry + (entry - sl) * max(self.rr_ratio, 1.5)
+            # ICT: TP targets nearest liquidity pool (EQH, PDH) if it improves R:R
+            liq = analyzer.nearest_liq(bar, direction)
+            tp = liq if (liq is not None and liq >= min_tp) else (entry + (entry - sl) * self.rr_ratio)
         else:
-            # SL: just above the structural high (FVG top) with small buffer
+            # SL: just above the structural high (zone top) with small ATR buffer
             sl = top + atr * 0.2
-            tp = entry - (sl - entry) * self.rr_ratio
+            min_tp = entry - (sl - entry) * max(self.rr_ratio, 1.5)
+            liq = analyzer.nearest_liq(bar, direction)
+            tp = liq if (liq is not None and liq <= min_tp) else (entry - (sl - entry) * self.rr_ratio)
 
         sl_dist = abs(entry - sl)
         if sl_dist < self.pip:
@@ -749,7 +908,8 @@ class Backtester:
 
         label = {"FVG_BULL":"FVG↑","FVG_BEAR":"FVG↓",
                  "OB_BULL":"OB↑","OB_BEAR":"OB↓",
-                 "LIQ_BULL":"Liq↑","LIQ_BEAR":"Liq↓"}.get(sig_type, sig_type)
+                 "LIQ_BULL":"Liq↑","LIQ_BEAR":"Liq↓",
+                 "BREAK_BULL":"BRK↑","BREAK_BEAR":"BRK↓"}.get(sig_type, sig_type)
 
         # max_wait: use expires_at from signal (FVG mitigated) or 48 bars
         expires_at = sig.get("expires_at")
