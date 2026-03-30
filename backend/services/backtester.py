@@ -175,9 +175,12 @@ class ICTAnalyzer:
         self.pip      = (0.01   if "JPY" in symbol else
                          1.0    if symbol in ("XAUUSD", "US30", "NAS100", "US500") else
                          0.0001)
-        self._atr   = self._calc_atr()
-        self._bias  = self._calc_bias()
-        self._pdhl  = self._calc_pdhl()
+        self._atr          = self._calc_atr()
+        self._bias         = self._calc_bias()
+        self._pdhl         = self._calc_pdhl()
+        self._asian_ranges = self._calc_asian_ranges()
+        self._day_bias_map = self._calc_day_bias_map()
+        self._judas        = self._detect_judas()
 
     # ── ATR ─────────────────────────────────────────────────────────────────────
     def _calc_atr(self, p: int = 14) -> list[float]:
@@ -353,6 +356,87 @@ class ICTAnalyzer:
                                   "mid": ob["mid"], "mitigated_at": None})
         return breakers
 
+    # ── Power of 3: Asian Range ──────────────────────────────────────────────────
+    def _calc_asian_ranges(self) -> dict:
+        """Asian session high/low per calendar day (00:00–07:00 UTC)."""
+        ranges: dict[str, dict] = {}
+        for c in self.candles:
+            try:
+                dt  = datetime.fromisoformat(c.time.replace("Z", "+00:00"))
+                day = dt.date().isoformat()
+                if 0 <= dt.hour < 7:
+                    if day not in ranges:
+                        ranges[day] = {"high": c.high, "low": c.low}
+                    else:
+                        ranges[day]["high"] = max(ranges[day]["high"], c.high)
+                        ranges[day]["low"]  = min(ranges[day]["low"],  c.low)
+            except Exception:
+                pass
+        return ranges
+
+    # ── Power of 3: Daily Bias (per-day, not per-bar) ────────────────────────────
+    def _calc_day_bias_map(self) -> dict:
+        """
+        Per-day bias using EMA200 macro trend + previous day direction.
+        Both must agree → bullish or bearish, else neutral.
+        """
+        ema200: list[float] = []
+        k = 2.0 / 201.0
+        for c in self.candles:
+            ema200.append(c.close * k + ema200[-1] * (1 - k) if ema200 else c.close)
+
+        day_ohlc: dict[str, dict] = {}
+        for i, c in enumerate(self.candles):
+            day = c.time[:10]
+            if day not in day_ohlc:
+                day_ohlc[day] = {"open": c.open, "close": c.close, "ema200": ema200[i]}
+            else:
+                day_ohlc[day]["close"] = c.close
+
+        sorted_days = sorted(day_ohlc.keys())
+        result: dict[str, str] = {}
+        for idx, day in enumerate(sorted_days):
+            d     = day_ohlc[day]
+            macro = "bullish" if d["close"] > d["ema200"] else "bearish"
+            if idx > 0:
+                prev     = day_ohlc[sorted_days[idx - 1]]
+                prev_dir = "bullish" if prev["close"] >= prev["open"] else "bearish"
+            else:
+                prev_dir = macro
+            result[day] = macro if macro == prev_dir else "neutral"
+        return result
+
+    def day_bias(self, day: str) -> str:
+        return self._day_bias_map.get(day, "neutral")
+
+    # ── Power of 3: Judas Swing detection ────────────────────────────────────────
+    def _detect_judas(self) -> dict:
+        """
+        Judas Swing (manipulation phase):
+        - Bullish day → London (07-10 UTC) sweeps Asian LOW, closes back above → BUY
+        - Bearish day → London (07-10 UTC) sweeps Asian HIGH, closes back below → SELL
+        One Judas per day maximum. Returns {bar_index: direction}.
+        """
+        judas: dict[int, str] = {}
+        done:  set[str]       = set()
+        for i, c in enumerate(self.candles):
+            try:
+                dt  = datetime.fromisoformat(c.time.replace("Z", "+00:00"))
+                day = dt.date().isoformat()
+                if not (7 <= dt.hour < 11) or day in done:
+                    continue
+                ar   = self._asian_ranges.get(day)
+                bias = self.day_bias(day)
+                if not ar or bias == "neutral":
+                    continue
+                if bias == "bullish" and c.low < ar["low"] and c.close > ar["low"]:
+                    judas[i] = "BUY";  done.add(day)
+                elif bias == "bearish" and c.high > ar["high"] and c.close < ar["high"]:
+                    judas[i] = "SELL"; done.add(day)
+            except Exception:
+                pass
+        return judas
+
     # ── Kill zone ────────────────────────────────────────────────────────────────
     def in_kz(self, i: int) -> bool:
         if self.tf in ("D1", "W1"):
@@ -515,137 +599,141 @@ class ICTAnalyzer:
 
     # ── Build final entry signals ─────────────────────────────────────────────────
     def build_signals(self) -> list[dict]:
+        """
+        ICT Power of 3 — correct sequence:
+        1. Daily bias: EMA200 + previous day direction must agree
+        2. Asian range (00-07 UTC): defines accumulation zone
+        3. Judas Swing (London 07-10 UTC): price sweeps Asian range AGAINST bias,
+           then closes back inside → manipulation phase confirmed
+        4. AFTER Judas: first FVG / OB / Breaker in bias direction = distribution entry
+        5. Liquidity sweeps that ARE the Judas (sweep + close-back = same candle) → market entry
+
+        One trade per calendar day maximum.
+        """
         structure = self.market_structure()
-        fvgs     = self.detect_fvgs()         if self.strategy in ("FVG",        "Mixed") else []
-        obs      = self.detect_obs(structure) if self.strategy in ("OrderBlock", "Mixed") else []
-        breakers = self.detect_breakers(obs)  if self.strategy in ("OrderBlock", "Mixed") else []
-        sweeps   = self.detect_sweeps()       if self.strategy in ("Liquidity",  "Mixed") else []
+        fvgs      = self.detect_fvgs()         if self.strategy in ("FVG",        "Mixed") else []
+        obs       = self.detect_obs(structure) if self.strategy in ("OrderBlock", "Mixed") else []
+        breakers  = self.detect_breakers(obs)  if self.strategy in ("OrderBlock", "Mixed") else []
+        sweeps    = self.detect_sweeps()       if self.strategy in ("Liquidity",  "Mixed") else []
 
-        signals: list[dict] = []
+        # Index entry vehicles by bar for fast lookup
+        fvg_at:  dict[int, list] = {}
+        ob_at:   dict[int, list] = {}
+        brk_at:  dict[int, list] = {}
+        for f in fvgs:    fvg_at.setdefault(f["formed_at"], []).append(f)
+        for o in obs:     ob_at.setdefault(o["formed_at"],  []).append(o)
+        for b in breakers: brk_at.setdefault(b["formed_at"], []).append(b)
 
-        # ── FVG signals — bias must be stable; kill zone checked at fill time
-        for fvg in fvgs:
-            i = fvg["formed_at"]
-            if i >= self.n:
-                continue
-            if not self.bias_stable(i):
-                continue
-            b = self.bias(i); z = self.zone(i)
-            tags = ["FVG"]
-            if fvg["type"] == "FVG_BULL":
-                if b == "bullish":    tags.append("BIAS")
-                if z == "discount":  tags.append("DISCOUNT")
-                if self.in_kz(i):    tags.append("KILLZONE")
-                if self.near_pdl(i): tags.append("PDL")
-                if self.pdl_swept(i): tags.append("PDL_SWEEP")
-                if len(tags) >= self.MIN_CONFLUENCE:
-                    signals.append({"bar": i, "type": "FVG_BULL",
-                                    "top": fvg["top"], "bottom": fvg["bottom"],
-                                    "mid": fvg["mid"], "confluence": tags,
-                                    "expires_at": fvg["mitigated_at"]})
-            elif fvg["type"] == "FVG_BEAR":
-                if b == "bearish":   tags.append("BIAS")
-                if z == "premium":   tags.append("PREMIUM")
-                if self.in_kz(i):   tags.append("KILLZONE")
-                if self.near_pdh(i): tags.append("PDH")
-                if self.pdh_swept(i): tags.append("PDH_SWEEP")
-                if len(tags) >= self.MIN_CONFLUENCE:
-                    signals.append({"bar": i, "type": "FVG_BEAR",
-                                    "top": fvg["top"], "bottom": fvg["bottom"],
-                                    "mid": fvg["mid"], "confluence": tags,
-                                    "expires_at": fvg["mitigated_at"]})
+        signals:     list[dict] = []
+        traded_days: set[str]   = set()   # max one trade per day
+        ENTRY_WINDOW = 20                  # bars to search after Judas
 
-        # ── OB signals
-        for ob in obs:
-            i = ob["formed_at"]
-            if i >= self.n:
+        # ── Phase 1: Judas Swing → find first valid FVG/OB/Breaker after it ──────
+        for judas_bar, direction in sorted(self._judas.items()):
+            try:
+                day = self.candles[judas_bar].time[:10]
+            except Exception:
                 continue
-            if not self.bias_stable(i):
+            if day in traded_days:
                 continue
-            b = self.bias(i); z = self.zone(i)
-            tags = ["OB"]
-            if ob["type"] == "OB_BULL":
-                if b == "bullish":    tags.append("BIAS")
-                if z == "discount":   tags.append("DISCOUNT")
-                if self.in_kz(i):     tags.append("KILLZONE")
-                if self.near_pdl(i):  tags.append("PDL")
-                if len(tags) >= self.MIN_CONFLUENCE:
-                    signals.append({"bar": i, "type": "OB_BULL",
-                                    "top": ob["top"], "bottom": ob["bottom"],
-                                    "mid": ob["mid"], "confluence": tags,
-                                    "expires_at": ob["mitigated_at"]})
-            elif ob["type"] == "OB_BEAR":
-                if b == "bearish":   tags.append("BIAS")
-                if z == "premium":   tags.append("PREMIUM")
-                if self.in_kz(i):    tags.append("KILLZONE")
-                if self.near_pdh(i): tags.append("PDH")
-                if len(tags) >= self.MIN_CONFLUENCE:
-                    signals.append({"bar": i, "type": "OB_BEAR",
-                                    "top": ob["top"], "bottom": ob["bottom"],
-                                    "mid": ob["mid"], "confluence": tags,
-                                    "expires_at": ob["mitigated_at"]})
 
-        # ── Breaker block signals (mitigated OBs that flip polarity)
-        for brk in breakers:
-            i = brk["formed_at"]
-            if i >= self.n:
-                continue
-            if not self.bias_stable(i):
-                continue
-            b = self.bias(i); z = self.zone(i)
-            tags = ["BREAKER"]
-            if brk["type"] == "BREAK_BULL":
-                if b == "bullish":    tags.append("BIAS")
-                if z == "discount":   tags.append("DISCOUNT")
-                if self.in_kz(i):     tags.append("KILLZONE")
-                if self.near_pdl(i):  tags.append("PDL")
-                if len(tags) >= self.MIN_CONFLUENCE:
-                    signals.append({"bar": i, "type": "BREAK_BULL",
-                                    "top": brk["top"], "bottom": brk["bottom"],
-                                    "mid": brk["mid"], "confluence": tags})
-            elif brk["type"] == "BREAK_BEAR":
-                if b == "bearish":    tags.append("BIAS")
-                if z == "premium":    tags.append("PREMIUM")
-                if self.in_kz(i):     tags.append("KILLZONE")
-                if self.near_pdh(i):  tags.append("PDH")
-                if len(tags) >= self.MIN_CONFLUENCE:
-                    signals.append({"bar": i, "type": "BREAK_BEAR",
-                                    "top": brk["top"], "bottom": brk["bottom"],
-                                    "mid": brk["mid"], "confluence": tags})
+            for i in range(judas_bar + 1, min(judas_bar + ENTRY_WINDOW + 1, self.n)):
+                c = self.candles[i]
+                # Must still be in a kill zone
+                if not self.in_kz(i):
+                    continue
+                z    = self.zone(i)
+                tags = ["JUDAS", "KILLZONE"]
 
-        # ── Liquidity sweeps — market entry, kill zone checked at signal bar
+                # Priority 1: FVG in bias direction
+                for fvg in fvg_at.get(i, []):
+                    if direction == "BUY" and fvg["type"] == "FVG_BULL":
+                        t = tags + ["FVG"]
+                        if z == "discount":   t.append("DISCOUNT")
+                        if self.near_pdl(i):  t.append("PDL")
+                        signals.append({"bar": i, "type": "FVG_BULL",
+                                        "top": fvg["top"], "bottom": fvg["bottom"],
+                                        "mid": fvg["mid"], "confluence": t,
+                                        "expires_at": fvg["mitigated_at"]})
+                        traded_days.add(day); break
+                    elif direction == "SELL" and fvg["type"] == "FVG_BEAR":
+                        t = tags + ["FVG"]
+                        if z == "premium":    t.append("PREMIUM")
+                        if self.near_pdh(i):  t.append("PDH")
+                        signals.append({"bar": i, "type": "FVG_BEAR",
+                                        "top": fvg["top"], "bottom": fvg["bottom"],
+                                        "mid": fvg["mid"], "confluence": t,
+                                        "expires_at": fvg["mitigated_at"]})
+                        traded_days.add(day); break
+                if day in traded_days: break
+
+                # Priority 2: Order Block
+                for ob in ob_at.get(i, []):
+                    if direction == "BUY" and ob["type"] == "OB_BULL":
+                        t = tags + ["OB"]
+                        if z == "discount":   t.append("DISCOUNT")
+                        if self.near_pdl(i):  t.append("PDL")
+                        signals.append({"bar": i, "type": "OB_BULL",
+                                        "top": ob["top"], "bottom": ob["bottom"],
+                                        "mid": ob["mid"], "confluence": t,
+                                        "expires_at": ob["mitigated_at"]})
+                        traded_days.add(day); break
+                    elif direction == "SELL" and ob["type"] == "OB_BEAR":
+                        t = tags + ["OB"]
+                        if z == "premium":    t.append("PREMIUM")
+                        if self.near_pdh(i):  t.append("PDH")
+                        signals.append({"bar": i, "type": "OB_BEAR",
+                                        "top": ob["top"], "bottom": ob["bottom"],
+                                        "mid": ob["mid"], "confluence": t,
+                                        "expires_at": ob["mitigated_at"]})
+                        traded_days.add(day); break
+                if day in traded_days: break
+
+                # Priority 3: Breaker Block
+                for brk in brk_at.get(i, []):
+                    if direction == "BUY" and brk["type"] == "BREAK_BULL":
+                        t = tags + ["BREAKER"]
+                        if z == "discount":  t.append("DISCOUNT")
+                        signals.append({"bar": i, "type": "BREAK_BULL",
+                                        "top": brk["top"], "bottom": brk["bottom"],
+                                        "mid": brk["mid"], "confluence": t})
+                        traded_days.add(day); break
+                    elif direction == "SELL" and brk["type"] == "BREAK_BEAR":
+                        t = tags + ["BREAKER"]
+                        if z == "premium":   t.append("PREMIUM")
+                        signals.append({"bar": i, "type": "BREAK_BEAR",
+                                        "top": brk["top"], "bottom": brk["bottom"],
+                                        "mid": brk["mid"], "confluence": t})
+                        traded_days.add(day); break
+                if day in traded_days: break
+
+        # ── Phase 2: Liquidity sweeps that ARE the Judas (market entry) ──────────
         for sw in sweeps:
             i = sw["bar"]
             if not self.in_kz(i):
                 continue
-            if not self.bias_stable(i):
-                continue
-            b = self.bias(i); z = self.zone(i)
-            # London session (07-10 UTC) sweeps → Judas Swing label
             try:
-                h = datetime.fromisoformat(self.candles[i].time.replace("Z", "+00:00")).hour
-                is_london = 7 <= h < 10
+                day = self.candles[i].time[:10]
             except Exception:
-                is_london = False
-            tags = ["SWEEP", "KILLZONE"]
-            if sw["type"] == "LIQ_BULL":
-                if b == "bullish":                   tags.append("BIAS")
-                if z in ("discount","equilibrium"):  tags.append("DISCOUNT")
-                if self.pdl_swept(i):                tags.append("PDL_SWEEP")
-                if is_london:                        tags.append("JUDAS")
-                if len(tags) >= self.MIN_CONFLUENCE:
-                    signals.append({"bar": i, "type": "LIQ_BULL",
-                                    "top": sw["top"], "bottom": sw["bottom"],
-                                    "mid": sw["mid"], "confluence": tags})
-            elif sw["type"] == "LIQ_BEAR":
-                if b == "bearish":                   tags.append("BIAS")
-                if z in ("premium","equilibrium"):   tags.append("PREMIUM")
-                if self.pdh_swept(i):                tags.append("PDH_SWEEP")
-                if is_london:                        tags.append("JUDAS")
-                if len(tags) >= self.MIN_CONFLUENCE:
-                    signals.append({"bar": i, "type": "LIQ_BEAR",
-                                    "top": sw["top"], "bottom": sw["bottom"],
-                                    "mid": sw["mid"], "confluence": tags})
+                continue
+            if day in traded_days:
+                continue
+            bias = self.day_bias(day)
+            if bias == "neutral":
+                continue
+            tags = ["SWEEP", "KILLZONE", "JUDAS"]
+            if sw["type"] == "LIQ_BULL" and bias == "bullish":
+                if self.pdl_swept(i): tags.append("PDL_SWEEP")
+                signals.append({"bar": i, "type": "LIQ_BULL",
+                                "top": sw["top"], "bottom": sw["bottom"],
+                                "mid": sw["mid"], "confluence": tags})
+                traded_days.add(day)
+            elif sw["type"] == "LIQ_BEAR" and bias == "bearish":
+                if self.pdh_swept(i): tags.append("PDH_SWEEP")
+                signals.append({"bar": i, "type": "LIQ_BEAR",
+                                "top": sw["top"], "bottom": sw["bottom"],
+                                "mid": sw["mid"], "confluence": tags})
+                traded_days.add(day)
 
         signals.sort(key=lambda s: s["bar"])
         return signals
