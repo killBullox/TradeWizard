@@ -196,34 +196,44 @@ class ICTAnalyzer:
         v = self._atr[min(i, self.n - 1)] if self._atr else self.pip * 10
         return max(v, self.pip * 2)
 
-    # ── HTF Bias (ICT: swing structure HH/HL = bullish, LH/LL = bearish) ────────
+    # ── HTF Bias: swing structure confirmed by EMA200 macro trend ────────────────
     def _calc_bias(self, lb: int = 40) -> list[str]:
         """
-        ICT daily bias via market structure:
-        - Bullish:  recent swing structure shows HH and HL
-        - Bearish:  recent swing structure shows LH and LL
-        - Neutral:  mixed / insufficient data
-        Uses a rolling lookback of `lb` bars to track last 2 swing highs & lows.
+        Dual-layer bias:
+        1. Local swing structure (HH/HL = bullish, LH/LL = bearish)
+        2. EMA200 macro trend (price above = bullish, below = bearish)
+        Both layers must agree → reduces false signals in counter-trend conditions.
         """
+        # EMA200 for macro trend
+        ema200: list[float] = []
+        k = 2 / 201
+        for c in self.candles:
+            ema200.append(c.close * k + ema200[-1] * (1 - k) if ema200 else c.close)
+
         out = ["neutral"] * self.n
         for i in range(lb * 2, self.n):
             s = max(0, i - lb)
-            # Collect swing highs and lows in lookback window
             sw_highs = [self.candles[j].high for j in self.sh(s, i + 1)]
             sw_lows  = [self.candles[j].low  for j in self.sl(s, i + 1)]
-            if len(sw_highs) >= 2 and len(sw_lows) >= 2:
-                hh = sw_highs[-1] > sw_highs[-2]   # Higher High
-                hl = sw_lows[-1]  > sw_lows[-2]    # Higher Low
-                lh = sw_highs[-1] < sw_highs[-2]   # Lower High
-                ll = sw_lows[-1]  < sw_lows[-2]    # Lower Low
-                if hh and hl:
-                    out[i] = "bullish"
-                elif lh and ll:
-                    out[i] = "bearish"
-                elif hh or hl:
-                    out[i] = "bullish"   # partial bullish structure
-                elif lh or ll:
-                    out[i] = "bearish"   # partial bearish structure
+            if len(sw_highs) < 2 or len(sw_lows) < 2:
+                continue
+
+            hh = sw_highs[-1] > sw_highs[-2]
+            hl = sw_lows[-1]  > sw_lows[-2]
+            lh = sw_highs[-1] < sw_highs[-2]
+            ll = sw_lows[-1]  < sw_lows[-2]
+
+            if   hh and hl: local = "bullish"
+            elif lh and ll: local = "bearish"
+            elif hh or hl:  local = "bullish"
+            elif lh or ll:  local = "bearish"
+            else:           local = "neutral"
+
+            # Macro filter: EMA200 must agree with local swing structure
+            price  = self.candles[i].close
+            macro  = "bullish" if price > ema200[i] else "bearish"
+            out[i] = local if local == macro else "neutral"
+
         return out
 
     def bias(self, i: int) -> str:
@@ -363,8 +373,8 @@ class ICTAnalyzer:
         if rng < self.pip:
             return "neutral"
         pos = (self.candles[i].close - lo) / rng
-        if pos < 0.45:  return "discount"
-        if pos > 0.55:  return "premium"
+        if pos < 0.40:  return "discount"
+        if pos > 0.60:  return "premium"
         return "equilibrium"
 
     # ── Swings ───────────────────────────────────────────────────────────────────
