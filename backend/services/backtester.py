@@ -745,12 +745,15 @@ class Backtester:
     def __init__(self, symbol, timeframe, strategy="Mixed", bars=500,
                  risk_percent=1.0, rr_ratio=2.0, initial_balance=10_000.0,
                  max_risk_usd=None, enabled_setups=None,
+                 date_from: str = None, date_to: str = None,
                  oanda_api_key: str = "", oanda_practice: bool = True,
                  mt5_bridge_url: str = ""):
         self.symbol          = symbol
         self.timeframe       = timeframe
         self.strategy        = strategy
         self.bars            = bars
+        self.date_from       = date_from
+        self.date_to         = date_to
         self.risk_percent    = risk_percent
         self.rr_ratio        = rr_ratio
         self.initial_balance = initial_balance
@@ -788,6 +791,22 @@ class Backtester:
                                      practice=self.oanda_practice)
 
         candles = [Candle(**c) for c in raw.get("candles", [])]
+
+        # Filter by date range if requested
+        if self.date_from or self.date_to:
+            from datetime import timezone as _tz
+            def _parse(s):
+                dt = datetime.fromisoformat(s)
+                return dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+            def _ctime(c):
+                return _parse(c.time.replace("Z", "+00:00"))
+            if self.date_from:
+                dt_from = _parse(self.date_from)
+                candles = [c for c in candles if _ctime(c) >= dt_from]
+            if self.date_to:
+                dt_to = _parse(self.date_to) + timedelta(days=1)
+                candles = [c for c in candles if _ctime(c) <= dt_to]
+
         if len(candles) < 50:
             return BacktestResult(symbol=self.symbol, timeframe=self.timeframe,
                                   strategy=self.strategy, bars_used=len(candles),
@@ -1060,14 +1079,14 @@ class Backtester:
 async def run_backtest(symbol, timeframe="H1", strategy="Mixed",
                        bars=500, risk_percent=1.0, rr_ratio=2.0,
                        initial_balance=10_000.0, max_risk_usd=None,
-                       enabled_setups=None,
+                       enabled_setups=None, date_from=None, date_to=None,
                        oanda_api_key: str = "", oanda_practice: bool = True,
                        mt5_bridge_url: str = "") -> BacktestResult:
     return await Backtester(
         symbol=symbol, timeframe=timeframe, strategy=strategy,
         bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
         initial_balance=initial_balance, max_risk_usd=max_risk_usd,
-        enabled_setups=enabled_setups,
+        enabled_setups=enabled_setups, date_from=date_from, date_to=date_to,
         oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
         mt5_bridge_url=mt5_bridge_url,
     ).run()

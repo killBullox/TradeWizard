@@ -1215,15 +1215,43 @@ function handlePaperUpdate(msg) {
 let btEquityChart = null;
 let currentBtRunId = null;
 let btPollTimer = null;
+let _currentBtRun = null;   // full run object for client-side filtering
+
+// Calculate bars + date_from/date_to from the date-range preset
+function _btDateRange() {
+  const preset = document.getElementById('bt-date-preset')?.value || '90d';
+  const tf     = document.getElementById('bt-tf')?.value || 'H1';
+  const bptd   = {M5: 288, M15: 96, M30: 48, H1: 24, H4: 6, D1: 1}[tf] || 24;
+  const now    = new Date();
+
+  if (preset === 'custom') {
+    const from = document.getElementById('bt-date-from')?.value;
+    const to   = document.getElementById('bt-date-to')?.value;
+    if (!from) return { bars: 500, date_from: null, date_to: null };
+    const days = Math.ceil((new Date(to || now) - new Date(from)) / 86400000);
+    return { bars: Math.min(Math.ceil(days * bptd * 5/7 * 1.2), 25000), date_from: from, date_to: to || null };
+  }
+
+  const days = {'30d': 30, '60d': 60, '90d': 90, '180d': 180, '1y': 365}[preset] || 90;
+  const fromDate = new Date(now - days * 86400000);
+  return {
+    bars:      Math.min(Math.ceil(days * bptd * 5/7 * 1.2), 25000),
+    date_from: fromDate.toISOString().slice(0, 10),
+    date_to:   null,
+  };
+}
 
 async function runBacktest() {
+  const { bars, date_from, date_to } = _btDateRange();
   const maxRiskVal    = document.getElementById('bt-max-risk-usd')?.value;
   const checkedSetups = [...document.querySelectorAll('.bt-setup-chk:checked')].map(el => el.value);
   const payload = {
     symbol:          document.getElementById('bt-symbol')?.value  || 'EURUSD',
     timeframe:       document.getElementById('bt-tf')?.value      || 'H1',
     strategy:        document.getElementById('bt-strategy')?.value || 'Mixed',
-    bars:            parseInt(document.getElementById('bt-bars')?.value    || 500),
+    bars,
+    date_from,
+    date_to,
     risk_percent:    parseFloat(document.getElementById('bt-risk')?.value  || 1.0),
     rr_ratio:        parseFloat(document.getElementById('bt-rr')?.value    || 2.0),
     initial_balance: parseFloat(document.getElementById('bt-balance')?.value || 10000),
@@ -1273,6 +1301,154 @@ function setBtStatus(type, msg) {
   el.textContent = msg;
 }
 
+// ── Client-side stat recalculation from a filtered trade list ───────────────
+function calcBtStatsFromTrades(trades, initialBalance) {
+  const closed = trades.filter(t => t.result === 'WIN' || t.result === 'LOSS');
+  if (!closed.length) return {
+    total_trades: 0, wins: 0, losses: 0, win_rate: 0,
+    total_pips: 0, total_pnl_usd: 0, total_return: 0,
+    profit_factor: 0, avg_rr: 0, max_drawdown: 0, max_drawdown_usd: 0, sharpe: 0,
+    equity: [{ bar: 0, time: new Date().toISOString(), equity: initialBalance }],
+  };
+  const wins    = closed.filter(t => t.result === 'WIN');
+  const totalPips = closed.reduce((s,t) => s + (t.pnl_pips||0), 0);
+  const totalUsd  = closed.reduce((s,t) => s + (t.pnl_usd ||0), 0);
+  const grossWin  = wins.reduce((s,t) => s + (t.pnl_usd||0), 0);
+  const grossLoss = closed.filter(t=>t.result==='LOSS').reduce((s,t)=>s+Math.abs(t.pnl_usd||0),0);
+  const pf  = grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? 999 : 0);
+  const rrs = closed.filter(t=>t.rr_actual!=null).map(t=>t.rr_actual);
+  const avgRR = rrs.length ? rrs.reduce((a,b)=>a+b,0)/rrs.length : 0;
+
+  // Rebuild equity from trades sorted by entry_time
+  const sorted = [...closed].sort((a,b)=>a.entry_time.localeCompare(b.entry_time));
+  let bal = initialBalance, peak = bal, maxDD = 0, maxDDusd = 0;
+  const equity = [{ bar: 0, time: sorted[0].entry_time, equity: bal }];
+  sorted.forEach((t, i) => {
+    bal += (t.pnl_usd || 0);
+    if (bal > peak) peak = bal;
+    const dd = peak > 0 ? (peak - bal) / peak * 100 : 0;
+    if (dd > maxDD) { maxDD = dd; maxDDusd = peak - bal; }
+    equity.push({ bar: i+1, time: t.exit_time || t.entry_time, equity: Math.round(bal*100)/100 });
+  });
+
+  // Simplified per-trade Sharpe
+  const rets = sorted.map(t => (t.pnl_usd||0) / (initialBalance||1));
+  const mean = rets.reduce((a,b)=>a+b,0)/rets.length;
+  const vari = rets.reduce((a,b)=>a+(b-mean)**2,0)/rets.length;
+  const sharpe = vari > 0 ? parseFloat(((mean/Math.sqrt(vari))*Math.sqrt(252)).toFixed(2)) : 0;
+
+  return {
+    total_trades: closed.length, wins: wins.length, losses: closed.length-wins.length,
+    win_rate: closed.length ? wins.length/closed.length*100 : 0,
+    total_pips: totalPips, total_pnl_usd: totalUsd,
+    total_return: initialBalance > 0 ? (bal-initialBalance)/initialBalance*100 : 0,
+    profit_factor: pf, avg_rr: parseFloat(avgRR.toFixed(2)),
+    max_drawdown: maxDD, max_drawdown_usd: maxDDusd, sharpe, equity,
+  };
+}
+
+function renderBtStatsRow(s) {
+  const statsEl = document.getElementById('bt-stats-row');
+  if (!statsEl) return;
+  const wr = s.win_rate ?? 0, ret = s.total_return ?? 0, pnl = s.total_pnl_usd ?? 0;
+  const dd = s.max_drawdown ?? 0, ddUsd = s.max_drawdown_usd ?? 0, pf = s.profit_factor ?? 0;
+  statsEl.innerHTML = `
+    <div class="stat-card"><div class="stat-value">${s.total_trades ?? 0}</div><div class="stat-label">Trades</div></div>
+    <div class="stat-card ${wr>=55?'win':''}"><div class="stat-value">${wr.toFixed(1)}%</div><div class="stat-label">Win Rate</div></div>
+    <div class="stat-card"><div class="stat-value ${(s.total_pips??0)>=0?'text-win':'text-loss'}">${(s.total_pips??0).toFixed(1)}</div><div class="stat-label">Total Pips</div></div>
+    <div class="stat-card">
+      <div class="stat-value ${pnl>=0?'text-win':'text-loss'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div>
+      <div class="stat-sub ${ret>=0?'text-win':'text-loss'}">${ret.toFixed(2)}%</div>
+      <div class="stat-label">Return</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value text-loss">-$${ddUsd.toFixed(2)}</div>
+      <div class="stat-sub text-loss">${dd.toFixed(2)}%</div>
+      <div class="stat-label">Max DD</div>
+    </div>
+    <div class="stat-card"><div class="stat-value">${pf === 999 ? '∞' : pf.toFixed(2)}</div><div class="stat-label">Profit Factor</div></div>
+    <div class="stat-card"><div class="stat-value">${(s.sharpe??0).toFixed(2)}</div><div class="stat-label">Sharpe</div></div>
+    <div class="stat-card"><div class="stat-value">${s.avg_rr??0}</div><div class="stat-label">Avg R:R</div></div>
+  `;
+}
+
+function renderBtTradesTable(trades) {
+  const tbody = document.getElementById('bt-trades-tbody');
+  const cnt   = document.getElementById('bt-trade-count');
+  if (!tbody) return;
+  cnt && (cnt.textContent = trades.length);
+  tbody.innerHTML = trades.map((t, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td><span class="badge">${t.setup}</span></td>
+      <td class="${t.direction==='BUY'?'text-win':'text-loss'}">${t.direction}</td>
+      <td style="font-size:0.72rem;white-space:nowrap">${fmtDate(t.entry_time)}</td>
+      <td style="font-size:0.72rem;white-space:nowrap">${t.exit_time ? fmtDate(t.exit_time) : '—'}</td>
+      <td>${t.entry_price}</td>
+      <td>${t.stop_loss}</td>
+      <td>${t.take_profit}</td>
+      <td>${t.exit_price ?? '—'}</td>
+      <td style="font-size:0.75rem">${t.lot_size != null ? t.lot_size.toFixed(3) : '—'}</td>
+      <td>
+        <span class="badge ${t.result==='WIN'?'badge-win':t.result==='LOSS'?'badge-loss':''}">
+          ${t.result ?? 'OPEN'}
+        </span>
+      </td>
+      <td class="${(t.pnl_pips??0)>=0?'text-win':'text-loss'}">${t.pnl_pips!=null?t.pnl_pips.toFixed(1):'—'}</td>
+      <td class="${(t.pnl_usd??0)>=0?'text-win':'text-loss'}">${t.pnl_usd!=null?'$'+t.pnl_usd.toFixed(2):'—'}</td>
+      <td>${t.rr_actual!=null?t.rr_actual.toFixed(2):'—'}</td>
+    </tr>
+  `).join('');
+}
+
+const _SETUP_LABELS = {
+  FVG_BULL: 'FVG ↑', FVG_BEAR: 'FVG ↓', OB_BULL: 'OB ↑', OB_BEAR: 'OB ↓',
+  LIQ_BULL: 'Liq ↑', LIQ_BEAR: 'Liq ↓', BREAK_BULL: 'BRK ↑', BREAK_BEAR: 'BRK ↓',
+};
+
+function _applyBtResultFilter() {
+  if (!_currentBtRun) return;
+  const checks = [...document.querySelectorAll('.bt-res-chk')];
+  const checked = checks.filter(c=>c.checked).map(c=>c.value);
+  const trades = checked.length === checks.length
+    ? _currentBtRun.trades
+    : _currentBtRun.trades.filter(t => checked.includes(t.setup));
+
+  const initBal = _currentBtRun.equity?.[0]?.equity || 10000;
+  const stats   = calcBtStatsFromTrades(trades, initBal);
+  renderBtStatsRow(stats);
+  if (stats.equity.length > 1) renderBtEquity(stats.equity);
+  renderBtBySetup(trades);
+  _btCal.setTrades(trades);
+  renderBtTradesTable(trades);
+}
+
+function setupBtResultFilter(run) {
+  _currentBtRun = run;
+  const filterEl = document.getElementById('bt-result-filter');
+  const container = document.getElementById('bt-result-filter-checks');
+  if (!filterEl || !container) return;
+
+  const setups = [...new Set((run.trades||[]).map(t=>t.setup).filter(Boolean))].sort();
+  if (setups.length < 2) { filterEl.style.display = 'none'; return; }
+
+  filterEl.style.display = 'block';
+  container.innerHTML = setups.map(s =>
+    `<label class="check-pill"><input type="checkbox" class="bt-res-chk" value="${s}" checked> ${_SETUP_LABELS[s]||s}</label>`
+  ).join('');
+  container.querySelectorAll('.bt-res-chk').forEach(cb =>
+    cb.addEventListener('change', _applyBtResultFilter)
+  );
+  document.getElementById('btn-bt-res-all')?.addEventListener('click', () => {
+    container.querySelectorAll('.bt-res-chk').forEach(c => c.checked = true);
+    _applyBtResultFilter();
+  });
+  document.getElementById('btn-bt-res-none')?.addEventListener('click', () => {
+    container.querySelectorAll('.bt-res-chk').forEach(c => c.checked = false);
+    _applyBtResultFilter();
+  });
+}
+
 function renderBtResults(run) {
   const resultsEl = document.getElementById('bt-results');
   if (!resultsEl) return;
@@ -1286,81 +1462,26 @@ function renderBtResults(run) {
     warnEl.style.cssText = 'display:none;margin-bottom:12px;padding:12px 16px;border-radius:8px;background:#422006;border:1px solid #f97316;color:#fed7aa;font-size:0.875rem;line-height:1.5';
     resultsEl.prepend(warnEl);
   }
-  if (run.data_warning) {
-    warnEl.textContent = run.data_warning;
-    warnEl.style.display = 'block';
-  } else {
-    warnEl.style.display = 'none';
-  }
+  warnEl.style.display = run.data_warning ? 'block' : 'none';
+  if (run.data_warning) warnEl.textContent = run.data_warning;
 
-  // Stats row
-  const statsEl = document.getElementById('bt-stats-row');
-  if (statsEl) {
-    const wr    = run.win_rate ?? 0;
-    const ret   = run.total_return ?? 0;
-    const pnl   = run.total_pnl_usd ?? 0;
-    const dd    = run.max_drawdown ?? 0;
-    const ddUsd = run.max_drawdown_usd ?? 0;
-    const pf    = run.profit_factor ?? 0;
-    statsEl.innerHTML = `
-      <div class="stat-card"><div class="stat-value">${run.total_trades ?? 0}</div><div class="stat-label">Trades</div></div>
-      <div class="stat-card ${wr>=55?'win':''}"><div class="stat-value">${wr.toFixed(1)}%</div><div class="stat-label">Win Rate</div></div>
-      <div class="stat-card"><div class="stat-value ${(run.total_pips??0)>=0?'text-win':'text-loss'}">${(run.total_pips??0).toFixed(1)}</div><div class="stat-label">Total Pips</div></div>
-      <div class="stat-card">
-        <div class="stat-value ${pnl>=0?'text-win':'text-loss'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div>
-        <div class="stat-sub ${ret>=0?'text-win':'text-loss'}">${ret.toFixed(2)}%</div>
-        <div class="stat-label">Return</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value text-loss">-$${ddUsd.toFixed(2)}</div>
-        <div class="stat-sub text-loss">${dd.toFixed(2)}%</div>
-        <div class="stat-label">Max DD</div>
-      </div>
-      <div class="stat-card"><div class="stat-value">${pf === 999 ? '∞' : pf.toFixed(2)}</div><div class="stat-label">Profit Factor</div></div>
-      <div class="stat-card"><div class="stat-value">${(run.sharpe??0).toFixed(2)}</div><div class="stat-label">Sharpe</div></div>
-      <div class="stat-card"><div class="stat-value">${run.avg_rr??0}</div><div class="stat-label">Avg R:R</div></div>
-    `;
-  }
+  // Stats row (from full run data)
+  renderBtStatsRow(run);
 
   // Equity curve
-  if (run.equity && run.equity.length > 1) {
-    renderBtEquity(run.equity);
-  }
+  if (run.equity && run.equity.length > 1) renderBtEquity(run.equity);
+
+  // Result-side setup filter (must come after trades are known)
+  if (run.trades) setupBtResultFilter(run);
 
   // By setup breakdown
   if (run.trades) renderBtBySetup(run.trades);
 
   // PNL Calendar
-  if (run.trades && run.trades.length) _btCal.setTrades(run.trades);
+  if (run.trades?.length) _btCal.setTrades(run.trades);
 
   // Trades table
-  const tbody = document.getElementById('bt-trades-tbody');
-  const cnt   = document.getElementById('bt-trade-count');
-  if (tbody && run.trades) {
-    cnt && (cnt.textContent = run.trades.length);
-    tbody.innerHTML = run.trades.map((t, i) => `
-      <tr>
-        <td>${i + 1}</td>
-        <td><span class="badge">${t.setup}</span></td>
-        <td class="${t.direction==='BUY'?'text-win':'text-loss'}">${t.direction}</td>
-        <td style="font-size:0.72rem;white-space:nowrap">${fmtDate(t.entry_time)}</td>
-        <td style="font-size:0.72rem;white-space:nowrap">${t.exit_time ? fmtDate(t.exit_time) : '—'}</td>
-        <td>${t.entry_price}</td>
-        <td>${t.stop_loss}</td>
-        <td>${t.take_profit}</td>
-        <td>${t.exit_price ?? '—'}</td>
-        <td style="font-size:0.75rem">${t.lot_size != null ? t.lot_size.toFixed(3) : '—'}</td>
-        <td>
-          <span class="badge ${t.result==='WIN'?'badge-win':t.result==='LOSS'?'badge-loss':''}">
-            ${t.result ?? 'OPEN'}
-          </span>
-        </td>
-        <td class="${(t.pnl_pips??0)>=0?'text-win':'text-loss'}">${t.pnl_pips!=null?t.pnl_pips.toFixed(1):'—'}</td>
-        <td class="${(t.pnl_usd??0)>=0?'text-win':'text-loss'}">${t.pnl_usd!=null?'$'+t.pnl_usd.toFixed(2):'—'}</td>
-        <td>${t.rr_actual!=null?t.rr_actual.toFixed(2):'—'}</td>
-      </tr>
-    `).join('');
-  }
+  if (run.trades) renderBtTradesTable(run.trades);
 }
 
 function renderBtBySetup(trades) {
@@ -1495,6 +1616,17 @@ window.loadBtRun = loadBtRun;
 
 document.getElementById('btn-bt-run')?.addEventListener('click', runBacktest);
 document.getElementById('btn-bt-refresh-history')?.addEventListener('click', refreshBtHistory);
+
+// Toggle custom date inputs visibility
+document.getElementById('bt-date-preset')?.addEventListener('change', function() {
+  const row = document.getElementById('bt-date-custom-row');
+  if (row) row.style.display = this.value === 'custom' ? 'flex' : 'none';
+});
+
+// Default bt-date-to to today
+const _todayIso = new Date().toISOString().slice(0, 10);
+const _btDateTo = document.getElementById('bt-date-to');
+if (_btDateTo && !_btDateTo.value) _btDateTo.value = _todayIso;
 
 // Keep WS alive
 setInterval(() => { if (ws?.readyState === WebSocket.OPEN) sendWS({ command: 'ping' }); }, 30000);

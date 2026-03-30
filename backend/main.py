@@ -478,6 +478,8 @@ async def backtest_run(data: dict):
         balance      = float(data.get("initial_balance", 10000.0))
         max_risk_usd    = float(data["max_risk_usd"]) if data.get("max_risk_usd") else None
         enabled_setups  = data.get("enabled_setups") or None  # list or None
+        date_from       = data.get("date_from") or None       # ISO date string e.g. "2025-01-01"
+        date_to         = data.get("date_to")   or None
 
         valid_tf = {"M5","M15","M30","H1","H4","D1"}
         valid_st = {"FVG","OrderBlock","Liquidity","Mixed"}
@@ -508,6 +510,7 @@ async def backtest_run(data: dict):
             run_id, symbol, timeframe, strategy, bars,
             risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups,
             oanda_key, oanda_practice, mt5_bridge_url,
+            date_from=date_from, date_to=date_to,
         ))
         return {"run_id": run_id, "status": "RUNNING"}
     except HTTPException:
@@ -521,13 +524,14 @@ async def _exec_backtest(
     run_id, symbol, timeframe, strategy, bars,
     risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None,
     oanda_api_key="", oanda_practice=True, mt5_bridge_url="",
+    date_from=None, date_to=None,
 ):
     try:
         result = await run_backtest(
             symbol=symbol, timeframe=timeframe, strategy=strategy,
             bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
             initial_balance=balance, max_risk_usd=max_risk_usd,
-            enabled_setups=enabled_setups,
+            enabled_setups=enabled_setups, date_from=date_from, date_to=date_to,
             oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
             mt5_bridge_url=mt5_bridge_url,
         )
