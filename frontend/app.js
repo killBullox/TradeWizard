@@ -1228,7 +1228,7 @@ async function runBacktest() {
     rr_ratio:        parseFloat(document.getElementById('bt-rr')?.value    || 2.0),
     initial_balance: parseFloat(document.getElementById('bt-balance')?.value || 10000),
     max_risk_usd:    maxRiskVal ? parseFloat(maxRiskVal) : null,
-    enabled_setups:  checkedSetups.length === 6 ? null : checkedSetups,
+    enabled_setups:  checkedSetups.length === document.querySelectorAll('.bt-setup-chk').length ? null : checkedSetups,
   };
 
   setBtStatus('running', '⏳ Running…');
