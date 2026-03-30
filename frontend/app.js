@@ -692,7 +692,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'settings')    refreshConfig();
     if (tab.dataset.tab === 'news')        refreshNews();
     if (tab.dataset.tab === 'charts')      window.activateChartsTab?.();
-    if (tab.dataset.tab === 'backtest')    refreshBtHistory();
+    if (tab.dataset.tab === 'backtest')    { refreshBtHistory(); refreshCacheStatus(); }
     if (tab.dataset.tab === 'paper')       refreshPaper();
     if (tab.dataset.tab === 'analytics')  refreshAnalytics();
   });
@@ -1627,6 +1627,137 @@ document.getElementById('bt-date-preset')?.addEventListener('change', function()
 const _todayIso = new Date().toISOString().slice(0, 10);
 const _btDateTo = document.getElementById('bt-date-to');
 if (_btDateTo && !_btDateTo.value) _btDateTo.value = _todayIso;
+
+// ── OHLCV Data Cache ──────────────────────────────────────────────────────────
+let _cachePollTimer = null;
+
+const _DURATION_BARS = {
+  '90d':  { M15: 8640, M30: 4320, H1: 2160, H4: 540,  D1: 90  },
+  '180d': { M15:17280, M30: 8640, H1: 4320, H4:1080,  D1: 180 },
+  '1y':   { M15:35040, M30:17520, H1: 8760, H4:2190,  D1: 365 },
+  '2y':   { M15:70080, M30:35040, H1:17520, H4:4380,  D1: 730 },
+  '5y':   { M15:175200,M30:87600, H1:43800, H4:10950, D1:1825 },
+};
+
+async function refreshCacheStatus() {
+  try {
+    const data  = await fetchJSON('/api/ohlcv/status');
+    const tbody = document.getElementById('cache-tbody');
+    if (!tbody) return;
+
+    if (!data.cached?.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No cached data — click Build to download</td></tr>';
+    } else {
+      tbody.innerHTML = data.cached.map(row => {
+        const build = row.build || {};
+        const progressHtml = build.status === 'running' || build.status === 'updating'
+          ? `<span style="color:#f97316;font-size:0.78rem">${build.done}/${build.total} bars…</span>`
+          : build.status === 'error'
+            ? `<span style="color:#ef4444;font-size:0.78rem">Error</span>`
+            : '';
+        return `<tr>
+          <td><b>${row.symbol}</b></td>
+          <td>${row.timeframe}</td>
+          <td>${row.bars.toLocaleString()}</td>
+          <td style="font-size:0.78rem">${row.from ? row.from.slice(0,10) : '—'}</td>
+          <td style="font-size:0.78rem">${row.to   ? row.to.slice(0,10)   : '—'}</td>
+          <td style="white-space:nowrap">
+            ${progressHtml}
+            <button class="btn btn-ghost btn-sm" onclick="cacheUpdate('${row.symbol}','${row.timeframe}')">↑ Update</button>
+            <button class="btn btn-ghost btn-sm" style="color:#ef4444" onclick="cacheClear('${row.symbol}','${row.timeframe}')">✕</button>
+          </td>
+        </tr>`;
+      }).join('');
+    }
+
+    // If any build is running, keep polling
+    const anyRunning = Object.values(data.building || {}).length > 0;
+    if (anyRunning && !_cachePollTimer) {
+      _cachePollTimer = setInterval(refreshCacheStatus, 1500);
+    } else if (!anyRunning && _cachePollTimer) {
+      clearInterval(_cachePollTimer); _cachePollTimer = null;
+      _hideCacheProgress();
+    }
+  } catch(e) { console.error('refreshCacheStatus', e); }
+}
+
+function _showCacheProgress(label) {
+  const wrap = document.getElementById('cache-progress-wrap');
+  if (wrap) wrap.style.display = 'block';
+  const lbl = document.getElementById('cache-progress-label');
+  if (lbl) lbl.textContent = label;
+}
+function _hideCacheProgress() {
+  const wrap = document.getElementById('cache-progress-wrap');
+  if (wrap) wrap.style.display = 'none';
+}
+function _updateCacheProgress(done, total) {
+  const pct = total > 0 ? Math.round(done / total * 100) : 0;
+  const bar = document.getElementById('cache-progress-bar');
+  if (bar) bar.style.width = pct + '%';
+  const pctEl = document.getElementById('cache-progress-pct');
+  if (pctEl) pctEl.textContent = pct + '%  (' + done.toLocaleString() + ' / ' + total.toLocaleString() + ')';
+}
+
+async function cacheBuild() {
+  const sym  = document.getElementById('cache-symbol')?.value || 'EURUSD';
+  const tf   = document.getElementById('cache-tf')?.value || 'H1';
+  const dur  = document.getElementById('cache-duration')?.value || '1y';
+  const bars = (_DURATION_BARS[dur] || {})[tf] || 8760;
+
+  _showCacheProgress(`Building ${sym} ${tf} (${bars.toLocaleString()} bars)…`);
+  _updateCacheProgress(0, bars);
+  if (!_cachePollTimer) _cachePollTimer = setInterval(refreshCacheStatus, 1500);
+
+  const key = `${sym}_${tf}`;
+  try {
+    await fetchJSON('/api/ohlcv/build', { method: 'POST', body: JSON.stringify({ symbol: sym, timeframe: tf, bars }) });
+    // Poll progress
+    const poll = async () => {
+      const p = await fetchJSON(`/api/ohlcv/progress/${key}`).catch(() => null);
+      if (!p) return;
+      _updateCacheProgress(p.done || 0, p.total || bars);
+      if (p.status === 'done') { refreshCacheStatus(); _hideCacheProgress(); }
+      else if (p.status === 'error') { _hideCacheProgress(); alert('Build error: ' + p.error); }
+      else setTimeout(poll, 1000);
+    };
+    setTimeout(poll, 1000);
+  } catch(e) { _hideCacheProgress(); alert('Build failed: ' + e.message); }
+}
+
+async function cacheUpdate(symbol, tf) {
+  const key = `${symbol}_${tf}`;
+  _showCacheProgress(`Updating ${symbol} ${tf}…`);
+  if (!_cachePollTimer) _cachePollTimer = setInterval(refreshCacheStatus, 1500);
+  try {
+    await fetchJSON('/api/ohlcv/update', { method: 'POST', body: JSON.stringify({ symbol, timeframe: tf }) });
+  } catch(e) { _hideCacheProgress(); alert('Update failed: ' + e.message); }
+}
+
+async function cacheClear(symbol, tf) {
+  if (!confirm(`Delete cached data for ${symbol} ${tf}?`)) return;
+  try {
+    const r = await fetchJSON('/api/ohlcv/clear', { method: 'DELETE', body: JSON.stringify({ symbol, timeframe: tf }) });
+    alert(`Deleted ${r.deleted} bars`);
+    refreshCacheStatus();
+  } catch(e) { alert('Clear failed: ' + e.message); }
+}
+
+window.cacheUpdate = cacheUpdate;
+window.cacheClear  = cacheClear;
+
+document.getElementById('btn-cache-build')?.addEventListener('click', cacheBuild);
+document.getElementById('btn-cache-refresh')?.addEventListener('click', refreshCacheStatus);
+document.getElementById('btn-cache-update-all')?.addEventListener('click', async () => {
+  const rows = document.querySelectorAll('#cache-tbody tr[data-sym]');
+  // fallback: read from table cells
+  const tbody = document.getElementById('cache-tbody');
+  const trs = tbody?.querySelectorAll('tr') || [];
+  for (const tr of trs) {
+    const cells = tr.querySelectorAll('td');
+    if (cells.length >= 2) await cacheUpdate(cells[0].textContent.trim(), cells[1].textContent.trim());
+  }
+});
 
 // Keep WS alive
 setInterval(() => { if (ws?.readyState === WebSocket.OPEN) sendWS({ command: 'ping' }); }, 30000);

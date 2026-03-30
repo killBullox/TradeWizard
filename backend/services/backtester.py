@@ -779,16 +779,32 @@ class Backtester:
     async def run(self) -> BacktestResult:
         from services.oanda_data import build_m1_index
 
-        # ── 1. Fetch H1 candles — MT5 bridge first, then OANDA, then yfinance ──
-        if self.mt5_bridge_url:
-            from services.mt5_data import fetch_ohlcv as _mt5_fetch
-            raw = await _mt5_fetch(self.symbol, self.timeframe, self.bars,
-                                   bridge_url=self.mt5_bridge_url)
-        else:
-            from services.oanda_data import fetch_ohlcv as _oanda_fetch
-            raw = await _oanda_fetch(self.symbol, self.timeframe, self.bars,
-                                     api_key=self.oanda_api_key,
-                                     practice=self.oanda_practice)
+        # ── 1. Fetch candles — local DB cache first, then MT5/OANDA/yfinance ──
+        raw = None
+        try:
+            from services.ohlcv_cache import get_cached_candles
+            cached = await get_cached_candles(
+                self.symbol, self.timeframe,
+                n_bars=self.bars,
+                date_from=self.date_from,
+                date_to=self.date_to,
+            )
+            if len(cached) >= 50:
+                raw = {"symbol": self.symbol, "timeframe": self.timeframe,
+                       "candles": cached, "indicators": {}}
+        except Exception as _ce:
+            pass  # cache unavailable → fall through to API
+
+        if raw is None:
+            if self.mt5_bridge_url:
+                from services.mt5_data import fetch_ohlcv as _mt5_fetch
+                raw = await _mt5_fetch(self.symbol, self.timeframe, self.bars,
+                                       bridge_url=self.mt5_bridge_url)
+            else:
+                from services.oanda_data import fetch_ohlcv as _oanda_fetch
+                raw = await _oanda_fetch(self.symbol, self.timeframe, self.bars,
+                                         api_key=self.oanda_api_key,
+                                         practice=self.oanda_practice)
 
         candles = [Candle(**c) for c in raw.get("candles", [])]
 

@@ -27,7 +27,7 @@ load_dotenv()
 from models.database import (
     async_session_factory, init_db, Trade, AgentLog,
     JournalEntry, Meeting, SystemConfig, set_config, get_config,
-    BacktestRun,
+    BacktestRun, OhlcvBar,
 )
 from orchestrator import Orchestrator
 from services.forex_data import fetch_ohlcv
@@ -36,6 +36,9 @@ from services.analytics import compute_analytics
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+# In-memory build/update progress tracker  key = "SYMBOL_TF"
+_build_tasks: dict[str, dict] = {}
 
 # ------------------------------------------------------------------ #
 #  WebSocket Connection Manager
@@ -731,6 +734,153 @@ def _bt_to_dict(r: BacktestRun) -> dict:
         "created_at":   r.created_at.isoformat() if r.created_at else None,
         "completed_at": r.completed_at.isoformat() if r.completed_at else None,
     }
+
+
+# ── OHLCV Cache endpoints ──────────────────────────────────────────────────────
+
+@app.get("/api/ohlcv/status")
+async def ohlcv_status():
+    """Summary of what's in the local OHLCV cache."""
+    from services.ohlcv_cache import get_cache_info
+    info = await get_cache_info()
+    for row in info:
+        key = f"{row['symbol']}_{row['timeframe']}"
+        if key in _build_tasks:
+            row["build"] = _build_tasks[key]
+    building = {k: v for k, v in _build_tasks.items() if v["status"] in ("running", "updating")}
+    return {"cached": info, "building": building}
+
+
+@app.get("/api/ohlcv/progress/{key}")
+async def ohlcv_progress(key: str):
+    """Poll build/update progress for a symbol_timeframe key."""
+    return _build_tasks.get(key, {"status": "idle"})
+
+
+@app.post("/api/ohlcv/build")
+async def ohlcv_build(data: dict):
+    """Start building the cache for a symbol/timeframe/bar-count."""
+    symbol    = data.get("symbol", "EURUSD").upper()
+    timeframe = data.get("timeframe", "H1")
+    n_bars    = int(data.get("bars", 5000))
+    key       = f"{symbol}_{timeframe}"
+
+    if _build_tasks.get(key, {}).get("status") in ("running", "updating"):
+        return {"status": "already_running", "key": key}
+
+    async with async_session_factory() as s:
+        oanda_key      = await get_config("oanda_api_key", s) or ""
+        oanda_practice = (await get_config("oanda_practice", s) or "true") != "false"
+        mt5_bridge_url = await get_config("mt5_bridge_url", s) or ""
+
+    asyncio.create_task(_do_build_cache(symbol, timeframe, n_bars, oanda_key, oanda_practice, mt5_bridge_url))
+    return {"status": "started", "key": key}
+
+
+@app.post("/api/ohlcv/update")
+async def ohlcv_update(data: dict):
+    """Fetch bars newer than the latest cached timestamp."""
+    symbol    = data.get("symbol", "EURUSD").upper()
+    timeframe = data.get("timeframe", "H1")
+    key       = f"{symbol}_{timeframe}"
+
+    if _build_tasks.get(key, {}).get("status") in ("running", "updating"):
+        return {"status": "already_running", "key": key}
+
+    async with async_session_factory() as s:
+        oanda_key      = await get_config("oanda_api_key", s) or ""
+        oanda_practice = (await get_config("oanda_practice", s) or "true") != "false"
+        mt5_bridge_url = await get_config("mt5_bridge_url", s) or ""
+
+    asyncio.create_task(_do_update_cache(symbol, timeframe, oanda_key, oanda_practice, mt5_bridge_url))
+    return {"status": "started", "key": key}
+
+
+@app.delete("/api/ohlcv/clear")
+async def ohlcv_clear(data: dict):
+    """Delete cached bars for a symbol/timeframe (or all if empty)."""
+    symbol    = (data.get("symbol") or "").upper()
+    timeframe = data.get("timeframe") or ""
+    from sqlalchemy import delete as _del
+    async with async_session_factory() as s:
+        q = _del(OhlcvBar)
+        if symbol:    q = q.where(OhlcvBar.symbol    == symbol)
+        if timeframe: q = q.where(OhlcvBar.timeframe == timeframe)
+        result = await s.execute(q)
+        await s.commit()
+    key = f"{symbol}_{timeframe}" if symbol and timeframe else None
+    if key and key in _build_tasks:
+        del _build_tasks[key]
+    return {"deleted": result.rowcount}
+
+
+# ── Cache background workers ───────────────────────────────────────────────────
+
+async def _do_build_cache(symbol, timeframe, n_bars, oanda_key, oanda_practice, mt5_bridge_url):
+    key = f"{symbol}_{timeframe}"
+    _build_tasks[key] = {"done": 0, "total": n_bars, "status": "running", "error": None, "inserted": 0}
+    try:
+        if mt5_bridge_url:
+            from services.mt5_data import fetch_ohlcv as _fetch
+            raw     = await _fetch(symbol, timeframe, n_bars, bridge_url=mt5_bridge_url)
+            candles = raw.get("candles", [])
+        else:
+            from services.oanda_data import OandaClient
+            client  = OandaClient(oanda_key, oanda_practice)
+            candles = await client.get_candles_chunked(symbol, timeframe, n_bars)
+
+        if not candles:
+            raise RuntimeError("No candles returned from data source")
+
+        _build_tasks[key]["total"] = len(candles)
+        from services.ohlcv_cache import upsert_candles
+        BATCH = 500
+        inserted = 0
+        for i in range(0, len(candles), BATCH):
+            n = await upsert_candles(symbol, timeframe, candles[i : i + BATCH])
+            inserted += n
+            _build_tasks[key]["done"] = min(i + BATCH, len(candles))
+            _build_tasks[key]["inserted"] = inserted
+
+        _build_tasks[key].update({"status": "done", "done": len(candles), "inserted": inserted})
+        logger.info("Cache built: %s %s — %d bars fetched, %d new", symbol, timeframe, len(candles), inserted)
+    except Exception as exc:
+        logger.error("Cache build failed %s %s: %s", symbol, timeframe, exc, exc_info=True)
+        _build_tasks[key].update({"status": "error", "error": str(exc)})
+
+
+async def _do_update_cache(symbol, timeframe, oanda_key, oanda_practice, mt5_bridge_url):
+    key = f"{symbol}_{timeframe}"
+    _build_tasks[key] = {"done": 0, "total": 0, "status": "updating", "error": None, "inserted": 0}
+    try:
+        from services.ohlcv_cache import get_latest_time, upsert_candles
+        latest = await get_latest_time(symbol, timeframe)
+
+        if not latest:
+            # Nothing cached yet → full build with 2000-bar default
+            await _do_build_cache(symbol, timeframe, 2000, oanda_key, oanda_practice, mt5_bridge_url)
+            return
+
+        from datetime import datetime, timezone, timedelta
+        dt_from = datetime.fromisoformat(latest.replace("Z", "+00:00")) + timedelta(minutes=1)
+        dt_to   = datetime.now(timezone.utc)
+
+        if mt5_bridge_url:
+            from services.mt5_data import fetch_ohlcv as _fetch
+            raw     = await _fetch(symbol, timeframe, 500, bridge_url=mt5_bridge_url)
+            candles = [c for c in raw.get("candles", []) if c["time"] > latest]
+        else:
+            from services.oanda_data import OandaClient
+            client  = OandaClient(oanda_key, oanda_practice)
+            candles = await client.get_candles(symbol, timeframe, from_time=dt_from, to_time=dt_to)
+
+        _build_tasks[key]["total"] = len(candles)
+        inserted = await upsert_candles(symbol, timeframe, candles) if candles else 0
+        _build_tasks[key].update({"status": "done", "done": len(candles), "inserted": inserted})
+        logger.info("Cache updated: %s %s — %d new bars", symbol, timeframe, inserted)
+    except Exception as exc:
+        logger.error("Cache update failed %s %s: %s", symbol, timeframe, exc, exc_info=True)
+        _build_tasks[key].update({"status": "error", "error": str(exc)})
 
 
 @app.get("/api/analytics")

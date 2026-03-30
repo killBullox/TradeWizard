@@ -7,7 +7,8 @@ import json
 from datetime import datetime
 from typing import Optional, Any
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey
+    Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey,
+    UniqueConstraint, Index
 )
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -144,6 +145,26 @@ class BacktestRun(Base):
     data_warning = Column(Text,    nullable=True)   # set when M1 data unavailable
     created_at   = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
+
+
+class OhlcvBar(Base):
+    """Local cache of OHLCV bars to avoid repeated API calls during backtesting."""
+    __tablename__ = "ohlcv_bars"
+
+    id        = Column(Integer, primary_key=True, index=True)
+    symbol    = Column(String(20), nullable=False)
+    timeframe = Column(String(10), nullable=False)
+    time      = Column(String(30), nullable=False)   # ISO datetime string
+    open      = Column(Float,    nullable=False)
+    high      = Column(Float,    nullable=False)
+    low       = Column(Float,    nullable=False)
+    close     = Column(Float,    nullable=False)
+    volume    = Column(Integer,  default=0)
+
+    __table_args__ = (
+        UniqueConstraint('symbol', 'timeframe', 'time', name='uq_ohlcv_bar'),
+        Index('ix_ohlcv_sym_tf_time', 'symbol', 'timeframe', 'time'),
+    )
 
 
 class MarketSession(Base):

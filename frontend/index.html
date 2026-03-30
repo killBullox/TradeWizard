@@ -587,6 +587,65 @@
           </div>
         </div>
 
+        <!-- Data Cache -->
+        <div class="card" style="margin-top:12px">
+          <div class="card-header">
+            <h3>🗄️ Data Cache</h3>
+            <button class="btn btn-ghost btn-sm" id="btn-cache-refresh">↻ Refresh</button>
+          </div>
+          <!-- Build form -->
+          <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px">
+            <div class="form-group" style="margin:0">
+              <label>Symbol</label>
+              <select id="cache-symbol" class="form-input" style="min-width:110px">
+                <option>EURUSD</option><option>GBPUSD</option><option>USDJPY</option>
+                <option>XAUUSD</option><option>USDCHF</option><option>AUDUSD</option>
+                <option>GBPJPY</option><option>NZDUSD</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin:0">
+              <label>Timeframe</label>
+              <select id="cache-tf" class="form-input" style="min-width:90px">
+                <option>M15</option><option>M30</option>
+                <option selected>H1</option><option>H4</option><option>D1</option>
+              </select>
+            </div>
+            <div class="form-group" style="margin:0">
+              <label>Duration</label>
+              <select id="cache-duration" class="form-input" style="min-width:120px">
+                <option value="90d">Last 90 days</option>
+                <option value="180d">Last 6 months</option>
+                <option value="1y">Last 1 year</option>
+                <option value="2y">Last 2 years</option>
+                <option value="5y">Last 5 years</option>
+              </select>
+            </div>
+            <button class="btn btn-primary btn-sm" id="btn-cache-build">⬇ Build</button>
+            <button class="btn btn-ghost btn-sm" id="btn-cache-update-all">↑ Update All</button>
+          </div>
+          <!-- Progress bar (hidden by default) -->
+          <div id="cache-progress-wrap" style="display:none;margin-bottom:12px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+              <span id="cache-progress-label" style="font-size:0.8rem;color:var(--text-muted)">Building…</span>
+              <span id="cache-progress-pct" style="font-size:0.8rem;color:var(--text-muted)">0%</span>
+            </div>
+            <div style="height:6px;border-radius:3px;background:var(--bg-tertiary);overflow:hidden">
+              <div id="cache-progress-bar" style="height:100%;width:0%;background:#3b82f6;border-radius:3px;transition:width 0.3s"></div>
+            </div>
+          </div>
+          <!-- Cached data table -->
+          <div class="table-wrapper">
+            <table class="table" id="cache-table">
+              <thead>
+                <tr><th>Symbol</th><th>TF</th><th>Bars</th><th>From</th><th>To</th><th></th></tr>
+              </thead>
+              <tbody id="cache-tbody">
+                <tr><td colspan="6" class="empty-state">No cached data — click Build to download</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
         <!-- Past runs -->
         <div class="card" style="margin-top:12px">
           <div class="card-header">
