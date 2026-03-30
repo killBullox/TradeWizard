@@ -844,6 +844,10 @@ async def _do_build_cache(symbol, timeframe, n_bars, oanda_key, oanda_practice, 
 
         _build_tasks[key].update({"status": "done", "done": len(candles), "inserted": inserted})
         logger.info("Cache built: %s %s — %d bars fetched, %d new", symbol, timeframe, len(candles), inserted)
+
+        # Also cache M1 data so backtests never need to call the API for timing data
+        if timeframe != "M1" and candles:
+            asyncio.create_task(_build_m1_cache(symbol, candles, oanda_key, oanda_practice, mt5_bridge_url))
     except Exception as exc:
         logger.error("Cache build failed %s %s: %s", symbol, timeframe, exc, exc_info=True)
         _build_tasks[key].update({"status": "error", "error": str(exc)})
@@ -878,9 +882,60 @@ async def _do_update_cache(symbol, timeframe, oanda_key, oanda_practice, mt5_bri
         inserted = await upsert_candles(symbol, timeframe, candles) if candles else 0
         _build_tasks[key].update({"status": "done", "done": len(candles), "inserted": inserted})
         logger.info("Cache updated: %s %s — %d new bars", symbol, timeframe, inserted)
+
+        # Update M1 cache too (only new bars since latest M1)
+        if timeframe != "M1" and candles:
+            asyncio.create_task(_build_m1_cache(symbol, candles, oanda_key, oanda_practice, mt5_bridge_url))
     except Exception as exc:
         logger.error("Cache update failed %s %s: %s", symbol, timeframe, exc, exc_info=True)
         _build_tasks[key].update({"status": "error", "error": str(exc)})
+
+
+async def _build_m1_cache(symbol, h1_candles, oanda_key, oanda_practice, mt5_bridge_url):
+    """Fetch and cache M1 data for the date range covered by the given H1 candles."""
+    key_m1 = f"{symbol}_M1"
+    _build_tasks[key_m1] = {"done": 0, "total": 0, "status": "running", "error": None, "inserted": 0}
+    try:
+        from datetime import datetime, timedelta
+        from services.ohlcv_cache import upsert_candles, get_latest_time
+
+        first_t = h1_candles[0]["time"]
+        last_t  = h1_candles[-1]["time"]
+
+        # Skip M1 bars we already have
+        latest_m1 = await get_latest_time(symbol, "M1")
+
+        def _dt(s):
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+        first_dt = _dt(first_t)
+        if latest_m1 and _dt(latest_m1) >= first_dt:
+            first_dt = _dt(latest_m1) + timedelta(minutes=1)
+
+        last_dt = _dt(last_t) + timedelta(hours=1)
+
+        if first_dt >= last_dt:
+            _build_tasks[key_m1].update({"status": "done", "done": 0, "total": 0})
+            return
+
+        if mt5_bridge_url:
+            from services.mt5_data import fetch_m1_for_period as _m1_fetch
+            m1_list = await _m1_fetch(symbol, first_dt, last_dt, bridge_url=mt5_bridge_url)
+        else:
+            from services.oanda_data import fetch_m1_for_period as _m1_fetch
+            m1_list = await _m1_fetch(symbol, first_dt, last_dt,
+                                      api_key=oanda_key, practice=oanda_practice)
+
+        _build_tasks[key_m1]["total"] = len(m1_list) if m1_list else 0
+        if m1_list:
+            n = await upsert_candles(symbol, "M1", m1_list)
+            _build_tasks[key_m1].update({"status": "done", "done": len(m1_list), "inserted": n})
+            logger.info("M1 cache built: %s — %d bars, %d new", symbol, len(m1_list), n)
+        else:
+            _build_tasks[key_m1].update({"status": "done", "done": 0})
+    except Exception as exc:
+        logger.warning("M1 cache build failed for %s: %s", symbol, exc)
+        _build_tasks[key_m1].update({"status": "error", "error": str(exc)})
 
 
 @app.get("/api/analytics")

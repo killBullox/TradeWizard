@@ -834,19 +834,38 @@ class Backtester:
             first_dt = datetime.fromisoformat(candles[0].time)
             last_dt  = datetime.fromisoformat(candles[-1].time) + timedelta(hours=1)
 
-            if self.mt5_bridge_url:
-                from services.mt5_data import fetch_m1_for_period as _m1_fetch
-                m1_raw = await _m1_fetch(self.symbol, first_dt, last_dt,
-                                         bridge_url=self.mt5_bridge_url)
-                m1_source = "MT5"
-            elif self.oanda_api_key:
-                from services.oanda_data import fetch_m1_for_period as _m1_fetch
-                m1_raw = await _m1_fetch(self.symbol, first_dt, last_dt,
-                                         api_key=self.oanda_api_key,
-                                         practice=self.oanda_practice)
-                m1_source = "OANDA"
-            else:
-                m1_raw = []
+            # Try local M1 cache first
+            m1_raw = None
+            try:
+                from services.ohlcv_cache import get_cached_candles as _get_m1
+                m1_raw = await _get_m1(
+                    self.symbol, "M1",
+                    date_from=candles[0].time[:10],
+                    date_to=candles[-1].time[:10],
+                )
+                if m1_raw:
+                    m1_source = "cache"
+                    logger.info("M1 from cache: %d bars for %s", len(m1_raw), self.symbol)
+                else:
+                    m1_raw = None
+            except Exception:
+                pass
+
+            # Fall back to API if cache miss
+            if not m1_raw:
+                if self.mt5_bridge_url:
+                    from services.mt5_data import fetch_m1_for_period as _m1_fetch
+                    m1_raw = await _m1_fetch(self.symbol, first_dt, last_dt,
+                                             bridge_url=self.mt5_bridge_url)
+                    m1_source = "MT5"
+                elif self.oanda_api_key:
+                    from services.oanda_data import fetch_m1_for_period as _m1_fetch
+                    m1_raw = await _m1_fetch(self.symbol, first_dt, last_dt,
+                                             api_key=self.oanda_api_key,
+                                             practice=self.oanda_practice)
+                    m1_source = "OANDA"
+                else:
+                    m1_raw = []
 
             if m1_raw:
                 self.m1_index = build_m1_index(m1_raw)
