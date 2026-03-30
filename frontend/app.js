@@ -237,8 +237,8 @@ async function refreshTrades() {
     state.trades = trades;
     renderTradesTable(trades);
     renderOpenTrades(trades.filter(t => t.status === 'ACTIVE'));
-    // PNL Calendar — trades tab
-    const calTrades = trades.filter(t => t.result === 'WIN' || t.result === 'LOSS');
+    // PNL Calendar — trades tab (real trades use status=CLOSED, not result=WIN/LOSS)
+    const calTrades = trades.filter(t => t.status === 'CLOSED' || t.result === 'WIN' || t.result === 'LOSS');
     if (calTrades.length) _tradesCal.setTrades(calTrades);
     // Update stats
     const closed = trades.filter(t => t.status === 'CLOSED');
@@ -1520,11 +1520,20 @@ class PnlCalendar {
     this.activeSetups = null; // null = all
   }
 
+  _isClosed(t) {
+    return t.result === 'WIN' || t.result === 'LOSS' || t.status === 'CLOSED';
+  }
+  _isWin(t) {
+    if (t.result === 'WIN')  return true;
+    if (t.result === 'LOSS') return false;
+    return (t.pnl_usd || 0) > 0;
+  }
+
   setTrades(trades) {
     this.trades = trades;
     // Jump to most recent month with trades
     const dates = trades
-      .filter(t => t.exit_time && (t.result === 'WIN' || t.result === 'LOSS'))
+      .filter(t => t.exit_time && this._isClosed(t))
       .map(t => this._parseDate(t.exit_time)).filter(Boolean);
     if (dates.length) {
       const latest = new Date(Math.max(...dates.map(d => d.getTime())));
@@ -1570,17 +1579,15 @@ class PnlCalendar {
 
   _buildDayMap() {
     const map = {};
-    const today = new Date();
     for (const t of this.trades) {
-      if (t.result !== 'WIN' && t.result !== 'LOSS') continue;
+      if (!this._isClosed(t)) continue;
       if (this.activeSetups && !this.activeSetups.has(t.setup)) continue;
       const d = this._parseDate(t.exit_time);
       if (!d || d.getFullYear() !== this.year || d.getMonth() !== this.month) continue;
       const day = d.getDate();
       if (!map[day]) map[day] = { pnl: 0, wins: 0, losses: 0 };
       map[day].pnl    += t.pnl_usd || 0;
-      map[day].wins   += t.result === 'WIN' ? 1 : 0;
-      map[day].losses += t.result === 'LOSS' ? 1 : 0;
+      if (this._isWin(t)) map[day].wins++; else map[day].losses++;
     }
     return map;
   }
