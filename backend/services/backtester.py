@@ -992,18 +992,12 @@ class Backtester:
         if sl_dist < self.pip:
             return None
 
-        # Risk amount logic:
-        # - max_risk_usd set → use it as the exact dollar amount to risk per trade
-        # - only risk_percent set → use percentage of current balance
-        # - both set → max_risk_usd is primary; risk_percent caps it only if
-        #   the account has shrunk so that pct < max (protects from over-leveraging)
-        if self.max_risk_usd is not None and self.max_risk_usd > 0:
+        # Risk amount:
+        # - max_risk_usd set → use it as the exact dollar amount to risk
+        # - only risk_percent set → percentage of current balance
+        # - both set → max_risk_usd wins (it IS the target, not just a cap)
+        if self.max_risk_usd and self.max_risk_usd > 0:
             risk_amount = self.max_risk_usd
-            if self.risk_percent > 0:
-                pct_risk = balance * self.risk_percent / 100
-                # Safety: if % is lower, it means balance dropped — respect the % cap
-                if pct_risk < risk_amount * 0.5:   # balance dropped >50% vs initial
-                    risk_amount = pct_risk
         else:
             risk_amount = balance * self.risk_percent / 100
         pips_risk   = sl_dist / self.pip
