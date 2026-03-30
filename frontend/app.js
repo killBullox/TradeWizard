@@ -1358,37 +1358,52 @@ function renderBtBySetup(trades) {
   const tbody = document.getElementById('bt-setup-tbody');
   if (!tbody) return;
   const closed = trades.filter(t => t.result === 'WIN' || t.result === 'LOSS');
-  if (!closed.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No closed trades</td></tr>'; return; }
+  if (!closed.length) { tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No closed trades</td></tr>'; return; }
 
-  // Group by setup
   const groups = {};
   for (const t of closed) {
     const s = t.setup || '—';
-    if (!groups[s]) groups[s] = { trades: 0, wins: 0, losses: 0, pips: 0, usd: 0, rrs: [] };
+    if (!groups[s]) groups[s] = { trades: 0, wins: 0, losses: 0, pips: 0, usd: 0, rrs: [], grossWin: 0, grossLoss: 0 };
     groups[s].trades++;
-    if (t.result === 'WIN') groups[s].wins++;
-    else groups[s].losses++;
+    if (t.result === 'WIN') { groups[s].wins++; groups[s].grossWin += t.pnl_pips ?? 0; }
+    else                    { groups[s].losses++; groups[s].grossLoss += Math.abs(t.pnl_pips ?? 0); }
     groups[s].pips += t.pnl_pips ?? 0;
     groups[s].usd  += t.pnl_usd  ?? 0;
     if (t.rr_actual != null) groups[s].rrs.push(t.rr_actual);
   }
 
   tbody.innerHTML = Object.entries(groups)
-    .sort((a, b) => b[1].trades - a[1].trades)
+    .sort((a, b) => b[1].usd - a[1].usd)
     .map(([setup, g]) => {
-      const wr     = g.trades ? (g.wins / g.trades * 100).toFixed(1) : '0.0';
-      const avgRR  = g.rrs.length ? (g.rrs.reduce((a,b) => a+b, 0) / g.rrs.length).toFixed(2) : '—';
-      const pClass = g.pips >= 0 ? 'text-win' : 'text-loss';
-      const uClass = g.usd  >= 0 ? 'text-win' : 'text-loss';
+      const wr      = g.trades ? g.wins / g.trades * 100 : 0;
+      const wrStr   = wr.toFixed(1);
+      const avgRR   = g.rrs.length ? (g.rrs.reduce((a,b) => a+b, 0) / g.rrs.length).toFixed(2) : '—';
+      const pf      = g.grossLoss > 0 ? (g.grossWin / g.grossLoss).toFixed(2) : g.grossWin > 0 ? '∞' : '—';
+      const exp     = g.trades ? (g.pips / g.trades).toFixed(1) : '—';
+      const pClass  = g.pips >= 0 ? 'text-win' : 'text-loss';
+      const uClass  = g.usd  >= 0 ? 'text-win' : 'text-loss';
+      const wrClass = wr >= 50 ? 'text-win' : 'text-loss';
+      const pfNum   = parseFloat(pf);
+      const pfClass = pfNum >= 1.5 ? 'text-win' : pfNum >= 1.0 ? '' : 'text-loss';
+      const expClass = parseFloat(exp) >= 0 ? 'text-win' : 'text-loss';
+      // mini bar for win rate
+      const bar = `<div style="display:flex;align-items:center;gap:6px">
+        <span class="${wrClass}">${wrStr}%</span>
+        <div style="flex:1;min-width:60px;height:6px;background:#1e2130;border-radius:3px;overflow:hidden">
+          <div style="width:${Math.round(wr)}%;height:100%;background:${wr>=50?'#22c55e':'#ef4444'};border-radius:3px"></div>
+        </div>
+      </div>`;
       return `<tr>
         <td><span class="badge">${setup}</span></td>
         <td>${g.trades}</td>
         <td class="text-win">${g.wins}</td>
         <td class="text-loss">${g.losses}</td>
-        <td class="${parseFloat(wr) >= 50 ? 'text-win' : 'text-loss'}">${wr}%</td>
+        <td style="min-width:110px">${bar}</td>
         <td class="${pClass}">${g.pips.toFixed(1)}</td>
         <td class="${uClass}">${g.usd >= 0 ? '+' : ''}$${g.usd.toFixed(2)}</td>
         <td>${avgRR}</td>
+        <td class="${pfClass}">${pf}</td>
+        <td class="${expClass}">${exp}</td>
       </tr>`;
     }).join('');
 }
