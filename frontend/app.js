@@ -1709,19 +1709,32 @@ async function cacheBuild() {
   _updateCacheProgress(0, bars);
   if (!_cachePollTimer) _cachePollTimer = setInterval(refreshCacheStatus, 1500);
 
-  const key = `${sym}_${tf}`;
+  const key   = `${sym}_${tf}`;
+  const keyM1 = `${sym}_M1`;
+
+  // Generic poller: tracks any key and calls onDone when complete
+  const pollKey = (trackKey, label, onDone) => {
+    const run = async () => {
+      const p = await fetchJSON(`/api/ohlcv/progress/${trackKey}`).catch(() => null);
+      if (!p || p.status === 'idle') { onDone(); return; }
+      _showCacheProgress(label);
+      _updateCacheProgress(p.done || 0, p.total || 1);
+      if      (p.status === 'done')  { refreshCacheStatus(); onDone(); }
+      else if (p.status === 'error') { _hideCacheProgress(); alert(`Error (${trackKey}): ${p.error}`); }
+      else    setTimeout(run, 1000);
+    };
+    setTimeout(run, 800);
+  };
+
   try {
     await fetchJSON('/api/ohlcv/build', { method: 'POST', body: JSON.stringify({ symbol: sym, timeframe: tf, bars }) });
-    // Poll progress
-    const poll = async () => {
-      const p = await fetchJSON(`/api/ohlcv/progress/${key}`).catch(() => null);
-      if (!p) return;
-      _updateCacheProgress(p.done || 0, p.total || bars);
-      if (p.status === 'done') { refreshCacheStatus(); _hideCacheProgress(); }
-      else if (p.status === 'error') { _hideCacheProgress(); alert('Build error: ' + p.error); }
-      else setTimeout(poll, 1000);
-    };
-    setTimeout(poll, 1000);
+    // Phase 1: H1  →  Phase 2: M1 (launched automatically by backend)
+    pollKey(key, `Building ${sym} ${tf} (${bars.toLocaleString()} bars)…`, () => {
+      pollKey(keyM1, `Building ${sym} M1 precision data… (questo richiede qualche minuto)`, () => {
+        _hideCacheProgress();
+        refreshCacheStatus();
+      });
+    });
   } catch(e) { _hideCacheProgress(); alert('Build failed: ' + e.message); }
 }
 
