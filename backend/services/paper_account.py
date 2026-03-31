@@ -169,15 +169,27 @@ class PaperAccount:
         if not self._positions:
             return
 
-        from services.forex_data import fetch_ohlcv  # lazy import
-
         symbols = {p["symbol"] for p in self._positions.values()}
         updates = []
 
         for sym in symbols:
             try:
-                data = await fetch_ohlcv(sym, "M1", 5)
-                price = data.get("indicators", {}).get("current_price", 0)
+                # 1. Try local OHLCV cache (H1) — populated by MT5/yfinance, most reliable
+                price = 0
+                try:
+                    from services.ohlcv_cache import get_cached_candles
+                    cached = await get_cached_candles(sym, "H1", n_bars=1)
+                    if cached:
+                        price = float(cached[-1]["close"])
+                except Exception:
+                    pass
+
+                # 2. Fall back to live yfinance H1 fetch
+                if not price:
+                    from services.forex_data import fetch_ohlcv
+                    data = await fetch_ohlcv(sym, "H1", 5)
+                    price = data.get("indicators", {}).get("current_price", 0)
+
                 if not price:
                     continue
                 for tid, pos in list(self._positions.items()):

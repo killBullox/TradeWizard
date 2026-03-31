@@ -223,15 +223,15 @@ class Orchestrator:
                 await self.broadcast({"type": "trade_rejected", "symbol": symbol, "reason": reason, "agent": "RM"})
                 return
 
-            # Enforce lot size from max_risk_usd or risk_percent (overrides LLM calculation)
-            self._enforce_lot_size(rm_result, symbol, config)
-
             # 4. Trader — generate precise parameters
             trade_params = await self.tr.generate_trade(symbol, strategy, rm_result, market_data)
             await self._log_agent("TR", "TRADE_GENERATED", f"Generated trade for {symbol}", trade_params)
 
             # Guard: enforce minimum RR on TP1 using RM-approved values if LLM returned bad params
             trade_params = self._enforce_rr(trade_params, rm_result, config)
+
+            # Enforce lot size using ACTUAL entry/SL from trade_params (not RM's sl_pips which can be 0)
+            self._enforce_lot_size(rm_result, trade_params, symbol, config)
 
             # 5. Trade Analyst — validate
             validation = await self.at.validate_trade(trade_params, strategy, market_data, config)
@@ -704,18 +704,27 @@ class Orchestrator:
             val = await get_config("paper_mode", s)
         return (val or "false").lower() == "true"
 
-    def _enforce_lot_size(self, rm_result: dict, symbol: str, config: dict):
+    def _enforce_lot_size(self, rm_result: dict, trade_params: dict, symbol: str, config: dict):
         """Compute lot size from max_risk_usd (fixed USD) or risk_percent (% of balance).
-        Overwrites the LLM-generated lot_size in rm_result['position_size']."""
+        Uses actual entry/SL from trade_params to compute sl_pips reliably (RM's sl_pips can be 0).
+        Overwrites lot_size in both rm_result['position_size'] and trade_params."""
         try:
             max_risk_usd = float(config.get("max_risk_usd") or 0)
             balance      = float(config.get("account_balance") or 10000)
             risk_pct     = float(config.get("risk_percent") or 1.0)
             risk_usd     = max_risk_usd if max_risk_usd > 0 else balance * risk_pct / 100
 
-            pos   = rm_result.setdefault("position_size", {})
-            sl_pips = float(pos.get("sl_pips") or 0)
+            # Compute sl_pips from actual entry/SL prices — much more reliable than RM's LLM output
+            entry = float(trade_params.get("entry_price") or 0)
+            sl    = float(trade_params.get("stop_loss") or 0)
+            if not entry or not sl:
+                logger.warning("_enforce_lot_size: missing entry/SL for %s, skipping", symbol)
+                return
+
+            pip = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD", "XAGUSD", "US30", "NAS100", "US500") else 0.0001)
+            sl_pips = abs(entry - sl) / pip
             if sl_pips <= 0:
+                logger.warning("_enforce_lot_size: sl_pips=0 for %s (entry=%.5f sl=%.5f)", symbol, entry, sl)
                 return
 
             _pip_usd = {"XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0,
@@ -726,10 +735,14 @@ class Orchestrator:
             pip_usd = _pip_usd.get(symbol, 10.0)
 
             lot = max(0.01, round(risk_usd / (sl_pips * pip_usd), 2))
-            pos["lot_size"]   = lot
-            pos["risk_usd"]   = round(risk_usd, 2)
-            pos["risk_mode"]  = "fixed_usd" if max_risk_usd > 0 else "percent"
-            logger.info("Lot enforced for %s: %.2f lots (risk $%.2f / %.1f pip SL)", symbol, lot, risk_usd, sl_pips)
+            pos = rm_result.setdefault("position_size", {})
+            pos["lot_size"]  = lot
+            pos["risk_usd"]  = round(risk_usd, 2)
+            pos["sl_pips"]   = round(sl_pips, 1)
+            pos["risk_mode"] = "fixed_usd" if max_risk_usd > 0 else "percent"
+            trade_params["lot_size"] = lot  # ensure _save_trade picks up the enforced value
+            logger.info("Lot enforced for %s: %.2f lots (risk $%.2f / %.1f pip SL @ entry %.5f sl %.5f)",
+                        symbol, lot, risk_usd, sl_pips, entry, sl)
         except Exception as exc:
             logger.warning("_enforce_lot_size failed: %s", exc)
 
