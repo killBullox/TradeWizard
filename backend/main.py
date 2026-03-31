@@ -1046,29 +1046,48 @@ async def get_analytics():
 @app.get("/api/performance")
 async def get_performance():
     async with async_session_factory() as s:
-        perf_raw = await get_config("system_performance", s)
-        perf = json.loads(perf_raw or "{}")
-
-        # Compute per-setup stats
         result = await s.execute(select(Trade).where(Trade.status == "CLOSED"))
         closed = result.scalars().all()
 
-        setups: dict = {}
-        for t in closed:
-            setup = t.ict_setup or "Unknown"
-            if setup not in setups:
-                setups[setup] = {"total": 0, "wins": 0, "losses": 0, "total_pips": 0}
-            setups[setup]["total"] += 1
-            if t.result == "WIN":
-                setups[setup]["wins"] += 1
-            elif t.result == "LOSS":
-                setups[setup]["losses"] += 1
-            setups[setup]["total_pips"] += t.pnl_pips or 0
+    total  = len(closed)
+    wins   = sum(1 for t in closed if t.result == "WIN")
+    losses = sum(1 for t in closed if t.result == "LOSS")
+    be     = sum(1 for t in closed if t.result == "BREAKEVEN")
 
-        for k, v in setups.items():
-            v["win_rate"] = round(v["wins"] / v["total"] * 100, 1) if v["total"] > 0 else 0
+    gross_win  = sum((t.pnl_usd or 0) for t in closed if (t.pnl_usd or 0) > 0)
+    gross_loss = abs(sum((t.pnl_usd or 0) for t in closed if (t.pnl_usd or 0) < 0))
+    pf = round(gross_win / gross_loss, 2) if gross_loss else (999.0 if gross_win else 0.0)
 
-        return {**perf, "by_setup": setups, "total_closed": len(closed)}
+    pnl_list = [t.pnl_usd or 0 for t in closed]
+    avg_rr   = round(gross_win / wins / (gross_loss / losses), 2) if wins and losses else 0.0
+
+    setups: dict = {}
+    for t in closed:
+        setup = t.ict_setup or "Unknown"
+        if setup not in setups:
+            setups[setup] = {"total": 0, "wins": 0, "losses": 0, "total_pips": 0.0, "total_pnl": 0.0}
+        setups[setup]["total"]      += 1
+        setups[setup]["total_pips"] += t.pnl_pips or 0
+        setups[setup]["total_pnl"]  += t.pnl_usd  or 0
+        if t.result == "WIN":   setups[setup]["wins"]   += 1
+        elif t.result == "LOSS": setups[setup]["losses"] += 1
+    for v in setups.values():
+        v["win_rate"]   = round(v["wins"] / v["total"] * 100, 1) if v["total"] > 0 else 0
+        v["total_pips"] = round(v["total_pips"], 1)
+        v["total_pnl"]  = round(v["total_pnl"], 2)
+
+    return {
+        "total_trades":  total,
+        "wins":          wins,
+        "losses":        losses,
+        "breakeven":     be,
+        "win_rate":      round(wins / total * 100, 1) if total else 0,
+        "avg_rr":        avg_rr,
+        "profit_factor": pf,
+        "total_pnl":     round(sum(pnl_list), 2),
+        "by_setup":      setups,
+        "total_closed":  total,
+    }
 
 
 # ------------------------------------------------------------------ #
