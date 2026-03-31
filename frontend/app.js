@@ -668,7 +668,8 @@ async function saveConfig() {
     await fetchJSON('/api/config/trade_on_weekend', { method: 'PUT', body: JSON.stringify({ value: weekendEl.checked ? 'true' : 'false' }) });
   }
   // Kill zones
-  const kzRows = document.querySelectorAll('#cfg-kill-zones .kz-row');
+  const kzContainer = document.getElementById('cfg-kill-zones');
+  const kzRows = kzContainer ? kzContainer.querySelectorAll('.kz-row') : [];
   if (kzRows.length) {
     const zones = [...kzRows].map(row => ({
       start: row.querySelector('.kz-start')?.value || '07:00',
@@ -691,7 +692,8 @@ async function saveConfig() {
     await fetchJSON('/api/config/oanda_practice', { method: 'PUT', body: JSON.stringify({ value: oandaPracEl.checked ? 'true' : 'false' }) });
   }
   // Enabled pairs
-  const checked = [...document.querySelectorAll('.cfg-pair-chk:checked')].map(el => el.value);
+  const pairsContainer = document.getElementById('cfg-pairs-grid');
+  const checked = [...(pairsContainer || document).querySelectorAll('.cfg-pair-chk:checked')].map(el => el.value);
   if (checked.length) {
     await fetchJSON('/api/config/enabled_pairs', { method: 'PUT', body: JSON.stringify({ value: JSON.stringify(checked) }) });
   }
