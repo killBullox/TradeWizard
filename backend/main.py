@@ -313,14 +313,12 @@ async def trades_live_pnl():
         return []
 
     from services.forex_data import fetch_ohlcv
-    async with async_session_factory() as s:
-        mt5_url  = await get_config("mt5_bridge_url", s) or ""
 
     # Fetch prices concurrently, one per unique symbol
     symbols = list({t.symbol for t in active})
     async def _price(sym):
         try:
-            data = await fetch_ohlcv(sym, "H1", 2, mt5_bridge_url=mt5_url)
+            data = await fetch_ohlcv(sym, "H1", 2)
             return sym, float(data.get("indicators", {}).get("current_price") or 0)
         except Exception:
             return sym, 0.0
