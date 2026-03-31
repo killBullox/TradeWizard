@@ -317,8 +317,10 @@ body {
 .comm-agent.CC    { background: rgba(8,145,178,0.3); color: #22d3ee; }
 .comm-agent.JR    { background: rgba(146,64,14,0.3); color: #fbbf24; }
 .comm-agent.SYS   { background: rgba(92,100,128,0.3); color: var(--text-muted); }
-.comm-msg { color: var(--text-secondary); }
+.comm-msg { color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
+.comm-msg.truncated { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; white-space: normal; }
 .comm-time { color: var(--text-muted); font-size: 0.63rem; margin-left: 4px; }
+.comm-expand { font-size: 0.62rem; color: var(--accent); margin-left: 4px; user-select: none; }
 
 /* ── Config Form ── */
 .config-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }

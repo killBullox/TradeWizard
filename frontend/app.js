@@ -209,11 +209,23 @@ function addComm(agent, message, isThinking = false) {
   const item = document.createElement('div');
   item.className = 'comm-item';
   item.style.borderLeftColor = AGENTS[agent]?.color || '#666';
+  const fullText = (isThinking ? '💭 ' : '') + (message || '');
+  const needsTruncation = fullText.length > 120;
   item.innerHTML = `
     <span class="comm-agent ${agent}">${AGENTS[agent]?.emoji || ''} ${agent}</span>
-    <span class="comm-msg">${isThinking ? '💭 ' : ''}${escHtml(message?.substring(0,200))}${message?.length>200?'…':''}</span>
+    <span class="comm-msg${needsTruncation ? ' truncated' : ''}">${escHtml(fullText)}</span>
+    ${needsTruncation ? '<span class="comm-expand">▼ espandi</span>' : ''}
     <span class="comm-time">${now}</span>
   `;
+  if (needsTruncation) {
+    item.addEventListener('click', () => {
+      const msg = item.querySelector('.comm-msg');
+      const btn = item.querySelector('.comm-expand');
+      const expanded = !msg.classList.contains('truncated');
+      msg.classList.toggle('truncated', expanded);
+      if (btn) btn.textContent = expanded ? '▼ espandi' : '▲ riduci';
+    });
+  }
   feed.appendChild(item);
   feed.scrollTop = feed.scrollHeight;
   while (feed.children.length > 200) feed.removeChild(feed.firstChild);
