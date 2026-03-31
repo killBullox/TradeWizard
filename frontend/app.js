@@ -245,10 +245,14 @@ async function refreshAll() {
 
 async function refreshTrades() {
   try {
-    const trades = await fetchJSON('/api/trades?limit=100');
+    const [trades, livePnl] = await Promise.all([
+      fetchJSON('/api/trades?limit=100'),
+      fetchJSON('/api/trades/live_pnl').catch(() => []),
+    ]);
     state.trades = trades;
     renderTradesTable(trades);
-    renderOpenTrades(trades.filter(t => t.status === 'ACTIVE'));
+    const livePnlMap = Object.fromEntries((livePnl||[]).map(p => [p.trade_id, p]));
+    renderOpenTrades(trades.filter(t => t.status === 'ACTIVE'), livePnlMap);
     // PNL Calendar — trades tab (real trades use status=CLOSED, not result=WIN/LOSS)
     const calTrades = trades.filter(t => t.status === 'CLOSED' || t.result === 'WIN' || t.result === 'LOSS');
     if (calTrades.length) _tradesCal.setTrades(calTrades);
@@ -328,13 +332,20 @@ function renderTradesTable(trades) {
   `).join('');
 }
 
-function renderOpenTrades(trades) {
+function renderOpenTrades(trades, livePnlMap = {}) {
   const el = document.getElementById('open-trades-list');
   const cntEl = document.getElementById('open-trades-count');
   if (!el) return;
   if (cntEl) cntEl.textContent = trades.length;
   if (!trades.length) { el.innerHTML = '<div class="empty-state">No open trades</div>'; return; }
-  el.innerHTML = trades.map(t => `
+  el.innerHTML = trades.map(t => {
+    const live = livePnlMap[t.id] || {};
+    const cp   = live.current_price;
+    const pnl  = live.pnl_usd;
+    const pips = live.pnl_pips;
+    const pnlClass = pnl == null ? '' : pnl >= 0 ? 'text-win' : 'text-loss';
+    const pnlStr = pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pips >= 0 ? '+' : ''}${pips?.toFixed(1)} pip)` : '—';
+    return `
     <div class="open-trade-card">
       <div class="trade-header-row">
         <span class="trade-symbol">${t.symbol}</span>
@@ -347,11 +358,15 @@ function renderOpenTrades(trades) {
       </div>
       <div class="trade-levels">
         <div><div class="trade-level-label">Entry</div><div class="trade-level-val">${t.entry_price}</div></div>
+        <div><div class="trade-level-label">Now</div><div class="trade-level-val">${cp ?? '—'}</div></div>
         <div><div class="trade-level-label">SL</div><div class="trade-level-val text-loss">${t.stop_loss}</div></div>
-        <div><div class="trade-level-label">TP1</div><div class="trade-level-val text-win">${t.take_profit_1}</div></div>
+        <div><div class="trade-level-label">TP1</div><div class="trade-level-val text-win">${t.take_profit_1 ?? '—'}</div></div>
       </div>
-    </div>
-  `).join('');
+      <div style="font-size:0.82rem;font-weight:700;margin-top:6px;text-align:right" class="${pnlClass}">
+        P&L: ${pnlStr}
+      </div>
+    </div>`;
+  }).join('');
 }
 
 function renderJournal(entries) {

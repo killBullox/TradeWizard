@@ -318,6 +318,49 @@ async def close_trade(trade_id: int):
     return await orchestrator.close_trade_manually(trade_id)
 
 
+@app.get("/api/trades/live_pnl")
+async def trades_live_pnl():
+    """Return current price + unrealized PNL for all active trades."""
+    async with async_session_factory() as s:
+        result = await s.execute(select(Trade).where(Trade.status == "ACTIVE"))
+        active = result.scalars().all()
+    if not active:
+        return []
+
+    from services.forex_data import fetch_ohlcv
+    async with async_session_factory() as s:
+        mt5_url  = await get_config("mt5_bridge_url", s) or ""
+
+    # Fetch prices concurrently, one per unique symbol
+    symbols = list({t.symbol for t in active})
+    async def _price(sym):
+        try:
+            data = await fetch_ohlcv(sym, "H1", 2, mt5_bridge_url=mt5_url)
+            return sym, float(data.get("indicators", {}).get("current_price") or 0)
+        except Exception:
+            return sym, 0.0
+
+    prices = dict(await asyncio.gather(*[_price(s) for s in symbols]))
+
+    out = []
+    for t in active:
+        cp = prices.get(t.symbol, 0.0)
+        pip = 0.01 if "JPY" in t.symbol else (1.0 if t.symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+        _pip_usd = {"XAUUSD":100.0,"US30":5.0,"NAS100":20.0,"US500":50.0,
+                    "USDJPY":6.5,"EURJPY":6.5,"GBPJPY":6.5,"AUDJPY":6.5,
+                    "USDCHF":11.0,"USDCAD":7.25}
+        pip_usd = _pip_usd.get(t.symbol, 10.0)
+        if cp and t.entry_price:
+            pnl_pips = ((cp - t.entry_price) if t.direction == "BUY" else (t.entry_price - cp)) / pip
+            pnl_usd  = round(pnl_pips * pip_usd * (t.lot_size or 0.01), 2)
+        else:
+            pnl_pips = pnl_usd = None
+        out.append({"trade_id": t.id, "symbol": t.symbol, "current_price": cp,
+                    "pnl_pips": round(pnl_pips, 1) if pnl_pips is not None else None,
+                    "pnl_usd": pnl_usd})
+    return out
+
+
 @app.get("/api/journal")
 async def get_journal(trade_id: int | None = None, limit: int = 50):
     async with async_session_factory() as s:
