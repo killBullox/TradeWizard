@@ -847,6 +847,10 @@ async def _do_build_cache(symbol, timeframe, n_bars, oanda_key, oanda_practice, 
 
         # Also cache M1 data so backtests never need to call the API for timing data
         if timeframe != "M1" and candles:
+            # Pre-register M1 task NOW so the frontend finds "running" immediately
+            # (asyncio.create_task is non-deterministic and might not start before the next frontend poll)
+            key_m1 = f"{symbol}_M1"
+            _build_tasks[key_m1] = {"done": 0, "total": 0, "status": "running", "error": None, "inserted": 0}
             asyncio.create_task(_build_m1_cache(symbol, candles, oanda_key, oanda_practice, mt5_bridge_url))
     except Exception as exc:
         logger.error("Cache build failed %s %s: %s", symbol, timeframe, exc, exc_info=True)

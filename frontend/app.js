@@ -1692,11 +1692,17 @@ function _hideCacheProgress() {
   if (wrap) wrap.style.display = 'none';
 }
 function _updateCacheProgress(done, total) {
-  const pct = total > 0 ? Math.round(done / total * 100) : 0;
-  const bar = document.getElementById('cache-progress-bar');
-  if (bar) bar.style.width = pct + '%';
+  const bar   = document.getElementById('cache-progress-bar');
   const pctEl = document.getElementById('cache-progress-pct');
-  if (pctEl) pctEl.textContent = pct + '%  (' + done.toLocaleString() + ' / ' + total.toLocaleString() + ')';
+  if (total > 0) {
+    const pct = Math.round(done / total * 100);
+    if (bar)   { bar.style.width = pct + '%'; bar.style.opacity = '1'; }
+    if (pctEl) pctEl.textContent = `${pct}%  (${done.toLocaleString()} / ${total.toLocaleString()})`;
+  } else {
+    // Total unknown (still fetching from MT5) — pulse animation
+    if (bar)   { bar.style.width = '100%'; bar.style.opacity = null; bar.classList.add('cache-bar-pulse'); }
+    if (pctEl) pctEl.textContent = done > 0 ? `${done.toLocaleString()} bars…` : 'Fetching data…';
+  }
 }
 
 async function cacheBuild() {
@@ -1712,18 +1718,26 @@ async function cacheBuild() {
   const key   = `${sym}_${tf}`;
   const keyM1 = `${sym}_M1`;
 
-  // Generic poller: tracks any key and calls onDone when complete
-  const pollKey = (trackKey, label, onDone) => {
-    const run = async () => {
+  // Generic poller: tracks any key and calls onDone when complete.
+  // idleRetries: how many times to retry before giving up on "idle" status
+  // (needed because asyncio.create_task may not start before the first poll)
+  const pollKey = (trackKey, label, onDone, idleRetries = 5) => {
+    const run = async (retries) => {
       const p = await fetchJSON(`/api/ohlcv/progress/${trackKey}`).catch(() => null);
-      if (!p || p.status === 'idle') { onDone(); return; }
+      if (!p || p.status === 'idle') {
+        if (retries > 0) { setTimeout(() => run(retries - 1), 1200); }
+        else             { onDone(); }
+        return;
+      }
       _showCacheProgress(label);
-      _updateCacheProgress(p.done || 0, p.total || 1);
+      _updateCacheProgress(p.done || 0, p.total || 0);
+      const bar = document.getElementById('cache-progress-bar');
+      if (bar) bar.classList.remove('cache-bar-pulse');
       if      (p.status === 'done')  { refreshCacheStatus(); onDone(); }
       else if (p.status === 'error') { _hideCacheProgress(); alert(`Error (${trackKey}): ${p.error}`); }
-      else    setTimeout(run, 1000);
+      else    setTimeout(() => run(0), 1000);
     };
-    setTimeout(run, 800);
+    setTimeout(() => run(idleRetries), 800);
   };
 
   try {
