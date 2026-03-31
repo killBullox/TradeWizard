@@ -734,34 +734,47 @@ class Orchestrator:
             logger.warning("_enforce_lot_size failed: %s", exc)
 
     def _enforce_rr(self, trade_params: dict, rm_result: dict, config: dict) -> dict:
-        """If the LLM returned a TP that violates the required RR, recompute it from RM-approved pip values."""
+        """Enforce correct TP ordering (TP1 < TP2 < TP3 distance from entry for BUY, inverted for SELL)
+        and minimum RR on TP1. Fixes LLM-generated inverted or too-close TP levels."""
         try:
-            direction  = trade_params.get("direction", "")
-            entry      = float(trade_params.get("entry_price") or 0)
-            sl         = float(trade_params.get("stop_loss") or 0)
-            tp1        = float(trade_params.get("take_profit_1") or 0)
-            if not entry or not sl or not tp1:
+            direction = trade_params.get("direction", "")
+            entry     = float(trade_params.get("entry_price") or 0)
+            sl        = float(trade_params.get("stop_loss") or 0)
+            if not entry or not sl:
                 return trade_params
 
-            symbol     = trade_params.get("symbol", "")
-            pip        = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
-            sl_pips    = abs(entry - sl) / pip
-            tp1_pips   = abs(entry - tp1) / pip
+            symbol      = trade_params.get("symbol", "")
+            pip         = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+            sl_pips     = abs(entry - sl) / pip
             required_rr = float(config.get("rr_ratio") or 2.0)
+            sign        = 1 if direction == "BUY" else -1
 
-            if sl_pips > 0 and tp1_pips / sl_pips < required_rr - 0.05:
-                # Use RM-approved tp1_pips if available, else compute from sl_pips × rr
-                rm_tp1_pips = float((rm_result.get("position_size") or {}).get("tp1_pips") or 0)
-                target_pips = rm_tp1_pips if rm_tp1_pips >= sl_pips * required_rr else sl_pips * required_rr
-                if direction == "BUY":
-                    trade_params = {**trade_params, "take_profit_1": round(entry + target_pips * pip, 5)}
-                elif direction == "SELL":
-                    trade_params = {**trade_params, "take_profit_1": round(entry - target_pips * pip, 5)}
-                logger.info(
-                    "RR enforced for %s %s: TP1 adjusted from %.5f to %.5f (RR %.2f→%.2f)",
-                    symbol, direction, tp1, trade_params["take_profit_1"],
-                    tp1_pips / sl_pips, target_pips / sl_pips,
-                )
+            # TP1: enforce minimum RR
+            tp1 = float(trade_params.get("take_profit_1") or 0)
+            if tp1:
+                tp1_pips = abs(entry - tp1) / pip
+                min_tp1_pips = sl_pips * required_rr
+                if sl_pips > 0 and tp1_pips < min_tp1_pips - 0.05 * sl_pips:
+                    rm_tp1 = float((rm_result.get("position_size") or {}).get("tp1_pips") or 0)
+                    target  = rm_tp1 if rm_tp1 >= min_tp1_pips else min_tp1_pips
+                    tp1     = round(entry + sign * target * pip, 5)
+                    trade_params = {**trade_params, "take_profit_1": tp1}
+                    logger.info("RR enforced TP1 for %s %s → %.5f", symbol, direction, tp1)
+
+            # TP2/TP3: must be further from entry than TP1 (in the correct direction)
+            tp1_dist = abs(tp1 - entry) / pip if tp1 else sl_pips * required_rr
+            for key, multiplier in [("take_profit_2", 1.5), ("take_profit_3", 2.0)]:
+                tp = trade_params.get(key)
+                if not tp:
+                    continue
+                tp = float(tp)
+                tp_dist = abs(tp - entry) / pip
+                # Wrong direction OR closer than TP1 → recompute
+                correct_side = (tp > entry) if direction == "BUY" else (tp < entry)
+                if not correct_side or tp_dist < tp1_dist - 0.05 * sl_pips:
+                    tp = round(entry + sign * sl_pips * required_rr * multiplier * pip, 5)
+                    trade_params = {**trade_params, key: tp}
+                    logger.info("TP ordering enforced %s for %s %s → %.5f", key, symbol, direction, tp)
         except Exception:
             pass
         return trade_params
