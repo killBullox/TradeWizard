@@ -302,22 +302,7 @@ async def list_trades(status: str | None = None, limit: int = 50):
         return [_trade_to_dict(t) for t in trades]
 
 
-@app.get("/api/trades/{trade_id}")
-async def get_trade(trade_id: int):
-    async with async_session_factory() as s:
-        trade = await s.get(Trade, trade_id)
-        if not trade:
-            raise HTTPException(404, "Trade not found")
-        return _trade_to_dict(trade)
-
-
-@app.post("/api/trades/{trade_id}/close")
-async def close_trade(trade_id: int):
-    if not orchestrator:
-        raise HTTPException(503, "System not ready")
-    return await orchestrator.close_trade_manually(trade_id)
-
-
+# NOTE: must be defined BEFORE /api/trades/{trade_id} to avoid 422 on "live_pnl"
 @app.get("/api/trades/live_pnl")
 async def trades_live_pnl():
     """Return current price + unrealized PNL for all active trades."""
@@ -359,6 +344,22 @@ async def trades_live_pnl():
                     "pnl_pips": round(pnl_pips, 1) if pnl_pips is not None else None,
                     "pnl_usd": pnl_usd})
     return out
+
+
+@app.get("/api/trades/{trade_id}")
+async def get_trade(trade_id: int):
+    async with async_session_factory() as s:
+        trade = await s.get(Trade, trade_id)
+        if not trade:
+            raise HTTPException(404, "Trade not found")
+        return _trade_to_dict(trade)
+
+
+@app.post("/api/trades/{trade_id}/close")
+async def close_trade(trade_id: int):
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    return await orchestrator.close_trade_manually(trade_id)
 
 
 @app.get("/api/journal")
