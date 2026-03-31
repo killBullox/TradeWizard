@@ -163,8 +163,15 @@ def _compute_indicators(df: pd.DataFrame, symbol: str) -> dict:
     # Order Blocks detection (simplified)
     order_blocks = _detect_order_blocks(df.tail(50))
 
-    # Pip value (approximate)
-    pip_value = 0.0001 if "JPY" not in symbol else 0.01
+    # Pip value — must match backtester.py pip definitions
+    if "JPY" in symbol:
+        pip_value = 0.01
+    elif symbol in ("XAUUSD", "XAGUSD"):
+        pip_value = 1.0    # Gold/Silver: 1 pip = $1 (price moves in whole dollars)
+    elif symbol in ("US30", "NAS100", "US500"):
+        pip_value = 1.0    # Indices: 1 pip = 1 point
+    else:
+        pip_value = 0.0001  # Standard forex
 
     return {
         "current_price": current_price,
