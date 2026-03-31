@@ -359,6 +359,8 @@ class Orchestrator:
                 elif action == "PARTIAL_CLOSE" and decision.get("close_percent"):
                     pct = decision["close_percent"]
                     await self.cc.close_partial(trade.mt5_ticket or "", trade.symbol, pct)
+                    # Null out the TP level just hit so the AT won't trigger it again next cycle
+                    await self._consume_next_tp(trade.id)
                     await self.broadcast({"type": "partial_close", "trade_id": trade.id, "percent": pct})
                     if self._tg:
                         asyncio.create_task(self._tg.notify_partial_close(trade.symbol, trade.id, pct))
@@ -621,6 +623,20 @@ class Orchestrator:
             if t:
                 t.mt5_ticket = ticket
                 await s.commit()
+
+    async def _consume_next_tp(self, trade_id: int):
+        """After a partial close, null the lowest non-null TP so the AT won't re-trigger it."""
+        async with async_session_factory() as s:
+            t = await s.get(Trade, trade_id)
+            if not t:
+                return
+            if t.take_profit_1 is not None:
+                t.take_profit_1 = None
+            elif t.take_profit_2 is not None:
+                t.take_profit_2 = None
+            elif t.take_profit_3 is not None:
+                t.take_profit_3 = None
+            await s.commit()
 
     async def _update_trade_sl(self, trade_id: int, new_sl: float):
         async with async_session_factory() as s:
