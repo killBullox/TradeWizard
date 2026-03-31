@@ -214,29 +214,45 @@ async def init_db():
         await conn.run_sync(_migrate_trades)
         await conn.run_sync(_migrate_backtest_runs)
 
-    # Insert default config values
+    # Insert default config values (only on first run — risk_percent absent means fresh DB)
     async with async_session_factory() as session:
         from sqlalchemy import select
         result = await session.execute(select(SystemConfig).where(SystemConfig.key == "risk_percent"))
         if not result.scalar_one_or_none():
-            defaults = [
-                SystemConfig(key="risk_percent", value="1.0", description="Default risk per trade (%)"),
-                SystemConfig(key="rr_ratio", value="2.0", description="Default risk/reward ratio"),
-                SystemConfig(key="max_open_trades", value="3", description="Maximum concurrent open trades"),
-                SystemConfig(key="account_balance", value="10000.0", description="Trading account balance"),
-                SystemConfig(key="enabled_pairs", value='["EURUSD","GBPUSD","USDJPY","XAUUSD","USDCHF"]', description="Forex pairs to analyze"),
-                SystemConfig(key="analysis_interval", value="3600", description="Analysis interval in seconds"),
-                SystemConfig(key="ict_strategies", value='["FVG","OrderBlock","Liquidity","BOS","CHOCH","Mitigation","PD_Array"]', description="ICT strategies to use"),
-                SystemConfig(key="system_performance", value='{"total_trades":0,"wins":0,"losses":0,"breakeven":0,"win_rate":0,"avg_rr":0}', description="System performance metrics"),
-                SystemConfig(key="paper_mode",    value="false", description="Enable paper trading mode (virtual execution)"),
-                SystemConfig(key="paper_balance", value="10000.0", description="Current paper trading account balance"),
-                SystemConfig(key="news_block_minutes_before", value="30", description="Minutes before high-impact news to block trading"),
-                SystemConfig(key="news_block_minutes_after",  value="30", description="Minutes after high-impact news to block trading"),
-                SystemConfig(key="news_block_medium",         value="false", description="Also block Medium-impact events"),
-                SystemConfig(key="model_mode", value="economy", description="AI model mode: economy (Haiku, cheap) or quality (Sonnet, deeper analysis)"),
-            ]
+            # Check if user saved custom defaults previously
+            ud_row = await session.execute(select(SystemConfig).where(SystemConfig.key == "_user_defaults"))
+            ud = ud_row.scalar_one_or_none()
+            if ud:
+                import json as _json
+                saved = _json.loads(ud.value)
+                defaults = [SystemConfig(key=k, value=v) for k, v in saved.items() if k != "_user_defaults"]
+            else:
+                defaults = [
+                    SystemConfig(key="risk_percent",    value="0.5",   description="Default risk per trade (%)"),
+                    SystemConfig(key="rr_ratio",        value="2.0",   description="Default risk/reward ratio"),
+                    SystemConfig(key="max_open_trades", value="1",     description="Maximum concurrent open trades"),
+                    SystemConfig(key="account_balance", value="5000.0",description="Trading account balance"),
+                    SystemConfig(key="max_risk_usd",    value="250",   description="Max loss per trade in USD (0 = use risk_percent)"),
+                    SystemConfig(key="enabled_pairs",   value='["EURUSD","GBPUSD","AUDUSD","NZDUSD","XAUUSD"]', description="Forex pairs to analyze"),
+                    SystemConfig(key="analysis_interval",value="900",  description="Analysis interval in seconds"),
+                    SystemConfig(key="kill_zones",      value='[{"start":"05:00","end":"19:00"}]', description="Kill zone windows (Rome time)"),
+                    SystemConfig(key="ict_strategies",  value='["FVG","OrderBlock","Liquidity","BOS","CHOCH","Mitigation","PD_Array"]', description="ICT strategies to use"),
+                    SystemConfig(key="system_performance", value='{"total_trades":0,"wins":0,"losses":0,"breakeven":0,"win_rate":0,"avg_rr":0}', description="System performance metrics"),
+                    SystemConfig(key="paper_mode",      value="true",  description="Enable paper trading mode (virtual execution)"),
+                    SystemConfig(key="paper_balance",   value="5000.0",description="Current paper trading account balance"),
+                    SystemConfig(key="news_block_minutes_before", value="30",    description="Minutes before high-impact news to block trading"),
+                    SystemConfig(key="news_block_minutes_after",  value="30",    description="Minutes after high-impact news to block trading"),
+                    SystemConfig(key="news_block_medium",         value="false", description="Also block Medium-impact events"),
+                    SystemConfig(key="model_mode",      value="economy", description="AI model mode: economy (Haiku) or quality (Sonnet)"),
+                ]
             session.add_all(defaults)
             await session.commit()
+        else:
+            # Ensure max_risk_usd exists even on older DBs
+            mr = await session.execute(select(SystemConfig).where(SystemConfig.key == "max_risk_usd"))
+            if not mr.scalar_one_or_none():
+                session.add(SystemConfig(key="max_risk_usd", value="250", description="Max loss per trade in USD (0 = use risk_percent)"))
+                await session.commit()
 
 
 async def get_config(key: str, session: AsyncSession) -> Optional[str]:

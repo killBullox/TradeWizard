@@ -223,6 +223,9 @@ class Orchestrator:
                 await self.broadcast({"type": "trade_rejected", "symbol": symbol, "reason": reason, "agent": "RM"})
                 return
 
+            # Enforce lot size from max_risk_usd or risk_percent (overrides LLM calculation)
+            self._enforce_lot_size(rm_result, symbol, config)
+
             # 4. Trader — generate precise parameters
             trade_params = await self.tr.generate_trade(symbol, strategy, rm_result, market_data)
             await self._log_agent("TR", "TRADE_GENERATED", f"Generated trade for {symbol}", trade_params)
@@ -700,6 +703,35 @@ class Orchestrator:
         async with async_session_factory() as s:
             val = await get_config("paper_mode", s)
         return (val or "false").lower() == "true"
+
+    def _enforce_lot_size(self, rm_result: dict, symbol: str, config: dict):
+        """Compute lot size from max_risk_usd (fixed USD) or risk_percent (% of balance).
+        Overwrites the LLM-generated lot_size in rm_result['position_size']."""
+        try:
+            max_risk_usd = float(config.get("max_risk_usd") or 0)
+            balance      = float(config.get("account_balance") or 10000)
+            risk_pct     = float(config.get("risk_percent") or 1.0)
+            risk_usd     = max_risk_usd if max_risk_usd > 0 else balance * risk_pct / 100
+
+            pos   = rm_result.setdefault("position_size", {})
+            sl_pips = float(pos.get("sl_pips") or 0)
+            if sl_pips <= 0:
+                return
+
+            _pip_usd = {"XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0,
+                        "USDJPY": 6.5, "EURJPY": 6.5, "GBPJPY": 6.5, "AUDJPY": 6.5,
+                        "CHFJPY": 6.5, "CADJPY": 6.5, "NZDJPY": 6.5,
+                        "USDCHF": 11.0, "EURCHF": 11.0,
+                        "USDCAD": 7.25, "EURCAD": 7.25, "GBPCAD": 7.25}
+            pip_usd = _pip_usd.get(symbol, 10.0)
+
+            lot = max(0.01, round(risk_usd / (sl_pips * pip_usd), 2))
+            pos["lot_size"]   = lot
+            pos["risk_usd"]   = round(risk_usd, 2)
+            pos["risk_mode"]  = "fixed_usd" if max_risk_usd > 0 else "percent"
+            logger.info("Lot enforced for %s: %.2f lots (risk $%.2f / %.1f pip SL)", symbol, lot, risk_usd, sl_pips)
+        except Exception as exc:
+            logger.warning("_enforce_lot_size failed: %s", exc)
 
     def _enforce_rr(self, trade_params: dict, rm_result: dict, config: dict) -> dict:
         """If the LLM returned a TP that violates the required RR, recompute it from RM-approved pip values."""

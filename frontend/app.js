@@ -457,6 +457,7 @@ function renderConfig(cfg) {
   if (!form) return;
 
   const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval'];
+  const maxRiskUsd   = cfg['max_risk_usd'] ?? '250';
   const paperOn      = cfg['paper_mode'] === 'true' || cfg['paper_mode'] === true;
   const weekendOn    = cfg['trade_on_weekend'] === 'true';
   const mt5BridgeUrl = cfg['mt5_bridge_url'] || '';
@@ -476,6 +477,15 @@ function renderConfig(cfg) {
       <input type="text" id="cfg-${key}" value="${escHtml(cfg[key]||'')}" />
     </div>
   `).join('') + `
+    <div class="config-field">
+      <label>Max Loss USD <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(0 = usa Risk %)</span></label>
+      <input type="text" id="cfg-max_risk_usd" value="${escHtml(maxRiskUsd)}" />
+      <span style="font-size:0.72rem;color:var(--text-muted);margin-top:4px;display:block">
+        ${parseFloat(maxRiskUsd) > 0
+          ? `Rischio fisso: <strong>$${maxRiskUsd}</strong> per trade`
+          : `Rischio variabile: <strong>${cfg['risk_percent']||'0.5'}%</strong> del saldo`}
+      </span>
+    </div>
     <div class="config-field" style="grid-column:1/-1">
       <label>Paper Mode</label>
       <label class="toggle-switch">
@@ -651,7 +661,7 @@ async function triggerMeeting(type) {
 window.triggerMeeting = triggerMeeting;
 
 async function saveConfig() {
-  const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval'];
+  const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval','max_risk_usd'];
   for (const key of editable) {
     const el = document.getElementById(`cfg-${key}`);
     if (!el) continue;
@@ -771,6 +781,11 @@ document.getElementById('btn-settings')?.addEventListener('click', async () => {
 });
 
 document.getElementById('btn-save-config')?.addEventListener('click', saveConfig);
+document.getElementById('btn-save-as-default')?.addEventListener('click', async () => {
+  await saveConfig();
+  await fetchJSON('/api/config/save_as_default', { method: 'POST' });
+  addActivity('⭐ Configurazione salvata come default', 'success');
+});
 document.getElementById('btn-clear-feed')?.addEventListener('click', () => {
   const feed = document.getElementById('activity-feed');
   if (feed) feed.innerHTML = '';

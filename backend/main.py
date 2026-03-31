@@ -419,6 +419,18 @@ async def update_config(key: str, data: dict):
     return {"key": key, "value": value}
 
 
+@app.post("/api/config/save_as_default")
+async def save_config_as_default():
+    """Snapshot all current config values as user defaults for fresh-DB restores."""
+    skip = {"system_performance", "_user_defaults"}
+    async with async_session_factory() as s:
+        result = await s.execute(select(SystemConfig))
+        rows = result.scalars().all()
+        snapshot = {r.key: r.value for r in rows if r.key not in skip}
+        await set_config("_user_defaults", json.dumps(snapshot), s)
+    return {"saved": len(snapshot)}
+
+
 @app.post("/api/analyze")
 async def trigger_analysis(data: dict | None = None):
     if not orchestrator:
