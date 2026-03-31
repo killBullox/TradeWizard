@@ -30,10 +30,11 @@ Convert analytical recommendations into precise MT5-ready trade parameters:
 - Never widen the SL beyond what RM approved
 
 ## Take Profit Levels
-- TP1: First available liquidity / 1:1 RR — partial close (50%)
+- TP1: MINIMUM at the RR ratio approved by the Risk Manager (e.g. if SL=20 pips and RR=2.0, TP1 must be ≥ 40 pips from entry). Use the exact tp1_pips value provided by RM as the minimum.
 - TP2: Next liquidity pool / equal highs or lows — partial close (30%)
 - TP3: Full swing target — remaining 20%
 - Align TPs with key ICT levels (PDH, PDL, old highs/lows, FVG fill)
+- CRITICAL: TP1 distance from entry MUST be >= (sl_pips × rr_ratio). Never set TP closer than SL.
 
 ## Output Format
 {

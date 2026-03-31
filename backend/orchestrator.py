@@ -227,6 +227,9 @@ class Orchestrator:
             trade_params = await self.tr.generate_trade(symbol, strategy, rm_result, market_data)
             await self._log_agent("TR", "TRADE_GENERATED", f"Generated trade for {symbol}", trade_params)
 
+            # Guard: enforce minimum RR on TP1 using RM-approved values if LLM returned bad params
+            trade_params = self._enforce_rr(trade_params, rm_result, config)
+
             # 5. Trade Analyst — validate
             validation = await self.at.validate_trade(trade_params, strategy, market_data, config)
             await self._log_agent("AT", "VALIDATION", f"Validated {symbol}", validation)
@@ -681,6 +684,39 @@ class Orchestrator:
         async with async_session_factory() as s:
             val = await get_config("paper_mode", s)
         return (val or "false").lower() == "true"
+
+    def _enforce_rr(self, trade_params: dict, rm_result: dict, config: dict) -> dict:
+        """If the LLM returned a TP that violates the required RR, recompute it from RM-approved pip values."""
+        try:
+            direction  = trade_params.get("direction", "")
+            entry      = float(trade_params.get("entry_price") or 0)
+            sl         = float(trade_params.get("stop_loss") or 0)
+            tp1        = float(trade_params.get("take_profit_1") or 0)
+            if not entry or not sl or not tp1:
+                return trade_params
+
+            symbol     = trade_params.get("symbol", "")
+            pip        = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+            sl_pips    = abs(entry - sl) / pip
+            tp1_pips   = abs(entry - tp1) / pip
+            required_rr = float(config.get("rr_ratio") or 2.0)
+
+            if sl_pips > 0 and tp1_pips / sl_pips < required_rr - 0.05:
+                # Use RM-approved tp1_pips if available, else compute from sl_pips × rr
+                rm_tp1_pips = float((rm_result.get("position_size") or {}).get("tp1_pips") or 0)
+                target_pips = rm_tp1_pips if rm_tp1_pips >= sl_pips * required_rr else sl_pips * required_rr
+                if direction == "BUY":
+                    trade_params = {**trade_params, "take_profit_1": round(entry + target_pips * pip, 5)}
+                elif direction == "SELL":
+                    trade_params = {**trade_params, "take_profit_1": round(entry - target_pips * pip, 5)}
+                logger.info(
+                    "RR enforced for %s %s: TP1 adjusted from %.5f to %.5f (RR %.2f→%.2f)",
+                    symbol, direction, tp1, trade_params["take_profit_1"],
+                    tp1_pips / sl_pips, target_pips / sl_pips,
+                )
+        except Exception:
+            pass
+        return trade_params
 
     def _sanity_check_trade(self, trade_params: dict, market_data: dict, config: dict | None = None) -> str | None:
         """Return rejection reason string if trade params are mathematically invalid, else None."""
