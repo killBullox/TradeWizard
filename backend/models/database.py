@@ -233,6 +233,7 @@ async def init_db():
                 SystemConfig(key="news_block_minutes_before", value="30", description="Minutes before high-impact news to block trading"),
                 SystemConfig(key="news_block_minutes_after",  value="30", description="Minutes after high-impact news to block trading"),
                 SystemConfig(key="news_block_medium",         value="false", description="Also block Medium-impact events"),
+                SystemConfig(key="model_mode", value="economy", description="AI model mode: economy (Haiku, cheap) or quality (Sonnet, deeper analysis)"),
             ]
             session.add_all(defaults)
             await session.commit()

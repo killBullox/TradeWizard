@@ -87,7 +87,14 @@ class ICTAdvisorAgent(BaseAgent):
         market_data: dict,
         system_config: dict,
     ) -> dict:
-        await self.broadcast_status("ANALYZING", f"Analyzing {symbol} with ICT methodology...")
+        # Economy mode (default): Haiku — fast, cheap, no thinking tokens
+        # Quality mode: Sonnet — deeper reasoning for live trading
+        mode = system_config.get("model_mode", "economy")
+        self.model = (
+            "claude-sonnet-4-6" if mode == "quality"
+            else "claude-haiku-4-5-20251001"
+        )
+        await self.broadcast_status("ANALYZING", f"Analyzing {symbol} with ICT methodology [{mode}]...")
 
         h4 = market_data.get("H4", {})
         h1 = market_data.get("H1", {})

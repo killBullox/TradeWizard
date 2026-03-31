@@ -502,6 +502,18 @@ function renderConfig(cfg) {
           </label>`).join('')}
       </div>
     </div>
+    <div class="config-field" style="grid-column:1/-1">
+      <label>AI Model Mode <span style="font-size:0.75rem;color:var(--text-muted);font-weight:400">(impatta consumo token e qualità analisi ICT)</span></label>
+      <div style="display:flex;gap:12px;margin-top:4px">
+        ${['economy','quality'].map(m => `
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="radio" name="cfg-model_mode" value="${m}" ${(cfg['model_mode']||'economy')===m?'checked':''}>
+            <span>${m === 'economy'
+              ? '<strong>Economy</strong> — Haiku (veloce, ~20x più economico, consigliato)'
+              : '<strong>Quality</strong> — Sonnet (analisi più profonda, costo maggiore)'}</span>
+          </label>`).join('')}
+      </div>
+    </div>
   `;
 }
 
@@ -652,6 +664,11 @@ async function saveConfig() {
   const checked = [...document.querySelectorAll('.cfg-pair-chk:checked')].map(el => el.value);
   if (checked.length) {
     await fetchJSON('/api/config/enabled_pairs', { method: 'PUT', body: JSON.stringify({ value: JSON.stringify(checked) }) });
+  }
+  // AI Model mode
+  const modelModeEl = document.querySelector('input[name="cfg-model_mode"]:checked');
+  if (modelModeEl) {
+    await fetchJSON('/api/config/model_mode', { method: 'PUT', body: JSON.stringify({ value: modelModeEl.value }) });
   }
   addActivity('⚙️ Configuration saved', 'success');
   await refreshConfig();
