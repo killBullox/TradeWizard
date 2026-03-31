@@ -330,6 +330,9 @@ function renderOpenTrades(trades) {
         <span class="trade-setup">${t.ict_setup||'ICT'}</span>
         <button class="btn btn-danger btn-sm" onclick="closeTrade(${t.id})">✕</button>
       </div>
+      <div style="font-size:0.7rem;color:var(--text-muted);margin:2px 0 6px">
+        Aperto: ${fmtDate(t.open_time)}
+      </div>
       <div class="trade-levels">
         <div><div class="trade-level-label">Entry</div><div class="trade-level-val">${t.entry_price}</div></div>
         <div><div class="trade-level-label">SL</div><div class="trade-level-val text-loss">${t.stop_loss}</div></div>
@@ -689,8 +692,12 @@ function setEl(id, val) {
 
 function fmtDate(iso) {
   if (!iso) return '-';
-  try { return new Date(iso).toLocaleString('it-IT', {dateStyle:'short',timeStyle:'medium'}); }
-  catch { return iso; }
+  try {
+    // Backend stores UTC datetimes without timezone suffix — append Z so the
+    // browser correctly converts to local time instead of treating as local
+    const s = (iso.endsWith('Z') || iso.includes('+') || iso.includes('-', 10)) ? iso : iso + 'Z';
+    return new Date(s).toLocaleString('it-IT', {dateStyle:'short', timeStyle:'medium'});
+  } catch { return iso; }
 }
 
 // ── Tab Switching ─────────────────────────────────────────────────────
