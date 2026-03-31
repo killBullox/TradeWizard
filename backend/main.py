@@ -523,6 +523,30 @@ async def backtest_run(data: dict):
         raise HTTPException(500, str(exc))
 
 
+async def _maybe_auto_update_cache(run_id, symbol, timeframe, oanda_key, oanda_practice, mt5_bridge_url):
+    """If the H1 cache exists but is stale (last bar > 4h old), update it before running the backtest."""
+    try:
+        from services.ohlcv_cache import get_latest_time
+        from datetime import datetime, timezone
+        latest = await get_latest_time(symbol, timeframe)
+        if not latest:
+            return  # No cache → backtester will fall back to API
+        dt_latest = datetime.fromisoformat(latest.replace("Z", "+00:00"))
+        age_hours = (datetime.now(timezone.utc) - dt_latest).total_seconds() / 3600
+        if age_hours <= 4:
+            return  # Fresh enough
+        logger.info("Cache stale (%.1fh old) for %s %s — auto-updating before backtest", age_hours, symbol, timeframe)
+        # Signal frontend that we're updating
+        async with async_session_factory() as s:
+            run = await s.get(BacktestRun, run_id)
+            if run:
+                run.status = "UPDATING_CACHE"
+                await s.commit()
+        await _do_update_cache(symbol, timeframe, oanda_key, oanda_practice, mt5_bridge_url)
+    except Exception as exc:
+        logger.warning("Auto-update cache skipped (%s) — continuing with existing data", exc)
+
+
 async def _exec_backtest(
     run_id, symbol, timeframe, strategy, bars,
     risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None,
@@ -530,6 +554,8 @@ async def _exec_backtest(
     date_from=None, date_to=None,
 ):
     try:
+        # Auto-refresh cache if stale before running
+        await _maybe_auto_update_cache(run_id, symbol, timeframe, oanda_api_key, oanda_practice, mt5_bridge_url)
         result = await run_backtest(
             symbol=symbol, timeframe=timeframe, strategy=strategy,
             bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,

@@ -1304,6 +1304,8 @@ async function pollBtResult(runId) {
     } else if (run.status === 'FAILED') {
       clearInterval(btPollTimer);
       setBtStatus('error', '❌ ' + (run.error || 'Unknown error'));
+    } else if (run.status === 'UPDATING_CACHE') {
+      setBtStatus('warn', '⏳ Cache dati non aggiornata — aggiornamento in corso...');
     }
   } catch (e) {
     clearInterval(btPollTimer);
