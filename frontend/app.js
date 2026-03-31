@@ -1267,6 +1267,21 @@ document.getElementById('btn-reset-all')?.addEventListener('click', async () => 
   await Promise.all([refreshPaper(), refreshTrades(), refreshConfig()]);
 });
 
+document.getElementById('btn-reset-stats')?.addEventListener('click', async () => {
+  if (!confirm('Azzera i contatori statistiche (win/loss/win-rate) e i log degli agenti?\nI trade storici vengono mantenuti.')) return;
+  await fetchJSON('/api/reset-stats', { method: 'POST' });
+  addActivity('↺ Statistiche e log agenti azzerati', 'warning');
+  await refreshAll();
+});
+
+document.getElementById('btn-reset-all-settings')?.addEventListener('click', async () => {
+  const bal = parseFloat(document.getElementById('settings-reset-balance')?.value || 5000);
+  if (!confirm(`RESET TOTALE: verranno eliminati tutti i trade, log, journal e statistiche.\nIl saldo paper verrà reimpostato a $${bal}.\n\nConfermi?`)) return;
+  await fetchJSON('/api/reset-all', { method: 'POST', body: JSON.stringify({ balance: bal }) });
+  addActivity(`🗑 Reset totale eseguito — saldo $${bal}`, 'warning');
+  await refreshAll();
+});
+
 document.getElementById('btn-paper-refresh')?.addEventListener('click', refreshPaper);
 
 // Handle live paper_update events from WebSocket

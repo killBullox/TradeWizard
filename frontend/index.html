@@ -739,6 +739,20 @@
             <button class="btn btn-secondary" id="btn-save-as-default" title="Salva come valori di default per futuri reset/reinstall">⭐ Save as Default</button>
           </div>
         </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header"><h3>🗑️ Reset</h3></div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;align-items:center;gap:12px">
+              <button class="btn btn-warning btn-sm" id="btn-reset-stats">↺ Reset Statistiche</button>
+              <span style="font-size:0.78rem;color:var(--text-muted)">Azzera contatori win/loss/win-rate. I trade storici vengono mantenuti.</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <input type="number" id="settings-reset-balance" class="form-input" value="5000" min="1000" style="width:110px" />
+              <button class="btn btn-danger btn-sm" id="btn-reset-all-settings">🗑 Reset Totale</button>
+              <span style="font-size:0.78rem;color:var(--text-muted)">Elimina tutti i trade, log, journal e meeting. Reimposta il saldo paper.</span>
+            </div>
+          </div>
+        </div>
       </div>
     </main>
 

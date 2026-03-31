@@ -709,6 +709,19 @@ async def paper_reset(data: dict | None = None):
     return {"status": "reset", "balance": balance}
 
 
+@app.post("/api/reset-stats")
+async def reset_stats():
+    """Reset only performance counters — trades and history are preserved."""
+    empty = '{"total_trades":0,"wins":0,"losses":0,"breakeven":0,"win_rate":0,"avg_rr":0}'
+    async with async_session_factory() as s:
+        await set_config("system_performance", empty, s)
+        await s.execute(delete(AgentLog))
+        await s.commit()
+    if orchestrator:
+        await orchestrator.broadcast({"type": "stats_reset"})
+    return {"status": "stats_reset"}
+
+
 @app.post("/api/reset-all")
 async def reset_all(data: dict | None = None):
     """Full reset: delete all trades, agent logs, journal entries, meetings and reset performance stats."""
