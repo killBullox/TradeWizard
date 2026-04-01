@@ -752,7 +752,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'journal')     refreshJournal();
     if (tab.dataset.tab === 'meetings')    refreshMeetings();
     if (tab.dataset.tab === 'performance') refreshPerformance();
-    if (tab.dataset.tab === 'settings')    refreshConfig();
+    if (tab.dataset.tab === 'settings')    { refreshConfig(); loadBackups(); }
     if (tab.dataset.tab === 'news')        refreshNews();
     if (tab.dataset.tab === 'charts')      window.activateChartsTab?.();
     if (tab.dataset.tab === 'backtest')    { refreshBtHistory(); refreshCacheStatus(); }
@@ -2152,14 +2152,75 @@ function perfTag(winRate) {
 }
 
 async function clearStrategyMemory() {
+  const pin = prompt('Inserisci il PIN per cancellare la memoria di apprendimento:');
+  if (pin === null) return;
+  if (pin !== '241287') { alert('PIN errato.'); return; }
   if (!confirm('Cancellare tutta la memoria di apprendimento? Gli agenti non ricorderanno più le lezioni precedenti.')) return;
   const res = await fetch('/api/strategy-memory', { method: 'DELETE' }).then(r => r.json());
   addActivity(`🗑 Strategy memory cleared (${res.deleted} rows)`, 'warn');
   loadStrategyMemory();
 }
 
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+// ── Backup / Restore Points ───────────────────────────────────────────────────
+async function loadBackups() {
+  const el = document.getElementById('backup-list');
+  if (!el) return;
+  try {
+    const list = await fetch('/api/backup/list').then(r => r.json());
+    if (!list.length) {
+      el.innerHTML = '<div style="color:var(--text-muted);font-style:italic;font-size:0.82rem">Nessun punto di ripristino ancora. Verrà creato automaticamente al prossimo reset.</div>';
+      return;
+    }
+    const labelMap = { reset_all: '🗑 Reset Totale', reset_stats: '↺ Reset Statistiche', manual: '📸 Manuale' };
+    el.innerHTML = list.map(b => {
+      const dt = b.timestamp ? new Date(b.timestamp).toLocaleString('it-IT', {dateStyle:'short',timeStyle:'short'}) : '—';
+      const lbl = labelMap[b.label] || b.label;
+      return `<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:var(--bg-input);border-radius:6px;font-size:0.82rem;flex-wrap:wrap">
+        <span style="flex:0 0 auto;color:var(--text-muted)">${dt}</span>
+        <span style="flex:0 0 auto;background:var(--bg-secondary);padding:2px 8px;border-radius:10px">${lbl}</span>
+        <span style="flex:1;color:var(--text-muted)">${escHtml(b.file)}</span>
+        <span style="color:var(--text-muted)">${b.size_kb} KB</span>
+        <button class="btn btn-warning btn-sm" onclick="restoreBackup('${escHtml(b.file)}')">♻️ Ripristina</button>
+        <button class="btn btn-ghost btn-sm" onclick="deleteBackup('${escHtml(b.file)}')">🗑</button>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    el.innerHTML = `<div style="color:var(--danger);font-size:0.82rem">Errore: ${e.message}</div>`;
+  }
+}
+
+async function createManualBackup() {
+  const btn = event.target;
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/backup/create', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({label:'manual'}) }).then(r => r.json());
+    addActivity(`📸 Punto di ripristino creato: ${res.file}`, 'info');
+    loadBackups();
+  } catch(e) {
+    alert('Errore creazione backup: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function restoreBackup(filename) {
+  const pin = prompt('Inserisci il PIN per ripristinare questo punto:');
+  if (pin === null) return;
+  if (pin !== '241287') { alert('PIN errato.'); return; }
+  if (!confirm(`Ripristinare il punto "${filename}"?\n\nTUTTI i dati attuali (trade, journal, meeting, memoria) verranno sostituiti con quelli del backup.`)) return;
+  try {
+    const res = await fetch(`/api/backup/restore/${encodeURIComponent(filename)}`, { method: 'POST' }).then(r => r.json());
+    addActivity(`♻️ Ripristino completato: ${res.trades_restored} trade, ${res.meetings_restored} meeting`, 'warn');
+    setTimeout(() => location.reload(), 1500);
+  } catch(e) {
+    alert('Errore ripristino: ' + e.message);
+  }
+}
+
+async function deleteBackup(filename) {
+  if (!confirm(`Eliminare il backup "${filename}"?\nQuesta azione non può essere annullata.`)) return;
+  await fetch(`/api/backup/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+  loadBackups();
 }
 
 // ── World Clock ───────────────────────────────────────────────────────────────

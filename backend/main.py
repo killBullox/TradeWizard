@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 import json
 import logging
 import asyncio
+import os
+import shutil
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Set
@@ -707,9 +709,169 @@ async def paper_reset(data: dict | None = None):
     return {"status": "reset", "balance": balance}
 
 
+# ── Backup / Restore Points ───────────────────────────────────────────────────
+
+BACKUP_DIR = os.path.join(os.path.dirname(__file__), "..", "backups")
+
+
+def _backup_dir() -> str:
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    return BACKUP_DIR
+
+
+async def _create_backup(label: str) -> dict:
+    """Snapshot all key tables to a JSON file in backups/. Returns metadata."""
+    import json as _json
+    ts = datetime.utcnow()
+    fname = f"{ts.strftime('%Y%m%d_%H%M%S')}_{label}.json"
+    path = os.path.join(_backup_dir(), fname)
+
+    async with async_session_factory() as s:
+        trades   = (await s.execute(select(Trade).order_by(Trade.id))).scalars().all()
+        journals = (await s.execute(select(JournalEntry).order_by(JournalEntry.id))).scalars().all()
+        meetings = (await s.execute(select(Meeting).order_by(Meeting.id))).scalars().all()
+        mem_rows = (await s.execute(select(StrategyMemory).order_by(StrategyMemory.id))).scalars().all()
+        configs  = (await s.execute(select(SystemConfig))).scalars().all()
+
+    def _t(obj):
+        return obj.isoformat() if isinstance(obj, datetime) else obj
+
+    def row_to_dict(r):
+        return {c.name: _t(getattr(r, c.name)) for c in r.__table__.columns}
+
+    snapshot = {
+        "meta":    {"timestamp": ts.isoformat(), "label": label, "file": fname},
+        "trades":           [row_to_dict(r) for r in trades],
+        "journal_entries":  [row_to_dict(r) for r in journals],
+        "meetings":         [row_to_dict(r) for r in meetings],
+        "strategy_memory":  [row_to_dict(r) for r in mem_rows],
+        "config":           [row_to_dict(r) for r in configs],
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump(snapshot, fh, ensure_ascii=False, indent=2)
+
+    return {
+        "file": fname,
+        "timestamp": ts.isoformat(),
+        "label": label,
+        "trades": len(trades),
+        "meetings": len(meetings),
+        "size_kb": round(os.path.getsize(path) / 1024, 1),
+    }
+
+
+@app.post("/api/backup/create")
+async def backup_create(data: dict | None = None):
+    label = (data or {}).get("label", "manual")
+    meta = await _create_backup(label)
+    return meta
+
+
+@app.get("/api/backup/list")
+async def backup_list():
+    d = _backup_dir()
+    files = sorted([f for f in os.listdir(d) if f.endswith(".json")], reverse=True)
+    result = []
+    for f in files:
+        path = os.path.join(d, f)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                meta = json.load(fh).get("meta", {})
+            result.append({
+                "file":      f,
+                "timestamp": meta.get("timestamp"),
+                "label":     meta.get("label", ""),
+                "size_kb":   round(os.path.getsize(path) / 1024, 1),
+            })
+        except Exception:
+            result.append({"file": f, "timestamp": None, "label": "?", "size_kb": 0})
+    return result
+
+
+@app.post("/api/backup/restore/{filename}")
+async def backup_restore(filename: str):
+    """Restore DB tables from a backup snapshot file."""
+    # Security: no path traversal
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    path = os.path.join(_backup_dir(), filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "Backup not found")
+
+    with open(path, "r", encoding="utf-8") as fh:
+        snap = json.load(fh)
+
+    def _parse_dt(v):
+        if not v:
+            return None
+        try:
+            return datetime.fromisoformat(v)
+        except Exception:
+            return None
+
+    async with async_session_factory() as s:
+        # Clear current data
+        await s.execute(delete(AgentLog))
+        await s.execute(delete(JournalEntry))
+        await s.execute(delete(Meeting))
+        await s.execute(delete(Trade))
+        await s.execute(delete(StrategyMemory))
+        await s.commit()
+
+        # Restore trades (preserve original IDs)
+        for r in snap.get("trades", []):
+            s.add(Trade(**{k: (_parse_dt(v) if k.endswith(("_at","_time")) else v) for k, v in r.items()}))
+        await s.flush()
+
+        # Restore meetings
+        for r in snap.get("meetings", []):
+            s.add(Meeting(**{k: (_parse_dt(v) if k.endswith(("_at","_time","started_at","ended_at")) else v) for k, v in r.items()}))
+        await s.flush()
+
+        # Restore journal
+        for r in snap.get("journal_entries", []):
+            s.add(JournalEntry(**{k: (_parse_dt(v) if k.endswith(("_at","_time")) else v) for k, v in r.items()}))
+
+        # Restore strategy memory
+        for r in snap.get("strategy_memory", []):
+            s.add(StrategyMemory(**{k: (_parse_dt(v) if k.endswith(("_at","last_updated")) else v) for k, v in r.items()}))
+
+        # Restore config
+        for r in snap.get("config", []):
+            cfg = await s.get(SystemConfig, r["key"])
+            if cfg:
+                cfg.value = r["value"]
+            else:
+                s.add(SystemConfig(**r))
+
+        await s.commit()
+
+    if orchestrator:
+        await orchestrator.broadcast({"type": "full_reset"})
+
+    return {
+        "status": "restored",
+        "file": filename,
+        "trades_restored": len(snap.get("trades", [])),
+        "meetings_restored": len(snap.get("meetings", [])),
+    }
+
+
+@app.delete("/api/backup/{filename}")
+async def backup_delete(filename: str):
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    path = os.path.join(_backup_dir(), filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "Backup not found")
+    os.remove(path)
+    return {"deleted": filename}
+
+
 @app.post("/api/reset-stats")
 async def reset_stats():
     """Reset only performance counters — trades and history are preserved."""
+    await _create_backup("reset_stats")
     empty = '{"total_trades":0,"wins":0,"losses":0,"breakeven":0,"win_rate":0,"avg_rr":0}'
     async with async_session_factory() as s:
         await set_config("system_performance", empty, s)
@@ -724,6 +886,7 @@ async def reset_stats():
 async def reset_all(data: dict | None = None):
     """Full reset: delete all trades, agent logs, journal entries, meetings and reset performance stats."""
     balance = float((data or {}).get("balance", 5000.0))
+    await _create_backup("reset_all")
     async with async_session_factory() as s:
         await s.execute(delete(AgentLog))
         await s.execute(delete(JournalEntry))
