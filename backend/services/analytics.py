@@ -305,7 +305,8 @@ async def _fetch_closed_trades() -> list[dict]:
     async with async_session_factory() as s:
         result = await s.execute(
             select(Trade)
-            .where(Trade.status == "CLOSED")   # include both paper and live
+            .where(Trade.status == "CLOSED")
+            .where((Trade.archived == False) | (Trade.archived == None))
             .order_by(Trade.close_time)
         )
         trades = result.scalars().all()

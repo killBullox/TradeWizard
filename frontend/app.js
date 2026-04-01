@@ -253,9 +253,10 @@ async function refreshTrades() {
     renderTradesTable(trades);
     const livePnlMap = Object.fromEntries((livePnl||[]).map(p => [p.trade_id, p]));
     renderOpenTrades(trades.filter(t => t.status === 'ACTIVE'), livePnlMap);
-    // PNL Calendar — trades tab (real trades use status=CLOSED, not result=WIN/LOSS)
+    // PNL Calendar — both tabs always updated here (source of truth for trade list)
     const calTrades = trades.filter(t => t.status === 'CLOSED' || t.result === 'WIN' || t.result === 'LOSS');
     _tradesCal.setTrades(calTrades);
+    _perfCal.setTrades(calTrades);
     // Update stats
     const closed = trades.filter(t => t.status === 'CLOSED');
     const wins   = closed.filter(t => t.result === 'WIN').length;
@@ -448,8 +449,7 @@ function renderPerformance(perf) {
     `).join('');
   }
   // PNL Calendar — feed from all closed trades in state
-  const closed = (state.trades || []).filter(t => t.result === 'WIN' || t.result === 'LOSS');
-  _perfCal.setTrades(closed);
+  // _perfCal is fed from refreshTrades() to avoid race condition
 }
 
 function renderConfig(cfg) {
@@ -1291,6 +1291,7 @@ document.getElementById('btn-reset-all-settings')?.addEventListener('click', asy
   await fetchJSON('/api/reset-all', { method: 'POST', body: JSON.stringify({ balance: bal }) });
   addActivity(`🗑 Reset totale eseguito — saldo $${bal}`, 'warning');
   await refreshAll();
+  await refreshPaper();
 });
 
 document.getElementById('btn-paper-refresh')?.addEventListener('click', refreshPaper);
