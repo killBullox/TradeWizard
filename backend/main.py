@@ -27,7 +27,7 @@ load_dotenv()
 from models.database import (
     async_session_factory, init_db, Trade, AgentLog,
     JournalEntry, Meeting, SystemConfig, set_config, get_config,
-    BacktestRun, OhlcvBar,
+    BacktestRun, OhlcvBar, StrategyMemory,
 )
 from orchestrator import Orchestrator
 from services.forex_data import fetch_ohlcv
@@ -736,6 +736,45 @@ async def reset_all(data: dict | None = None):
         await orchestrator.paper_account.reset(balance)
     await orchestrator.broadcast({"type": "full_reset", "balance": balance})
     return {"status": "reset", "balance": balance}
+
+
+@app.get("/api/strategy-memory")
+async def get_strategy_memory():
+    """Return all StrategyMemory rows for frontend visualization."""
+    import json as _json
+    async with async_session_factory() as s:
+        rows = (await s.execute(
+            select(StrategyMemory).order_by(StrategyMemory.setup_type, StrategyMemory.symbol)
+        )).scalars().all()
+    result = []
+    for r in rows:
+        total = (r.win_count or 0) + (r.loss_count or 0)
+        win_rate = round(r.win_count / total * 100, 1) if total > 0 else None
+        result.append({
+            "id":               r.id,
+            "setup_type":       r.setup_type,
+            "symbol":           r.symbol,
+            "win_count":        r.win_count or 0,
+            "loss_count":       r.loss_count or 0,
+            "total_trades":     total,
+            "win_rate":         win_rate,
+            "total_pnl_usd":    round(r.total_pnl_usd or 0, 2),
+            "failure_patterns": _json.loads(r.failure_patterns or "[]"),
+            "success_patterns": _json.loads(r.success_patterns or "[]"),
+            "lessons":          _json.loads(r.lessons or "[]"),
+            "strategy_notes":   r.strategy_notes or "",
+            "last_updated":     r.last_updated.isoformat() if r.last_updated else None,
+        })
+    return result
+
+
+@app.delete("/api/strategy-memory")
+async def clear_strategy_memory():
+    """Clear all strategy memory (use after intentional strategy reset)."""
+    async with async_session_factory() as s:
+        result = await s.execute(delete(StrategyMemory))
+        await s.commit()
+    return {"deleted": result.rowcount}
 
 
 @app.post("/api/paper/close/{trade_id}")

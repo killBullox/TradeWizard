@@ -758,6 +758,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'backtest')    { refreshBtHistory(); refreshCacheStatus(); }
     if (tab.dataset.tab === 'paper')       refreshPaper();
     if (tab.dataset.tab === 'analytics')  refreshAnalytics();
+    if (tab.dataset.tab === 'learning')   loadStrategyMemory();
   });
 });
 
@@ -2045,6 +2046,121 @@ class PnlCalendar {
 const _perfCal   = new PnlCalendar('perf-cal');
 const _tradesCal = new PnlCalendar('trades-cal');
 const _btCal     = new PnlCalendar('bt-cal');
+
+// ── Strategy Memory / Learning Tab ───────────────────────────────────────────
+async function loadStrategyMemory() {
+  const container = document.getElementById('memory-cards');
+  const summary   = document.getElementById('memory-summary');
+  if (!container) return;
+
+  try {
+    const rows = await fetch('/api/strategy-memory').then(r => r.json());
+
+    // ── Summary bar ──
+    const setups = [...new Set(rows.filter(r => !r.symbol).map(r => r.setup_type))];
+    const totalTrades = rows.filter(r => !r.symbol).reduce((a, r) => a + r.total_trades, 0);
+    const totalWins   = rows.filter(r => !r.symbol).reduce((a, r) => a + r.win_count, 0);
+    const totalPnl    = rows.filter(r => !r.symbol).reduce((a, r) => a + r.total_pnl_usd, 0);
+    const globalWR    = totalTrades > 0 ? (totalWins / totalTrades * 100).toFixed(1) : null;
+
+    summary.innerHTML = [
+      `<div class="stat-card" style="flex:1;min-width:120px"><div class="stat-value">${setups.length}</div><div class="stat-label">Setup types tracked</div></div>`,
+      `<div class="stat-card" style="flex:1;min-width:120px"><div class="stat-value">${totalTrades}</div><div class="stat-label">Total trades learned</div></div>`,
+      `<div class="stat-card ${globalWR >= 55 ? 'win' : globalWR < 45 ? 'loss' : ''}" style="flex:1;min-width:120px"><div class="stat-value">${globalWR !== null ? globalWR + '%' : '—'}</div><div class="stat-label">Overall win rate</div></div>`,
+      `<div class="stat-card ${totalPnl >= 0 ? 'win' : 'loss'}" style="flex:1;min-width:120px"><div class="stat-value">$${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(0)}</div><div class="stat-label">Total P&L learned</div></div>`,
+    ].join('');
+
+    if (!rows.length) {
+      container.innerHTML = '<div style="color:var(--text-muted);font-style:italic">No strategy memory yet. Memory accumulates after the first completed trades and meetings.</div>';
+      return;
+    }
+
+    // Group: global rows first, then per-symbol
+    const globalRows = rows.filter(r => !r.symbol);
+    const symRows    = rows.filter(r =>  r.symbol);
+
+    const cards = globalRows.map(g => {
+      const tag = perfTag(g.win_rate);
+      const perSym = symRows.filter(s => s.setup_type === g.setup_type);
+
+      const symHtml = perSym.length
+        ? `<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:6px">` +
+          perSym.map(s => {
+            const sTag = perfTag(s.win_rate);
+            return `<span style="background:var(--bg-input);border-radius:6px;padding:3px 8px;font-size:0.75rem">
+              ${s.symbol} ${sTag.icon}
+              ${s.total_trades > 0 ? `${s.win_count}W/${s.loss_count}L` : 'no data'}
+            </span>`;
+          }).join('') + `</div>`
+        : '';
+
+      const fpHtml = g.failure_patterns.length
+        ? `<div style="margin-top:8px"><span style="color:#f87171;font-size:0.78rem;font-weight:600">❌ Failure patterns:</span><ul style="margin:3px 0 0 16px;font-size:0.78rem;color:var(--text-muted)">` +
+          g.failure_patterns.map(p => `<li>${escHtml(p)}</li>`).join('') + `</ul></div>`
+        : '';
+
+      const spHtml = g.success_patterns.length
+        ? `<div style="margin-top:8px"><span style="color:#4ade80;font-size:0.78rem;font-weight:600">✅ Success patterns:</span><ul style="margin:3px 0 0 16px;font-size:0.78rem;color:var(--text-muted)">` +
+          g.success_patterns.map(p => `<li>${escHtml(p)}</li>`).join('') + `</ul></div>`
+        : '';
+
+      const lsHtml = g.lessons.length
+        ? `<div style="margin-top:8px"><span style="color:#fbbf24;font-size:0.78rem;font-weight:600">💡 Lessons:</span><ul style="margin:3px 0 0 16px;font-size:0.78rem;color:var(--text-muted)">` +
+          g.lessons.map(l => `<li>${escHtml(l)}</li>`).join('') + `</ul></div>`
+        : '';
+
+      const notesHtml = g.strategy_notes
+        ? `<div style="margin-top:8px;padding:8px;background:var(--bg-input);border-radius:6px;font-size:0.8rem;border-left:3px solid var(--accent)">
+            <span style="font-weight:600;color:var(--accent)">📌 Guidance:</span> ${escHtml(g.strategy_notes)}
+           </div>`
+        : '';
+
+      const pnlColor = g.total_pnl_usd >= 0 ? '#4ade80' : '#f87171';
+      const updated  = g.last_updated ? new Date(g.last_updated).toLocaleString('it-IT', {dateStyle:'short',timeStyle:'short'}) : '—';
+
+      return `
+        <div class="card" style="border-left:4px solid ${tag.color}">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="font-size:1.1rem;font-weight:700">${escHtml(g.setup_type)}</span>
+              <span style="background:${tag.color}22;color:${tag.color};border-radius:12px;padding:2px 10px;font-size:0.78rem;font-weight:600">${tag.icon} ${tag.label}</span>
+            </div>
+            <div style="display:flex;gap:16px;font-size:0.82rem;color:var(--text-muted)">
+              ${g.total_trades > 0
+                ? `<span>${g.win_count}W / ${g.loss_count}L <span style="font-weight:600;color:var(--text-primary)">(${g.win_rate}%)</span></span>
+                   <span style="color:${pnlColor};font-weight:600">$${g.total_pnl_usd >= 0 ? '+' : ''}${g.total_pnl_usd.toFixed(2)}</span>`
+                : `<span>No trades yet</span>`}
+              <span title="Last updated">🕐 ${updated}</span>
+            </div>
+          </div>
+          ${symHtml}${fpHtml}${spHtml}${lsHtml}${notesHtml}
+        </div>`;
+    });
+
+    container.innerHTML = cards.length ? cards.join('') : '<div style="color:var(--text-muted);font-style:italic">No global memory rows yet.</div>';
+  } catch (e) {
+    container.innerHTML = `<div style="color:var(--danger)">Error loading strategy memory: ${e.message}</div>`;
+  }
+}
+
+function perfTag(winRate) {
+  if (winRate === null || winRate === undefined) return { icon: '🔄', label: 'NEW',     color: '#94a3b8' };
+  if (winRate >= 65)                             return { icon: '✅', label: 'STRONG',  color: '#4ade80' };
+  if (winRate >= 50)                             return { icon: '🟡', label: 'NEUTRAL', color: '#fbbf24' };
+  if (winRate >= 35)                             return { icon: '⚠️', label: 'CAUTION', color: '#fb923c' };
+                                                 return { icon: '🚫', label: 'AVOID',   color: '#f87171' };
+}
+
+async function clearStrategyMemory() {
+  if (!confirm('Cancellare tutta la memoria di apprendimento? Gli agenti non ricorderanno più le lezioni precedenti.')) return;
+  const res = await fetch('/api/strategy-memory', { method: 'DELETE' }).then(r => r.json());
+  addActivity(`🗑 Strategy memory cleared (${res.deleted} rows)`, 'warn');
+  loadStrategyMemory();
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 
 // ── World Clock ───────────────────────────────────────────────────────────────
 (function startWorldClock() {
