@@ -13,7 +13,7 @@ REM -- Verifica Python --
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
     echo  [ERRORE] Python non trovato nel PATH!
-    echo  Assicurati che Python sia installato e aggiunto al PATH di sistema.
+    echo  Assicurati che Python sia installato.
     pause
     exit /b 1
 )
@@ -22,14 +22,13 @@ REM -- Carica variabili .env --
 if exist ".env" (
     echo  Carico .env...
     for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
-        if not "%%A"=="" if not "%%A:~0,1%"=="#" set "%%A=%%B"
+        if not "%%A"=="" set "%%A=%%B"
     )
 )
 
 REM -- Verifica ANTHROPIC_API_KEY --
 if "%ANTHROPIC_API_KEY%"=="" (
     echo  [ATTENZIONE] ANTHROPIC_API_KEY non impostata nel .env
-    echo  Il sistema avviera ma le analisi AI non funzioneranno.
     echo.
 )
 
@@ -38,16 +37,15 @@ echo  [1/4] Fermo il backend precedente...
 taskkill /F /IM python.exe >nul 2>&1
 timeout /t 2 /nobreak >nul
 
-REM -- Git pull (salva modifiche locali, scarica, ripristina) --
+REM -- Git pull --
 echo  [2/4] Scarico aggiornamenti...
 git stash >nul 2>&1
 git pull origin claude/multi-agent-forex-trading-j6mE9
 if %errorlevel% neq 0 (
     echo  [ATTENZIONE] git pull fallito - avvio con versione locale
-) else (
-    echo  Aggiornamento completato.
 )
 git stash pop >nul 2>&1
+echo  Aggiornamento completato.
 
 REM -- Installa/aggiorna dipendenze --
 echo  [3/4] Aggiorno dipendenze Python...
@@ -65,7 +63,7 @@ echo.
 
 python backend\main.py
 
-REM -- Se arriva qui c'e' stato un errore --
+REM -- Arrivati qui = crash o stop manuale --
 echo.
-echo  [!] Il backend si e' fermato. Vedi errore sopra.
+echo  [!] Il backend si e fermato. Vedi errore sopra.
 pause
