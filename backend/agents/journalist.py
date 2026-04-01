@@ -12,6 +12,12 @@ from .base_agent import BaseAgent, MODEL_STANDARD
 SYSTEM_PROMPT = """You are the Journalist (JR) — the institutional memory and performance analyst
 of the TradeWizard multi-agent system.
 
+## CRITICAL: Continuous Learning Mission
+Your PRIMARY goal is to make the system learn from every single trade.
+After EVERY meeting you MUST produce `setup_memory_updates` — specific, actionable
+updates to the strategy memory for each setup reviewed.
+This is how the system improves: agents read this memory before every trade.
+
 ## Your Responsibilities
 
 ### 1. Real-Time Journaling
@@ -65,7 +71,7 @@ After each review, propose concrete improvements to:
 
 ### Meeting Summary:
 {
-  "meeting_type": "POST_TRADE|WEEKLY_REVIEW",
+  "meeting_type": "POST_TRADE|KILLZONE_REVIEW|WEEKLY_REVIEW",
   "participants": ["ICTEA", "RM", "TR", "AT"],
   "discussion_points": ["..."],
   "conclusions": ["..."],
@@ -74,7 +80,17 @@ After each review, propose concrete improvements to:
     {
       "category": "ICT|RISK|MANAGEMENT|STRATEGY",
       "improvement": "description",
-      "config_change": {"key": "...", "new_value": "..."}  // optional
+      "config_change": {"key": "...", "new_value": "..."}
+    }
+  ],
+  "setup_memory_updates": [
+    {
+      "setup_type": "FVG",
+      "symbol": "EURUSD",
+      "failure_patterns": ["specific reason this setup failed today"],
+      "success_patterns": ["specific reason this setup worked"],
+      "lessons": ["actionable lesson for next time"],
+      "strategy_notes": "Overall guidance for this setup going forward"
     }
   ]
 }
@@ -157,6 +173,8 @@ Write a detailed post-trade analysis covering:
         trades: list,
         performance_stats: dict,
         system_config: dict,
+        current_memory: str = "",
+        post_trade_context: str = "",
     ) -> dict:
         await self.broadcast_status(
             "MEETING",
@@ -171,41 +189,55 @@ Write a detailed post-trade analysis covering:
         })
 
         trades_summary = []
-        for t in trades[-10:]:  # Last 10 trades
+        for t in trades[-15:]:
             trades_summary.append({
-                "symbol": t.get("symbol"),
+                "symbol":    t.get("symbol"),
                 "direction": t.get("direction"),
-                "setup": t.get("ict_setup"),
-                "result": t.get("result"),
-                "pnl": t.get("pnl_usd"),
-                "rr": t.get("pnl_pips"),
+                "setup":     t.get("ict_setup"),
+                "result":    t.get("result"),
+                "pnl_usd":   t.get("pnl_usd"),
+                "pnl_pips":  t.get("pnl_pips"),
+                "entry":     t.get("entry_price"),
+                "exit":      t.get("close_price"),
+                "sl":        t.get("stop_loss"),
+                "tp1":       t.get("take_profit_1"),
+                "tp2":       t.get("take_profit_2"),
+                "tp3":       t.get("take_profit_3"),
+                "open_time": str(t.get("open_time", ""))[:16],
+                "close_time": str(t.get("close_time", ""))[:16],
             })
+
+        memory_section = f"\n### Current Strategy Memory\n{current_memory}\n" if current_memory else ""
+        post_section   = f"\n### What Happened After Each Trade Closed\n{post_trade_context}\n" if post_trade_context else ""
 
         user_msg = f"""
 ## {meeting_type} Meeting
-
-You are facilitating a review meeting between ICTEA, RM, TR, and AT.
-
+{memory_section}
 ### Performance Statistics
 {json.dumps(performance_stats, indent=2)}
 
-### Recent Trades Reviewed
+### Trades Reviewed (with full parameters)
 {json.dumps(trades_summary, indent=2)}
-
+{post_section}
 ### Current System Configuration
 {json.dumps(system_config, indent=2)}
 
-Conduct the meeting. Analyze what's working and what isn't.
-Propose specific, actionable improvements to the system.
-Focus on:
-1. ICT setup win rates — which setups are performing well?
-2. Risk management — are position sizes correct?
-3. Trade management — are we taking profits too early/late?
-4. Session timing — which sessions perform best?
-5. Configuration changes to improve system performance
+## Meeting Agenda
+You are facilitating a rigorous review. The goal is CONTINUOUS IMPROVEMENT.
+Principle: "O vinco o imparo — e anche quando vinco analizzo perché non ho vinto di più."
 
-Be specific about any config changes (e.g., "increase risk_percent to 1.2%",
-"add CHOCH to ict_strategies", "reduce max_open_trades to 2").
+Analyse every single trade:
+1. **Setup quality**: Was the ICT setup correctly identified? Were there confluence factors missed?
+2. **Entry timing**: Was the entry optimal, or did we enter too early/late?
+3. **TP management**: Did we leave money on the table? Was TP1 too close?
+4. **SL placement**: Were stops too tight (premature), or too wide (excessive loss)?
+5. **Setup failures**: For each losing setup type, WHY did it fail? Market structure, news, session?
+6. **What happened after close**: If we closed at TP1 and price continued to TP3, note that.
+7. **Pattern recognition**: Are there recurring failure patterns we must avoid?
+
+MANDATORY: Produce `setup_memory_updates` for EVERY setup type reviewed.
+These updates are the only way the system learns — without them, the same mistakes repeat.
+Be specific and actionable, not generic.
 """
         result = await self._call_claude_structured(SYSTEM_PROMPT, user_msg, max_tokens=4096)
 

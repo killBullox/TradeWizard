@@ -86,6 +86,7 @@ class ICTAdvisorAgent(BaseAgent):
         symbol: str,
         market_data: dict,
         system_config: dict,
+        memory_context: str = "",
     ) -> dict:
         # Economy mode (default): Haiku — fast, cheap, no thinking tokens
         # Quality mode: Sonnet — deeper reasoning for live trading
@@ -134,6 +135,8 @@ Perform a complete ICT analysis for {symbol}.
 Identify the current HTF bias, key PD arrays, liquidity pools,
 and propose 1-3 high-probability trade setups.
 """
+        if memory_context:
+            user_msg = memory_context + "\n" + user_msg
         result = await self._call_claude_structured(SYSTEM_PROMPT, user_msg, max_tokens=4096)
 
         await self.broadcast_status(

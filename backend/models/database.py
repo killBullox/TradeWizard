@@ -115,6 +115,24 @@ class SystemConfig(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class StrategyMemory(Base):
+    """Persistent per-setup learning memory — updated after every trade and every meeting."""
+    __tablename__ = "strategy_memory"
+    __table_args__ = (UniqueConstraint("setup_type", "symbol", name="uq_setup_symbol"),)
+
+    id           = Column(Integer, primary_key=True)
+    setup_type   = Column(String(50), nullable=False)   # "FVG", "OrderBlock", etc.
+    symbol       = Column(String(20), nullable=True)    # NULL = all symbols combined
+    win_count    = Column(Integer, default=0)
+    loss_count   = Column(Integer, default=0)
+    total_pnl_usd = Column(Float, default=0.0)
+    failure_patterns = Column(Text, default="[]")       # JSON list[str]
+    success_patterns = Column(Text, default="[]")       # JSON list[str]
+    lessons      = Column(Text, default="[]")           # JSON list[str]
+    strategy_notes = Column(Text, default="")           # Free-form guidance from JR
+    last_updated = Column(DateTime, default=datetime.utcnow)
+
+
 class BacktestRun(Base):
     __tablename__ = "backtest_runs"
 

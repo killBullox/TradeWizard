@@ -68,6 +68,7 @@ class TradeAnalystAgent(BaseAgent):
         strategy: dict,
         market_data: dict,
         system_config: dict,
+        memory_context: str = "",
     ) -> dict:
         await self.broadcast_status("VALIDATING", f"Validating {trade.get('symbol')} trade...")
 
@@ -103,6 +104,8 @@ Validate this trade. Check entry alignment, SL validity, TP targets.
 If modifications are needed, specify exactly what to change.
 Provide a trade management plan.
 """
+        if memory_context:
+            user_msg = memory_context + "\n" + user_msg
         result = await self._call_claude_structured(SYSTEM_PROMPT, user_msg, max_tokens=3000)
 
         action = result.get("action", "UNKNOWN")

@@ -18,6 +18,11 @@ from models.database import (
     async_session_factory, Trade, AgentLog, JournalEntry, Meeting,
     init_db, get_config, set_config,
 )
+from services.strategy_memory import (
+    build_context_string as _build_memory,
+    update_from_trade   as _mem_update_trade,
+    update_from_meeting as _mem_update_meeting,
+)
 from agents import (
     ICTAdvisorAgent, RiskManagerAgent, TraderAgent,
     TradeAnalystAgent, ConnectorAgent, JournalistAgent,
@@ -142,16 +147,34 @@ class Orchestrator:
     async def _analysis_loop(self):
         # Brief startup delay so the WS clients can connect first
         await asyncio.sleep(10)
+        _was_in_kz = False  # track kill zone transitions for post-KZ meetings
         while self._running:
-            if await self._in_kill_zone():
+            in_kz = await self._in_kill_zone()
+            if in_kz:
+                _was_in_kz = True
                 try:
                     await self._run_analysis_cycle()
                 except Exception as e:
                     logger.error(f"Analysis loop error: {e}", exc_info=True)
                     await self.broadcast({"type": "error", "message": str(e)})
             else:
-                logger.info("Outside Kill Zone — skipping analysis cycle")
+                # Just exited a kill zone → trigger KILLZONE_REVIEW meeting
+                if _was_in_kz:
+                    _was_in_kz = False
+                    logger.info("Kill zone ended — scheduling KILLZONE_REVIEW meeting")
+                    asyncio.create_task(self._run_killzone_review())
+                else:
+                    logger.info("Outside Kill Zone — skipping analysis cycle")
             await asyncio.sleep(await self._get_interval())
+
+    async def _run_killzone_review(self):
+        """Post-killzone deep review: what happened during this session, what could have been better."""
+        try:
+            await asyncio.sleep(120)  # 2-minute delay to let last trades settle
+            await self.run_meeting("KILLZONE_REVIEW")
+            logger.info("KILLZONE_REVIEW meeting completed")
+        except Exception as exc:
+            logger.error("KILLZONE_REVIEW meeting failed: %s", exc)
 
     async def _get_interval(self) -> int:
         async with async_session_factory() as s:
@@ -199,8 +222,11 @@ class Orchestrator:
             # 1. Fetch market data
             market_data = await get_multi_timeframe_data(symbol)
 
-            # 2. ICTEA Analysis
-            ict_analysis = await self.ictea.analyze(symbol, market_data, config)
+            # 2. Load strategy memory — injected into all agent prompts for continuous learning
+            memory_ctx = await _build_memory()
+
+            # 3. ICTEA Analysis (with memory context)
+            ict_analysis = await self.ictea.analyze(symbol, market_data, config, memory_context=memory_ctx)
             await self._log_agent("ICTEA", "ANALYSIS", f"Analyzed {symbol}", ict_analysis)
 
             if ict_analysis.get("bias") == "NEUTRAL":
@@ -214,8 +240,8 @@ class Orchestrator:
             # Take highest-probability strategy
             strategy = max(strategies, key=lambda s: s.get("probability", 0))
 
-            # 3. Risk Manager
-            rm_result = await self.rm.evaluate(symbol, strategy, market_data, config, open_count)
+            # 4. Risk Manager (with memory context)
+            rm_result = await self.rm.evaluate(symbol, strategy, market_data, config, open_count, memory_context=memory_ctx)
             await self._log_agent("RM", "EVALUATION", f"Evaluated {symbol}", rm_result)
 
             if not rm_result.get("approved"):
@@ -239,8 +265,8 @@ class Orchestrator:
                 {"lot": pos.get("lot_size"), "risk_usd": pos.get("risk_usd"),
                  "sl_pips": pos.get("sl_pips"), "risk_mode": pos.get("risk_mode")})
 
-            # 5. Trade Analyst — validate
-            validation = await self.at.validate_trade(trade_params, strategy, market_data, config)
+            # 6. Trade Analyst — validate (with memory context)
+            validation = await self.at.validate_trade(trade_params, strategy, market_data, config, memory_context=memory_ctx)
             await self._log_agent("AT", "VALIDATION", f"Validated {symbol}", validation)
 
             if not validation.get("approved"):
@@ -446,8 +472,9 @@ class Orchestrator:
         )
         await self._save_journal(trade.id, "TRADE_CLOSE", jr_entry)
 
-        # Update performance stats
+        # Update performance stats + strategy memory (continuous learning)
         await self._update_performance_stats(result_str, pnl_pips)
+        asyncio.create_task(_mem_update_trade(trade.ict_setup or "Unknown", trade.symbol, pnl_usd, result_str))
 
         await self.broadcast({
             "type": "trade_closed",
@@ -500,12 +527,28 @@ class Orchestrator:
             else:
                 trade_dicts.append(t)
 
-        meeting_result = await self.jr.conduct_meeting(meeting_type, trade_dicts, perf, config)
+        # Load current strategy memory to include in meeting context
+        current_memory = await _build_memory()
 
-        # Apply system improvements
+        # Build "what happened after close" context for KILLZONE_REVIEW
+        post_ctx = await self._build_post_trade_context(trade_dicts) if meeting_type == "KILLZONE_REVIEW" else ""
+
+        meeting_result = await self.jr.conduct_meeting(
+            meeting_type, trade_dicts, perf, config,
+            current_memory=current_memory,
+            post_trade_context=post_ctx,
+        )
+
+        # Apply system improvements to config
         improvements = meeting_result.get("system_improvements", [])
         if improvements:
             await self._apply_improvements(improvements)
+
+        # Apply strategy memory updates — this is the continuous learning core
+        memory_updates = meeting_result.get("setup_memory_updates", [])
+        if memory_updates:
+            await _mem_update_meeting(memory_updates)
+            logger.info("Strategy memory updated: %d setup entries from %s", len(memory_updates), meeting_type)
 
         # Save meeting to DB
         async with async_session_factory() as s:
@@ -546,6 +589,37 @@ class Orchestrator:
             ))
 
         return meeting_result
+
+    async def _build_post_trade_context(self, trade_dicts: list) -> str:
+        """For each closed trade, fetch a few candles AFTER close to see if more profit was available."""
+        lines = []
+        for t in trade_dicts[-8:]:  # last 8 trades only to keep context size manageable
+            if not t.get("close_price") or not t.get("close_time"):
+                continue
+            sym     = t.get("symbol", "")
+            entry   = t.get("entry_price", 0)
+            close_p = t.get("close_price", 0)
+            tp1     = t.get("take_profit_1")
+            tp2     = t.get("take_profit_2")
+            direction = t.get("direction", "BUY")
+            result  = t.get("result", "?")
+            try:
+                data = await fetch_ohlcv(sym, "H1", 5)
+                current = data.get("indicators", {}).get("current_price", 0)
+                if current and close_p and entry:
+                    pip = 0.01 if "JPY" in sym else (1.0 if sym in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+                    pips_after = (current - close_p) / pip if direction == "BUY" else (close_p - current) / pip
+                    continued = pips_after > 0
+                    lines.append(
+                        f"#{t.get('id')} {sym} {direction} {result}: "
+                        f"Closed @{close_p} | After close price moved "
+                        f"{'FURTHER in trade direction' if continued else 'AGAINST trade direction'} "
+                        f"({abs(pips_after):.1f} pips) | "
+                        f"TP1={tp1} TP2={tp2}"
+                    )
+            except Exception:
+                pass
+        return "\n".join(lines) if lines else ""
 
     async def _apply_improvements(self, improvements: list):
         """Apply system config changes proposed by JR."""

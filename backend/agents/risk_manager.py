@@ -92,6 +92,7 @@ class RiskManagerAgent(BaseAgent):
         market_data: dict,
         system_config: dict,
         open_trades_count: int = 0,
+        memory_context: str = "",
     ) -> dict:
         await self.broadcast_status(
             "EVALUATING",
@@ -142,6 +143,8 @@ The SL should be placed below the Order Block / FVG (for longs) or above (for sh
 approximately {atr_pips * 1.5:.0f} pips from entry (adjust based on setup).
 TP1 at {rr_ratio}x risk, TP2 at {rr_ratio * 1.5:.1f}x risk if applicable.
 """
+        if memory_context:
+            user_msg = memory_context + "\n" + user_msg
         result = await self._call_claude_structured(SYSTEM_PROMPT, user_msg, max_tokens=3000)
 
         status = "APPROVED ✅" if result.get("approved") else f"REJECTED ❌: {result.get('rejection_reason','')}"
