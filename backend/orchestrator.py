@@ -364,6 +364,28 @@ class Orchestrator:
                     await self.cc.close_partial(trade.mt5_ticket or "", trade.symbol, pct)
                     # Null out the TP level just hit so the AT won't trigger it again next cycle
                     await self._consume_next_tp(trade.id)
+
+                    # Move SL to breakeven after TP1 hit (protects the remaining position)
+                    entry = trade.entry_price or 0
+                    current_sl = trade.stop_loss or 0
+                    be_needed = entry and (
+                        (trade.direction == "BUY"  and current_sl < entry) or
+                        (trade.direction == "SELL" and current_sl > entry)
+                    )
+                    if be_needed:
+                        await self.cc.modify_sl(trade.mt5_ticket or "", entry, trade.symbol)
+                        await self._update_trade_sl(trade.id, entry)
+                        if self._paper:
+                            self._paper.modify_sl(trade.id, entry)
+                        await self.broadcast({
+                            "type": "sl_trailed",
+                            "trade_id": trade.id,
+                            "symbol": trade.symbol,
+                            "new_sl": entry,
+                            "reason": "Breakeven after TP1 hit",
+                        })
+                        logger.info("SL moved to breakeven %.5f for trade #%d after partial close", entry, trade.id)
+
                     await self.broadcast({"type": "partial_close", "trade_id": trade.id, "percent": pct})
                     if self._tg:
                         asyncio.create_task(self._tg.notify_partial_close(trade.symbol, trade.id, pct))

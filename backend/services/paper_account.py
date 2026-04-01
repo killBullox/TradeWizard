@@ -203,17 +203,23 @@ class PaperAccount:
                     # Check SL / TP auto-close
                     hit = self._check_sl_tp(pos, price)
                     if hit:
-                        result = self.close_position(tid, price)
+                        # Close at the exact SL/TP price, not the current market price.
+                        # This prevents inflated losses caused by the 30s update interval.
+                        if hit == "SL_HIT":
+                            close_at = pos["stop_loss"] or price
+                        else:  # TP_HIT
+                            close_at = pos["take_profit"] or price
+                        result = self.close_position(tid, close_at)
                         updates.append({
                             "type":      "paper_auto_close",
                             "trade_id":  tid,
                             "symbol":    sym,
                             "reason":    hit,
-                            "price":     price,
+                            "price":     close_at,
                             "pnl_usd":   result.get("pnl_usd", 0),
                             "pnl_pips":  result.get("pnl_pips", 0),
                         })
-                        await self._close_in_db(tid, price)
+                        await self._close_in_db(tid, close_at)
             except Exception as exc:
                 logger.debug("Price fetch error for %s: %s", sym, exc)
 
