@@ -851,7 +851,8 @@ async def backup_restore(filename: str):
                 s.add(StrategyMemory(**_safe_row(StrategyMemory, r)))
 
             for r in snap.get("config", []):
-                cfg = await s.get(SystemConfig, r["key"])
+                result = await s.execute(select(SystemConfig).where(SystemConfig.key == r["key"]))
+                cfg = result.scalar_one_or_none()
                 if cfg:
                     cfg.value = r["value"]
                 else:
