@@ -2045,3 +2045,18 @@ class PnlCalendar {
 const _perfCal   = new PnlCalendar('perf-cal');
 const _tradesCal = new PnlCalendar('trades-cal');
 const _btCal     = new PnlCalendar('bt-cal');
+
+// ── World Clock ───────────────────────────────────────────────────────────────
+(function startWorldClock() {
+  function tick() {
+    const now = new Date();
+    const it = now.toLocaleTimeString('it-IT', { timeZone: 'Europe/Rome',     hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const ny = now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    const elIt = document.getElementById('clock-it');
+    const elNy = document.getElementById('clock-ny');
+    if (elIt) elIt.textContent = it;
+    if (elNy) elNy.textContent = ny;
+  }
+  tick();
+  setInterval(tick, 1000);
+})();
