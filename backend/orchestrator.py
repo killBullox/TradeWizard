@@ -232,6 +232,12 @@ class Orchestrator:
 
             # Enforce lot size using ACTUAL entry/SL from trade_params (not RM's sl_pips which can be 0)
             self._enforce_lot_size(rm_result, trade_params, symbol, config)
+            pos = rm_result.get("position_size", {})
+            await self._log_agent("SYS", "LOT_ENFORCED",
+                f"{symbol} {trade_params.get('direction')} → {pos.get('lot_size','?')} lots "
+                f"(risk ${pos.get('risk_usd','?')} / {pos.get('sl_pips','?')} pip SL)",
+                {"lot": pos.get("lot_size"), "risk_usd": pos.get("risk_usd"),
+                 "sl_pips": pos.get("sl_pips"), "risk_mode": pos.get("risk_mode")})
 
             # 5. Trade Analyst — validate
             validation = await self.at.validate_trade(trade_params, strategy, market_data, config)

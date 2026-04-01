@@ -248,10 +248,15 @@ async def init_db():
             session.add_all(defaults)
             await session.commit()
         else:
-            # Ensure max_risk_usd exists even on older DBs
+            # Ensure max_risk_usd exists and is non-zero on older DBs
             mr = await session.execute(select(SystemConfig).where(SystemConfig.key == "max_risk_usd"))
-            if not mr.scalar_one_or_none():
+            row = mr.scalar_one_or_none()
+            if not row:
                 session.add(SystemConfig(key="max_risk_usd", value="250", description="Max loss per trade in USD (0 = use risk_percent)"))
+                await session.commit()
+            elif not row.value or float(row.value or 0) == 0:
+                # Was saved as 0/empty — reset to the intended default of $250
+                row.value = "250"
                 await session.commit()
 
 
