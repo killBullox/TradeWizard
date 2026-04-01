@@ -44,7 +44,7 @@ if %errorlevel% neq 0 (
 
 REM -- Avvia backend in nuova finestra --
 echo  [3/3] Avvio backend...
-start "TradeWizard Backend" cmd /k "cd /d "%~dp0" && python backend\main.py"
+start "TradeWizard Backend" /D "%~dp0" cmd /k "python backend\main.py"
 
 echo.
 echo  Apri http://localhost:8000
