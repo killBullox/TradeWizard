@@ -2231,7 +2231,10 @@ async function restoreBackup(filename) {
   if (pin !== '241287') { alert('PIN errato.'); return; }
   if (!confirm(`Ripristinare il punto "${filename}"?\n\nTUTTI i dati attuali (trade, journal, meeting, memoria) verranno sostituiti con quelli del backup.`)) return;
   try {
-    const res = await fetch(`/api/backup/restore/${encodeURIComponent(filename)}`, { method: 'POST' }).then(r => r.json());
+    const resp = await fetch(`/api/backup/restore/${encodeURIComponent(filename)}`, { method: 'POST' });
+    let res;
+    try { res = await resp.json(); } catch(_) { res = { detail: await resp.text() }; }
+    if (!resp.ok) throw new Error(res.detail || `HTTP ${resp.status}`);
     addActivity(`♻️ Ripristino completato: ${res.trades_restored} trade, ${res.meetings_restored} meeting`, 'warn');
     setTimeout(() => location.reload(), 1500);
   } catch(e) {

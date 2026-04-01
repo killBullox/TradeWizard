@@ -793,15 +793,20 @@ async def backup_list():
 @app.post("/api/backup/restore/{filename}")
 async def backup_restore(filename: str):
     """Restore DB tables from a backup snapshot file."""
-    # Security: no path traversal
+    import logging as _log
+    _rlog = _log.getLogger("backup_restore")
+
     if "/" in filename or "\\" in filename or ".." in filename:
         raise HTTPException(400, "Invalid filename")
     path = os.path.join(_backup_dir(), filename)
     if not os.path.exists(path):
         raise HTTPException(404, "Backup not found")
 
-    with open(path, "r", encoding="utf-8") as fh:
-        snap = json.load(fh)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            snap = json.load(fh)
+    except Exception as e:
+        raise HTTPException(400, f"Cannot read backup file: {e}")
 
     def _parse_dt(v):
         if not v:
@@ -811,42 +816,51 @@ async def backup_restore(filename: str):
         except Exception:
             return None
 
-    async with async_session_factory() as s:
-        # Clear current data
-        await s.execute(delete(AgentLog))
-        await s.execute(delete(JournalEntry))
-        await s.execute(delete(Meeting))
-        await s.execute(delete(Trade))
-        await s.execute(delete(StrategyMemory))
-        await s.commit()
+    def _safe_row(model_class, row_dict):
+        """Build model kwargs using only columns that exist in the current model."""
+        valid_cols = {c.name for c in model_class.__table__.columns}
+        dt_suffixes = ("_at", "_time", "started_at", "ended_at", "last_updated")
+        return {
+            k: (_parse_dt(v) if any(k.endswith(s) for s in dt_suffixes) else v)
+            for k, v in row_dict.items()
+            if k in valid_cols
+        }
 
-        # Restore trades (preserve original IDs)
-        for r in snap.get("trades", []):
-            s.add(Trade(**{k: (_parse_dt(v) if k.endswith(("_at","_time")) else v) for k, v in r.items()}))
-        await s.flush()
+    try:
+        async with async_session_factory() as s:
+            # Clear current data
+            await s.execute(delete(AgentLog))
+            await s.execute(delete(JournalEntry))
+            await s.execute(delete(Meeting))
+            await s.execute(delete(Trade))
+            await s.execute(delete(StrategyMemory))
+            await s.commit()
 
-        # Restore meetings
-        for r in snap.get("meetings", []):
-            s.add(Meeting(**{k: (_parse_dt(v) if k.endswith(("_at","_time","started_at","ended_at")) else v) for k, v in r.items()}))
-        await s.flush()
+            for r in snap.get("trades", []):
+                s.add(Trade(**_safe_row(Trade, r)))
+            await s.flush()
 
-        # Restore journal
-        for r in snap.get("journal_entries", []):
-            s.add(JournalEntry(**{k: (_parse_dt(v) if k.endswith(("_at","_time")) else v) for k, v in r.items()}))
+            for r in snap.get("meetings", []):
+                s.add(Meeting(**_safe_row(Meeting, r)))
+            await s.flush()
 
-        # Restore strategy memory
-        for r in snap.get("strategy_memory", []):
-            s.add(StrategyMemory(**{k: (_parse_dt(v) if k.endswith(("_at","last_updated")) else v) for k, v in r.items()}))
+            for r in snap.get("journal_entries", []):
+                s.add(JournalEntry(**_safe_row(JournalEntry, r)))
 
-        # Restore config
-        for r in snap.get("config", []):
-            cfg = await s.get(SystemConfig, r["key"])
-            if cfg:
-                cfg.value = r["value"]
-            else:
-                s.add(SystemConfig(**r))
+            for r in snap.get("strategy_memory", []):
+                s.add(StrategyMemory(**_safe_row(StrategyMemory, r)))
 
-        await s.commit()
+            for r in snap.get("config", []):
+                cfg = await s.get(SystemConfig, r["key"])
+                if cfg:
+                    cfg.value = r["value"]
+                else:
+                    s.add(SystemConfig(**_safe_row(SystemConfig, r)))
+
+            await s.commit()
+    except Exception as e:
+        _rlog.exception("Restore failed")
+        raise HTTPException(500, f"Restore failed: {e}")
 
     if orchestrator:
         await orchestrator.broadcast({"type": "full_reset"})
