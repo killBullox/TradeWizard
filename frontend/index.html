@@ -749,9 +749,10 @@
         <div class="card" style="margin-top:16px">
           <div class="card-header"><h3>🗑️ Reset</h3></div>
           <div style="display:flex;flex-direction:column;gap:10px">
-            <div style="display:flex;align-items:center;gap:12px">
+            <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
               <button class="btn btn-warning btn-sm" id="btn-reset-stats">↺ Reset Statistiche</button>
-              <span style="font-size:0.78rem;color:var(--text-muted)">Azzera contatori win/loss/win-rate. I trade storici vengono mantenuti.</span>
+              <span style="font-size:0.78rem;color:var(--text-muted)">Archivia tutti i trade chiusi — stats tornano a zero. I trade restano nel DB e sono ripristinabili.</span>
+              <button class="btn btn-secondary btn-sm" id="btn-unarchive" style="display:none">♻️ Ripristina archiviati (<span id="archived-count">0</span>)</button>
             </div>
             <div style="display:flex;align-items:center;gap:12px">
               <input type="number" id="settings-reset-balance" class="form-input" value="5000" min="1000" style="width:110px" />

@@ -52,6 +52,7 @@ class Trade(Base):
     result = Column(String(20), nullable=True)  # WIN / LOSS / BREAKEVEN
     trailing_sl_updates = Column(Integer, default=0)
     is_paper = Column(Boolean, default=False)     # True = paper trade
+    archived = Column(Boolean, default=False)     # True = hidden from stats (soft-archived)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     logs = relationship("AgentLog", back_populates="trade")
@@ -202,6 +203,7 @@ def _migrate_trades(conn):
     new_cols = [
         ("trailing_sl_updates", "INTEGER DEFAULT 0"),
         ("is_paper",            "BOOLEAN DEFAULT 0"),
+        ("archived",            "BOOLEAN DEFAULT 0"),
     ]
     cur = conn.execute(_text("PRAGMA table_info(trades)"))
     existing = {row[1] for row in cur.fetchall()}

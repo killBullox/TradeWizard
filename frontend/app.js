@@ -752,7 +752,7 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'journal')     refreshJournal();
     if (tab.dataset.tab === 'meetings')    refreshMeetings();
     if (tab.dataset.tab === 'performance') refreshPerformance();
-    if (tab.dataset.tab === 'settings')    { refreshConfig(); loadBackups(); }
+    if (tab.dataset.tab === 'settings')    { refreshConfig(); loadBackups(); refreshArchivedCount(); }
     if (tab.dataset.tab === 'news')        refreshNews();
     if (tab.dataset.tab === 'charts')      window.activateChartsTab?.();
     if (tab.dataset.tab === 'backtest')    { refreshBtHistory(); refreshCacheStatus(); }
@@ -1269,10 +1269,20 @@ document.getElementById('btn-reset-all')?.addEventListener('click', async () => 
 });
 
 document.getElementById('btn-reset-stats')?.addEventListener('click', async () => {
-  if (!confirm('Azzera i contatori statistiche (win/loss/win-rate) e i log degli agenti?\nI trade storici vengono mantenuti.')) return;
-  await fetchJSON('/api/reset-stats', { method: 'POST' });
-  addActivity('↺ Statistiche e log agenti azzerati', 'warning');
+  if (!confirm('Archivia tutti i trade chiusi e azzera le statistiche?\n\nI trade vengono nascosti dalle stats ma restano nel DB.\nPuoi ripristinarli in qualsiasi momento con "Ripristina archiviati".')) return;
+  const res = await fetchJSON('/api/reset-stats', { method: 'POST' });
+  addActivity(`↺ Statistiche azzerate — ${res.archived || 0} trade archiviati`, 'warning');
   await refreshAll();
+  refreshArchivedCount();
+});
+
+document.getElementById('btn-unarchive')?.addEventListener('click', async () => {
+  const cnt = document.getElementById('archived-count')?.textContent || '?';
+  if (!confirm(`Ripristinare ${cnt} trade archiviati? Torneranno visibili nelle statistiche.`)) return;
+  const res = await fetchJSON('/api/trades/unarchive', { method: 'POST' });
+  addActivity(`♻️ ${res.restored} trade ripristinati dagli archivi`, 'info');
+  await refreshAll();
+  refreshArchivedCount();
 });
 
 document.getElementById('btn-reset-all-settings')?.addEventListener('click', async () => {
@@ -2159,6 +2169,17 @@ async function clearStrategyMemory() {
   const res = await fetch('/api/strategy-memory', { method: 'DELETE' }).then(r => r.json());
   addActivity(`🗑 Strategy memory cleared (${res.deleted} rows)`, 'warn');
   loadStrategyMemory();
+}
+
+async function refreshArchivedCount() {
+  try {
+    const res = await fetchJSON('/api/trades/archived-count');
+    const cnt = res.count || 0;
+    const el  = document.getElementById('archived-count');
+    const btn = document.getElementById('btn-unarchive');
+    if (el)  el.textContent = cnt;
+    if (btn) btn.style.display = cnt > 0 ? '' : 'none';
+  } catch(e) {}
 }
 
 // ── Backup / Restore Points ───────────────────────────────────────────────────

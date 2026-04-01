@@ -294,11 +294,13 @@ async def get_status():
 
 
 @app.get("/api/trades")
-async def list_trades(status: str | None = None, limit: int = 50):
+async def list_trades(status: str | None = None, limit: int = 50, include_archived: bool = False):
     async with async_session_factory() as s:
         q = select(Trade).order_by(desc(Trade.created_at)).limit(limit)
         if status:
             q = q.where(Trade.status == status.upper())
+        if not include_archived:
+            q = q.where((Trade.archived == False) | (Trade.archived == None))
         result = await s.execute(q)
         trades = result.scalars().all()
         return [_trade_to_dict(t) for t in trades]
@@ -870,16 +872,50 @@ async def backup_delete(filename: str):
 
 @app.post("/api/reset-stats")
 async def reset_stats():
-    """Reset only performance counters — trades and history are preserved."""
+    """Archive all closed trades so stats start from zero. Trades are preserved and restorable."""
     await _create_backup("reset_stats")
-    empty = '{"total_trades":0,"wins":0,"losses":0,"breakeven":0,"win_rate":0,"avg_rr":0}'
+    from sqlalchemy import update as _upd
     async with async_session_factory() as s:
+        # Archive all non-active trades (CLOSED, CANCELLED, PROPOSED)
+        res = await s.execute(
+            _upd(Trade)
+            .where(Trade.status != "ACTIVE")
+            .where((Trade.archived == False) | (Trade.archived == None))
+            .values(archived=True)
+        )
+        archived_count = res.rowcount
+        empty = '{"total_trades":0,"wins":0,"losses":0,"breakeven":0,"win_rate":0,"avg_rr":0}'
         await set_config("system_performance", empty, s)
         await s.execute(delete(AgentLog))
         await s.commit()
     if orchestrator:
         await orchestrator.broadcast({"type": "stats_reset"})
-    return {"status": "stats_reset"}
+    return {"status": "stats_reset", "archived": archived_count}
+
+
+@app.post("/api/trades/unarchive")
+async def unarchive_trades():
+    """Restore all archived trades back to visible state."""
+    from sqlalchemy import update as _upd
+    async with async_session_factory() as s:
+        res = await s.execute(
+            _upd(Trade).where(Trade.archived == True).values(archived=False)
+        )
+        count = res.rowcount
+        await s.commit()
+    if orchestrator:
+        await orchestrator.broadcast({"type": "stats_reset"})
+    return {"status": "unarchived", "restored": count}
+
+
+@app.get("/api/trades/archived-count")
+async def archived_count():
+    from sqlalchemy import func
+    async with async_session_factory() as s:
+        cnt = (await s.execute(
+            select(func.count()).select_from(Trade).where(Trade.archived == True)
+        )).scalar_one()
+    return {"count": cnt}
 
 
 @app.post("/api/reset-all")
