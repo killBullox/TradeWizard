@@ -1282,7 +1282,11 @@ async def get_analytics():
 @app.get("/api/performance")
 async def get_performance():
     async with async_session_factory() as s:
-        result = await s.execute(select(Trade).where(Trade.status == "CLOSED"))
+        result = await s.execute(
+            select(Trade)
+            .where(Trade.status == "CLOSED")
+            .where((Trade.archived == False) | (Trade.archived == None))
+        )
         closed = result.scalars().all()
 
     total  = len(closed)

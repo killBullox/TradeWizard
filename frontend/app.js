@@ -255,7 +255,7 @@ async function refreshTrades() {
     renderOpenTrades(trades.filter(t => t.status === 'ACTIVE'), livePnlMap);
     // PNL Calendar — trades tab (real trades use status=CLOSED, not result=WIN/LOSS)
     const calTrades = trades.filter(t => t.status === 'CLOSED' || t.result === 'WIN' || t.result === 'LOSS');
-    if (calTrades.length) _tradesCal.setTrades(calTrades);
+    _tradesCal.setTrades(calTrades);
     // Update stats
     const closed = trades.filter(t => t.status === 'CLOSED');
     const wins   = closed.filter(t => t.result === 'WIN').length;
@@ -449,7 +449,7 @@ function renderPerformance(perf) {
   }
   // PNL Calendar — feed from all closed trades in state
   const closed = (state.trades || []).filter(t => t.result === 'WIN' || t.result === 'LOSS');
-  if (closed.length) _perfCal.setTrades(closed);
+  _perfCal.setTrades(closed);
 }
 
 function renderConfig(cfg) {
