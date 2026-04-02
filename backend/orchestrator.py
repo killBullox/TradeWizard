@@ -154,8 +154,10 @@ class Orchestrator:
         _was_in_kz = False  # track kill zone transitions for post-KZ meetings
         while self._running:
             in_kz = await self._in_kill_zone()
+            now_str = datetime.now(ZoneInfo("Europe/Rome")).strftime("%H:%M")
             if in_kz:
                 _was_in_kz = True
+                await self.broadcast({"type": "heartbeat", "message": f"🔄 Ciclo analisi [{now_str}]"})
                 try:
                     await self._run_analysis_cycle()
                 except Exception as e:
@@ -168,8 +170,13 @@ class Orchestrator:
                     logger.info("Kill zone ended — scheduling KILLZONE_REVIEW meeting")
                     asyncio.create_task(self._run_killzone_review())
                 else:
+                    await self.broadcast({"type": "heartbeat", "message": f"😴 Fuori Kill Zone [{now_str}]"})
                     logger.info("Outside Kill Zone — skipping analysis cycle")
-            await asyncio.sleep(await self._get_interval())
+            try:
+                await asyncio.sleep(await self._get_interval())
+            except Exception as e:
+                logger.error(f"Analysis loop sleep error: {e}", exc_info=True)
+                await asyncio.sleep(900)  # fallback interval
 
     async def _run_killzone_review(self):
         """Post-killzone deep review: what happened during this session, what could have been better."""
@@ -202,6 +209,10 @@ class Orchestrator:
         for symbol in pairs:
             if not self._running:
                 break
+            # Refresh open_count before each symbol so a trade opened mid-cycle
+            # is counted and doesn't allow exceeding max_open_trades
+            async with async_session_factory() as s:
+                open_count = await self._count_open_trades(s)
             await self._analyze_and_trade(symbol, config, open_count)
             await asyncio.sleep(2)  # brief pause between pairs
 

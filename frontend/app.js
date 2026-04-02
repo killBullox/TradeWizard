@@ -135,6 +135,10 @@ function handleMessage(msg) {
       refreshConfig();
       break;
 
+    case 'heartbeat':
+      addActivity(msg.message, 'info');
+      break;
+
     case 'error':
       addActivity(`🚨 Error: ${msg.message}`, 'error');
       break;
