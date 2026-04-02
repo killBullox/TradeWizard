@@ -255,7 +255,14 @@ class Orchestrator:
             # Take highest-probability strategy
             strategy = max(strategies, key=lambda s: s.get("probability", 0))
 
-            # 4. Risk Manager (with memory context)
+            # 4. Hard limit check — enforced in code, not left to the LLM
+            max_open = int(config.get("max_open_trades", 3))
+            if open_count >= max_open:
+                await self.broadcast({"type": "trade_rejected", "symbol": symbol,
+                                      "reason": f"Max open trades reached ({open_count}/{max_open})", "agent": "RM"})
+                return
+
+            # 5. Risk Manager (with memory context)
             rm_result = await self.rm.evaluate(symbol, strategy, market_data, config, open_count, memory_context=memory_ctx)
             await self._log_agent("RM", "EVALUATION", f"Evaluated {symbol}", rm_result)
 
