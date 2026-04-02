@@ -2468,6 +2468,7 @@ function _renderAccountCard(a) {
   const removeBtn = !a.is_active
     ? `<button class="btn btn-danger btn-sm" onclick="removeBrokerAccount(${a.id}, '${escHtml(a.label)}')">✕ Rimuovi</button>`
     : '';
+  const testBtn = `<button class="btn btn-secondary btn-sm" onclick="testBrokerAccount(${a.id}, this)">🔗 Test</button>`;
   return `
     <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <div style="flex:1;min-width:160px">
@@ -2478,7 +2479,7 @@ function _renderAccountCard(a) {
         ${typeBadge} ${activeBadge} ${balance}
       </div>
       <div style="display:flex;gap:6px;margin-left:auto">
-        ${selectBtn} ${removeBtn}
+        ${testBtn} ${selectBtn} ${removeBtn}
       </div>
     </div>`;
 }
@@ -2495,7 +2496,6 @@ function hideAddAccountForm() {
 async function submitAddAccount() {
   const label    = document.getElementById('acc-label').value.trim();
   const login    = document.getElementById('acc-login').value.trim();
-  const password = document.getElementById('acc-password').value;
   const server   = document.getElementById('acc-server').value.trim() || 'XM.COM-MT5';
   const acc_type = document.getElementById('acc-type').value;
   if (!label || !login) { alert('Etichetta e Login sono obbligatori.'); return; }
@@ -2506,11 +2506,11 @@ async function submitAddAccount() {
   await fetch('/api/broker/accounts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ label, login, password, server, account_type: acc_type }),
+    body: JSON.stringify({ label, login, server, account_type: acc_type }),
   });
   hideAddAccountForm();
   // Clear form
-  ['acc-label','acc-login','acc-password'].forEach(id => document.getElementById(id).value = '');
+  ['acc-label','acc-login'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('acc-server').value = 'XM.COM-MT5';
   loadBrokerAccounts();
 }
@@ -2534,6 +2534,26 @@ async function activateBrokerAccount(id) {
   }
   showToast('success', 'Account attivato. Bridge MT5 in riavvio...');
   loadBrokerAccounts();
+}
+
+async function testBrokerAccount(id, btn) {
+  const orig = btn.textContent;
+  btn.textContent = '⏳';
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/broker/accounts/${id}/test`);
+    const data = await r.json();
+    if (data.ok) {
+      showToast('success', `✓ Connesso — Login: ${data.login}, Balance: $${parseFloat(data.balance||0).toLocaleString('it-IT',{minimumFractionDigits:2})}`);
+    } else {
+      showToast('error', `✗ Test fallito: ${data.error}`);
+    }
+  } catch(e) {
+    showToast('error', `Errore: ${e.message}`);
+  } finally {
+    btn.textContent = orig;
+    btn.disabled = false;
+  }
 }
 
 async function removeBrokerAccount(id, label) {

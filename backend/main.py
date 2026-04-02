@@ -1096,9 +1096,8 @@ async def activate_broker_account(account_id: int):
         await set_config("mt5_server",   target.server,       s)
         await s.commit()
     # Restart bridge with new credentials
-    os.environ["MT5_LOGIN"]    = target.login
-    os.environ["MT5_PASSWORD"] = target.password
-    os.environ["MT5_SERVER"]   = target.server
+    os.environ["MT5_LOGIN"]  = target.login
+    os.environ["MT5_SERVER"] = target.server
     global _bridge_proc
     if _bridge_proc and _bridge_proc.poll() is None:
         try:
@@ -1109,6 +1108,33 @@ async def activate_broker_account(account_id: int):
     _bridge_proc = None
     _start_mt5_bridge()
     return {"status": "activated", "account_id": account_id}
+
+
+@app.get("/api/broker/accounts/{account_id}/test")
+async def test_broker_account(account_id: int):
+    """Test connectivity for a specific account by querying the bridge."""
+    async with async_session_factory() as s:
+        acc = await s.get(MT5Account, account_id)
+        bridge_url = await get_config("mt5_bridge_url", s) or ""
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if not bridge_url:
+        return {"ok": False, "error": "MT5 bridge not configured"}
+    # If this is the active account, just query the bridge directly
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{bridge_url.rstrip('/')}/account")
+            if r.status_code == 200:
+                data = r.json()
+                if str(data.get("login")) == str(acc.login):
+                    return {"ok": True, "login": data.get("login"), "balance": data.get("balance"), "server": data.get("server")}
+                else:
+                    return {"ok": False, "error": f"Bridge connesso a login {data.get('login')}, non {acc.login}. Attiva prima questo account."}
+            else:
+                return {"ok": False, "error": f"Bridge risposta {r.status_code}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 @app.delete("/api/broker/accounts/{account_id}")
