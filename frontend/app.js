@@ -317,7 +317,7 @@ function renderTradesTable(trades) {
     const isBE  = entry > 0 && sl > 0 && Math.abs(sl - entry) <= pip * 2;
     const slStyle = isBE ? 'color:#86efac;font-weight:700' : '';
     const slLabel = t.stop_loss != null
-      ? `<span style="${slStyle}" title="${isBE ? 'Breakeven' : ''}">${t.stop_loss}${isBE ? ' <sup style="font-size:0.65em;background:#166534;color:#86efac;padding:1px 3px;border-radius:3px">BE</sup>' : ''}</span>`
+      ? `<span style="${slStyle}">${t.stop_loss}${isBE ? '<span style="font-size:0.68em;color:#86efac;margin-left:3px">BE</span>' : ''}</span>`
       : '-';
 
     const tp1 = t.take_profit_1;
