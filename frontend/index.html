@@ -125,6 +125,7 @@
         <button class="tab" data-tab="news">📰 News</button>
         <button class="tab" data-tab="settings">⚙️ Settings</button>
         <button class="tab" data-tab="learning">🧠 Learning</button>
+        <button class="tab" data-tab="broker">🔌 Broker</button>
         <div id="world-clock" style="margin-left:auto;padding:0 12px;display:flex;flex-direction:column;justify-content:center;align-items:flex-end;line-height:1.3;border-left:1px solid var(--border);min-width:130px">
           <div style="font-size:1.04rem;font-weight:700;color:var(--text-primary)" id="clock-it"></div>
           <div style="font-size:0.85rem;color:var(--text-muted)">🇮🇹 Italy</div>
@@ -380,19 +381,20 @@
       <!-- Paper Trading Tab -->
       <div class="tab-content" id="tab-paper">
 
-        <!-- Toggle + Account Summary -->
+        <!-- Account Selector -->
         <div class="card paper-header-card">
-          <div class="paper-toggle-row">
-            <div>
-              <div class="paper-mode-label">Paper Trading Mode</div>
-              <div class="paper-mode-desc">Run the full ICT pipeline with virtual money — no real orders sent</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+            <h3 style="margin:0">🏦 Trading Account</h3>
+            <div style="display:flex;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+              <button id="btn-mode-paper" class="btn btn-sm" onclick="setTradingMode('paper')"
+                style="border-radius:0;border:none;padding:6px 18px">📄 Paper</button>
+              <button id="btn-mode-mt5" class="btn btn-sm" onclick="setTradingMode('mt5')"
+                style="border-radius:0;border:none;padding:6px 18px;border-left:1px solid var(--border)">📊 MT5 Live</button>
             </div>
-            <label class="toggle-switch">
-              <input type="checkbox" id="paper-toggle" />
-              <span class="toggle-slider"></span>
-            </label>
           </div>
-          <div class="paper-balance-row" id="paper-balance-row">
+
+          <!-- Paper Account Panel -->
+          <div id="panel-paper" style="margin-top:14px">
             <div class="paper-account-stats" id="paper-account-stats">
               <div class="stat-card"><div class="stat-value" id="paper-balance">$10,000</div><div class="stat-label">Balance</div></div>
               <div class="stat-card"><div class="stat-value" id="paper-equity">$10,000</div><div class="stat-label">Equity</div></div>
@@ -400,10 +402,30 @@
               <div class="stat-card"><div class="stat-value" id="paper-return">0.00%</div><div class="stat-label">Return</div></div>
               <div class="stat-card"><div class="stat-value" id="paper-open-pos">0</div><div class="stat-label">Open Positions</div></div>
             </div>
-            <div class="paper-actions">
+            <div class="paper-actions" style="margin-top:10px">
               <input type="number" id="paper-reset-balance" class="form-input" value="5000" min="1000" style="width:130px" />
               <button class="btn btn-warning btn-sm" id="btn-paper-reset">↺ Reset Account</button>
               <button class="btn btn-danger btn-sm" id="btn-reset-all" style="margin-left:8px">🗑 Reset Totale</button>
+            </div>
+          </div>
+
+          <!-- MT5 Live Account Panel -->
+          <div id="panel-mt5" style="margin-top:14px;display:none">
+            <div id="mt5-account-stats" class="paper-account-stats">
+              <div class="stat-card"><div class="stat-value" id="mt5-balance">—</div><div class="stat-label">Balance</div></div>
+              <div class="stat-card"><div class="stat-value" id="mt5-equity">—</div><div class="stat-label">Equity</div></div>
+              <div class="stat-card"><div class="stat-value" id="mt5-margin-free">—</div><div class="stat-label">Margin Free</div></div>
+              <div class="stat-card"><div class="stat-value" id="mt5-leverage">—</div><div class="stat-label">Leverage</div></div>
+              <div class="stat-card"><div class="stat-value" id="mt5-currency">—</div><div class="stat-label">Currency</div></div>
+            </div>
+            <div style="margin-top:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+              <span style="font-size:0.8rem;color:var(--text-muted)">Account: <strong id="mt5-login">—</strong></span>
+              <span style="font-size:0.8rem;color:var(--text-muted)">Server: <strong id="mt5-server-label">—</strong></span>
+              <button class="btn btn-secondary btn-sm" onclick="refreshMT5Account()">🔄 Refresh</button>
+              <div id="mt5-account-error" style="color:var(--danger);font-size:0.8rem;display:none"></div>
+            </div>
+            <div style="margin-top:10px;padding:8px 12px;background:var(--bg-input);border-radius:6px;border-left:3px solid var(--danger);font-size:0.8rem;color:var(--text-muted)">
+              ⚠️ <strong>Modalità Live:</strong> i trade verranno eseguiti sul conto MT5 reale. Configura le credenziali MT5 in Settings.
             </div>
           </div>
         </div>
@@ -801,7 +823,76 @@
           </div>
         </div>
       </div>
+
+      <!-- ===================== BROKER TAB ===================== -->
+      <div class="tab-content" id="tab-broker">
+
+        <!-- Account list -->
+        <div class="card" id="broker-accounts-card">
+          <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+            <h3>🔌 Account MT5</h3>
+            <button class="btn btn-primary btn-sm" onclick="showAddAccountForm()">+ Aggiungi account</button>
+          </div>
+
+          <!-- Inline add-account form (hidden by default) -->
+          <div id="add-account-form" style="display:none;background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+            <h4 style="margin:0 0 12px;color:var(--text-primary)">Nuovo account MT5</h4>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
+              <div>
+                <label style="font-size:0.78rem;color:var(--text-muted);display:block;margin-bottom:4px">Etichetta</label>
+                <input type="text" id="acc-label" placeholder="es. XM Demo" class="form-input" style="width:100%;box-sizing:border-box">
+              </div>
+              <div>
+                <label style="font-size:0.78rem;color:var(--text-muted);display:block;margin-bottom:4px">Login (numero conto)</label>
+                <input type="number" id="acc-login" placeholder="12345678" class="form-input" style="width:100%;box-sizing:border-box">
+              </div>
+              <div>
+                <label style="font-size:0.78rem;color:var(--text-muted);display:block;margin-bottom:4px">Password</label>
+                <input type="password" id="acc-password" placeholder="password" class="form-input" style="width:100%;box-sizing:border-box">
+              </div>
+              <div>
+                <label style="font-size:0.78rem;color:var(--text-muted);display:block;margin-bottom:4px">Server</label>
+                <input type="text" id="acc-server" placeholder="XM.COM-MT5" value="XM.COM-MT5" class="form-input" style="width:100%;box-sizing:border-box">
+              </div>
+              <div>
+                <label style="font-size:0.78rem;color:var(--text-muted);display:block;margin-bottom:4px">Tipo</label>
+                <select id="acc-type" class="form-input" style="width:100%;box-sizing:border-box">
+                  <option value="demo">Demo</option>
+                  <option value="real">Real</option>
+                </select>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-primary btn-sm" onclick="submitAddAccount()">✓ Salva</button>
+              <button class="btn btn-secondary btn-sm" onclick="hideAddAccountForm()">✕ Annulla</button>
+            </div>
+          </div>
+
+          <div id="broker-account-list" style="display:flex;flex-direction:column;gap:10px">
+            <div style="color:var(--text-muted);font-style:italic">Caricamento...</div>
+          </div>
+        </div>
+
+      </div>
+      <!-- ===================== END BROKER TAB ===================== -->
+
     </main>
+
+    <!-- PIN Modal -->
+    <div id="pin-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;align-items:center;justify-content:center">
+      <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:12px;padding:28px;width:360px;max-width:90vw">
+        <h3 id="pin-modal-title" style="margin:0 0 8px;color:var(--text-primary)">Conferma operazione</h3>
+        <p id="pin-modal-desc" style="margin:0 0 16px;color:var(--text-muted);font-size:0.85rem"></p>
+        <input type="password" id="pin-modal-input" placeholder="PIN" class="form-input"
+          style="width:100%;box-sizing:border-box;margin-bottom:8px;font-size:1.1rem;letter-spacing:4px"
+          onkeydown="if(event.key==='Enter')confirmPinModal()">
+        <div id="pin-modal-error" style="color:#f87171;font-size:0.8rem;margin-bottom:10px;display:none">PIN errato. Riprova.</div>
+        <div style="display:flex;gap:10px;justify-content:flex-end">
+          <button class="btn btn-secondary btn-sm" onclick="closePinModal()">Annulla</button>
+          <button class="btn btn-primary btn-sm" onclick="confirmPinModal()">Conferma</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Right Panel: Agent Communication Log -->
     <aside class="panel comms-panel">

@@ -29,7 +29,7 @@ load_dotenv()
 from models.database import (
     async_session_factory, init_db, Trade, AgentLog,
     JournalEntry, Meeting, SystemConfig, set_config, get_config,
-    BacktestRun, OhlcvBar, StrategyMemory,
+    BacktestRun, OhlcvBar, StrategyMemory, MT5Account,
 )
 from orchestrator import Orchestrator
 from services.forex_data import fetch_ohlcv
@@ -108,13 +108,21 @@ def _start_mt5_bridge():
 async def lifespan(app: FastAPI):
     global orchestrator
     await init_db()
-    _start_mt5_bridge()
     # Set default MT5 bridge URL if not already configured
     async with async_session_factory() as s:
         existing = await get_config("mt5_bridge_url", s)
         if not existing:
             await set_config("mt5_bridge_url", "http://localhost:5002", s)
             await s.commit()
+        mt5_login    = await get_config("mt5_login",    s) or ""
+        mt5_password = await get_config("mt5_password", s) or ""
+        mt5_server   = await get_config("mt5_server",   s) or ""
+    # Pass credentials to bridge via env vars
+    if mt5_login:
+        os.environ.setdefault("MT5_LOGIN",    mt5_login)
+        os.environ.setdefault("MT5_PASSWORD", mt5_password)
+        os.environ.setdefault("MT5_SERVER",   mt5_server)
+    _start_mt5_bridge()
     orchestrator = Orchestrator(broadcast_fn=manager.broadcast)
     await orchestrator.start()
     logger.info("TradeWizard system started ✅")
@@ -1021,6 +1029,113 @@ async def mt5_health():
         return {"status": "not_configured"}
     from services.mt5_data import check_bridge
     return await check_bridge(bridge_url)
+
+
+@app.get("/api/mt5/account")
+async def mt5_account():
+    """Fetch live MT5 account info from the bridge."""
+    async with async_session_factory() as s:
+        bridge_url = await get_config("mt5_bridge_url", s) or ""
+    if not bridge_url:
+        return {"error": "MT5 bridge not configured"}
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{bridge_url.rstrip('/')}/account")
+            r.raise_for_status()
+            return r.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/broker/accounts")
+async def list_broker_accounts():
+    """List all MT5 accounts."""
+    async with async_session_factory() as s:
+        result = await s.execute(select(MT5Account).order_by(MT5Account.created_at))
+        accounts = result.scalars().all()
+    return [_mt5acc_to_dict(a) for a in accounts]
+
+
+@app.post("/api/broker/accounts")
+async def add_broker_account(payload: dict):
+    """Add a new MT5 account."""
+    async with async_session_factory() as s:
+        acc = MT5Account(
+            label=payload.get("label", ""),
+            login=str(payload.get("login", "")),
+            password=payload.get("password", ""),
+            server=payload.get("server", ""),
+            account_type=payload.get("account_type", "demo"),
+            is_active=False,
+        )
+        s.add(acc)
+        await s.commit()
+        await s.refresh(acc)
+        return _mt5acc_to_dict(acc)
+
+
+@app.post("/api/broker/accounts/{account_id}/activate")
+async def activate_broker_account(account_id: int):
+    """Set a specific account as active; deactivate all others."""
+    async with async_session_factory() as s:
+        result = await s.execute(select(MT5Account))
+        all_accs = result.scalars().all()
+        target = None
+        for a in all_accs:
+            if a.id == account_id:
+                a.is_active = True
+                target = a
+            else:
+                a.is_active = False
+        if not target:
+            raise HTTPException(404, "Account not found")
+        # Update system config with new credentials
+        await set_config("mt5_login",    target.login,        s)
+        await set_config("mt5_password", target.password,     s)
+        await set_config("mt5_server",   target.server,       s)
+        await s.commit()
+    # Restart bridge with new credentials
+    os.environ["MT5_LOGIN"]    = target.login
+    os.environ["MT5_PASSWORD"] = target.password
+    os.environ["MT5_SERVER"]   = target.server
+    global _bridge_proc
+    if _bridge_proc and _bridge_proc.poll() is None:
+        try:
+            _bridge_proc.terminate()
+            _bridge_proc.wait(timeout=3)
+        except Exception:
+            pass
+    _bridge_proc = None
+    _start_mt5_bridge()
+    return {"status": "activated", "account_id": account_id}
+
+
+@app.delete("/api/broker/accounts/{account_id}")
+async def remove_broker_account(account_id: int):
+    """Delete an MT5 account (cannot delete active account)."""
+    async with async_session_factory() as s:
+        acc = await s.get(MT5Account, account_id)
+        if not acc:
+            raise HTTPException(404, "Account not found")
+        if acc.is_active:
+            raise HTTPException(400, "Cannot remove the active account")
+        await s.delete(acc)
+        await s.commit()
+    return {"status": "removed", "account_id": account_id}
+
+
+def _mt5acc_to_dict(a: MT5Account) -> dict:
+    return {
+        "id":           a.id,
+        "label":        a.label,
+        "login":        a.login,
+        "server":       a.server,
+        "account_type": a.account_type,
+        "is_active":    a.is_active,
+        "balance":      a.balance,
+        "created_at":   a.created_at.isoformat() if a.created_at else None,
+    }
 
 
 @app.get("/api/backtest")

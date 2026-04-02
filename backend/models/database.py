@@ -168,6 +168,21 @@ class BacktestRun(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class MT5Account(Base):
+    """Stored MT5 broker accounts. One can be active at a time."""
+    __tablename__ = "mt5_accounts"
+
+    id         = Column(Integer, primary_key=True, index=True)
+    label      = Column(String(100), nullable=False)          # user-defined name
+    login      = Column(String(50),  nullable=False)          # MT5 account number
+    password   = Column(String(200), nullable=False, default="")
+    server     = Column(String(100), nullable=False)          # broker server
+    account_type = Column(String(10), default="demo")         # "demo" | "real"
+    is_active  = Column(Boolean, default=False)
+    balance    = Column(Float, nullable=True)                  # last fetched balance
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class OhlcvBar(Base):
     """Local cache of OHLCV bars to avoid repeated API calls during backtesting."""
     __tablename__ = "ohlcv_bars"
@@ -279,9 +294,18 @@ async def init_db():
                 session.add(SystemConfig(key="max_risk_usd", value="250", description="Max loss per trade in USD (0 = use risk_percent)"))
                 await session.commit()
             elif not row.value or float(row.value or 0) == 0:
-                # Was saved as 0/empty — reset to the intended default of $250
                 row.value = "250"
                 await session.commit()
+            # Ensure MT5 credential keys exist (added in later version)
+            for key, desc in [
+                ("mt5_login",    "MT5 account number (login)"),
+                ("mt5_password", "MT5 account password"),
+                ("mt5_server",   "MT5 broker server name (e.g. ICMarkets-Demo)"),
+            ]:
+                res = await session.execute(select(SystemConfig).where(SystemConfig.key == key))
+                if not res.scalar_one_or_none():
+                    session.add(SystemConfig(key=key, value="", description=desc))
+            await session.commit()
 
 
 async def get_config(key: str, session: AsyncSession) -> Optional[str]:

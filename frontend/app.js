@@ -848,9 +848,10 @@ document.querySelectorAll('.tab').forEach(tab => {
     if (tab.dataset.tab === 'news')        refreshNews();
     if (tab.dataset.tab === 'charts')      window.activateChartsTab?.();
     if (tab.dataset.tab === 'backtest')    { refreshBtHistory(); refreshCacheStatus(); }
-    if (tab.dataset.tab === 'paper')       refreshPaper();
+    if (tab.dataset.tab === 'paper')       { refreshPaper(); }
     if (tab.dataset.tab === 'analytics')  refreshAnalytics();
     if (tab.dataset.tab === 'learning')   loadStrategyMemory();
+    if (tab.dataset.tab === 'broker')     loadBrokerAccounts();
   });
 });
 
@@ -1201,15 +1202,66 @@ async function refreshPaper() {
     renderPaperPositions(positions);
     const trades = await fetchJSON('/api/paper/trades?limit=50');
     renderPaperTrades(trades);
-    // Sync toggle
+    // Sync mode buttons
     const toggle = document.getElementById('paper-toggle');
     if (toggle) toggle.checked = !!status.paper_mode;
+    _syncModeButtons(!!status.paper_mode);
     // Equity curve from summary
     if (status.equity_curve && status.equity_curve.length > 1) {
       paperEquityData = status.equity_curve;
       renderPaperEquity(paperEquityData);
     }
   } catch (e) { console.error('refreshPaper', e); }
+}
+
+function _syncModeButtons(isPaper) {
+  const btnP  = document.getElementById('btn-mode-paper');
+  const btnM  = document.getElementById('btn-mode-mt5');
+  const panelP = document.getElementById('panel-paper');
+  const panelM = document.getElementById('panel-mt5');
+  if (!btnP) return;
+  if (isPaper) {
+    btnP.className  = 'btn btn-primary btn-sm';
+    btnM.className  = 'btn btn-secondary btn-sm';
+    panelP.style.display = '';
+    panelM.style.display = 'none';
+  } else {
+    btnP.className  = 'btn btn-secondary btn-sm';
+    btnM.className  = 'btn btn-primary btn-sm';
+    panelP.style.display = 'none';
+    panelM.style.display = '';
+    refreshMT5Account();
+  }
+  // keep inline styles for border-radius/border from HTML
+  btnP.style.cssText += ';border-radius:0;border:none;padding:6px 18px';
+  btnM.style.cssText += ';border-radius:0;border:none;padding:6px 18px;border-left:1px solid var(--border)';
+}
+
+async function setTradingMode(mode) {
+  const isPaper = mode === 'paper';
+  await fetchJSON(isPaper ? '/api/paper/enable' : '/api/paper/disable', { method: 'POST', body: JSON.stringify({}) });
+  _syncModeButtons(isPaper);
+  addActivity(isPaper ? '📄 Modalità Paper attivata' : '📊 Modalità MT5 Live attivata', 'info');
+  if (!isPaper) refreshMT5Account();
+}
+
+async function refreshMT5Account() {
+  const errEl = document.getElementById('mt5-account-error');
+  try {
+    const info = await fetchJSON('/api/mt5/account');
+    if (info.error) throw new Error(info.error);
+    const fmt = v => v != null ? '$' + Number(v).toLocaleString('it-IT', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—';
+    setEl('mt5-balance',      fmt(info.balance));
+    setEl('mt5-equity',       fmt(info.equity));
+    setEl('mt5-margin-free',  fmt(info.margin_free));
+    setEl('mt5-leverage',     info.leverage ? '1:' + info.leverage : '—');
+    setEl('mt5-currency',     info.currency || '—');
+    setEl('mt5-login',        info.login || '—');
+    setEl('mt5-server-label', info.server || (info.simulated ? 'Simulation' : '—'));
+    if (errEl) errEl.style.display = 'none';
+  } catch(e) {
+    if (errEl) { errEl.textContent = 'MT5 non raggiungibile: ' + e.message; errEl.style.display = ''; }
+  }
 }
 
 function renderPaperSummary(s) {
@@ -2338,6 +2390,164 @@ async function deleteBackup(filename) {
   if (!confirm(`Eliminare il backup "${filename}"?\nQuesta azione non può essere annullata.`)) return;
   await fetch(`/api/backup/${encodeURIComponent(filename)}`, { method: 'DELETE' });
   loadBackups();
+}
+
+// ── Toast Notification ────────────────────────────────────────────────────────
+function showToast(type, msg) {
+  const el = document.createElement('div');
+  const bg = type === 'error' ? '#ef4444' : type === 'success' ? '#22c55e' : '#3b82f6';
+  el.style.cssText = `position:fixed;bottom:24px;right:24px;z-index:99999;background:${bg};color:#fff;padding:12px 18px;border-radius:8px;font-size:0.9rem;box-shadow:0 4px 12px rgba(0,0,0,0.4);max-width:340px;word-break:break-word;transition:opacity 0.4s`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 3000);
+}
+
+// ── Broker / MT5 Account Management ─────────────────────────────────────────
+
+let _pinResolve = null;
+
+function openPinModal(title, desc) {
+  return new Promise(resolve => {
+    _pinResolve = resolve;
+    document.getElementById('pin-modal-title').textContent = title;
+    document.getElementById('pin-modal-desc').textContent  = desc;
+    document.getElementById('pin-modal-input').value       = '';
+    document.getElementById('pin-modal-error').style.display = 'none';
+    const modal = document.getElementById('pin-modal');
+    modal.style.display = 'flex';
+    setTimeout(() => document.getElementById('pin-modal-input').focus(), 50);
+  });
+}
+
+function closePinModal() {
+  document.getElementById('pin-modal').style.display = 'none';
+  if (_pinResolve) { _pinResolve(false); _pinResolve = null; }
+}
+
+function confirmPinModal() {
+  const val = document.getElementById('pin-modal-input').value;
+  if (val !== '241287') {
+    document.getElementById('pin-modal-error').style.display = 'block';
+    document.getElementById('pin-modal-input').value = '';
+    document.getElementById('pin-modal-input').focus();
+    return;
+  }
+  document.getElementById('pin-modal').style.display = 'none';
+  if (_pinResolve) { _pinResolve(true); _pinResolve = null; }
+}
+
+async function loadBrokerAccounts() {
+  const list = document.getElementById('broker-account-list');
+  if (!list) return;
+  try {
+    const r = await fetch('/api/broker/accounts');
+    const accounts = await r.json();
+    if (!accounts.length) {
+      list.innerHTML = '<div style="color:var(--text-muted);font-style:italic">Nessun account configurato. Aggiungi il primo account con il pulsante sopra.</div>';
+      return;
+    }
+    list.innerHTML = accounts.map(a => _renderAccountCard(a)).join('');
+  } catch(e) {
+    list.innerHTML = `<div style="color:#f87171">Errore caricamento: ${e.message}</div>`;
+  }
+}
+
+function _renderAccountCard(a) {
+  const typeBadge = a.account_type === 'real'
+    ? '<span style="background:#d97706;color:#fff;padding:2px 7px;border-radius:4px;font-size:0.72rem;font-weight:600">REAL</span>'
+    : '<span style="background:#3b82f6;color:#fff;padding:2px 7px;border-radius:4px;font-size:0.72rem;font-weight:600">DEMO</span>';
+  const activeBadge = a.is_active
+    ? '<span style="background:#22c55e;color:#fff;padding:2px 7px;border-radius:4px;font-size:0.72rem;font-weight:600">ATTIVO</span>'
+    : '';
+  const balance = a.is_active && a.balance != null
+    ? `<span style="color:var(--text-muted);font-size:0.82rem">Balance: <strong style="color:var(--text-primary)">$${parseFloat(a.balance).toLocaleString('it-IT',{minimumFractionDigits:2})}</strong></span>`
+    : '';
+  const selectBtn = !a.is_active
+    ? `<button class="btn btn-primary btn-sm" onclick="activateBrokerAccount(${a.id})">▶ Seleziona</button>`
+    : '';
+  const removeBtn = !a.is_active
+    ? `<button class="btn btn-danger btn-sm" onclick="removeBrokerAccount(${a.id}, '${escHtml(a.label)}')">✕ Rimuovi</button>`
+    : '';
+  return `
+    <div style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:160px">
+        <div style="font-weight:600;color:var(--text-primary);margin-bottom:4px">${escHtml(a.label)}</div>
+        <div style="font-size:0.8rem;color:var(--text-muted)">Login: ${escHtml(a.login)} &nbsp;·&nbsp; ${escHtml(a.server)}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        ${typeBadge} ${activeBadge} ${balance}
+      </div>
+      <div style="display:flex;gap:6px;margin-left:auto">
+        ${selectBtn} ${removeBtn}
+      </div>
+    </div>`;
+}
+
+function showAddAccountForm() {
+  document.getElementById('add-account-form').style.display = 'block';
+  document.getElementById('acc-label').focus();
+}
+
+function hideAddAccountForm() {
+  document.getElementById('add-account-form').style.display = 'none';
+}
+
+async function submitAddAccount() {
+  const label    = document.getElementById('acc-label').value.trim();
+  const login    = document.getElementById('acc-login').value.trim();
+  const password = document.getElementById('acc-password').value;
+  const server   = document.getElementById('acc-server').value.trim() || 'XM.COM-MT5';
+  const acc_type = document.getElementById('acc-type').value;
+  if (!label || !login) { alert('Etichetta e Login sono obbligatori.'); return; }
+
+  const ok = await openPinModal('Conferma operazione', `Aggiungere account "${label}" (${acc_type.toUpperCase()}, login ${login})?`);
+  if (!ok) return;
+
+  await fetch('/api/broker/accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label, login, password, server, account_type: acc_type }),
+  });
+  hideAddAccountForm();
+  // Clear form
+  ['acc-label','acc-login','acc-password'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('acc-server').value = 'XM.COM-MT5';
+  loadBrokerAccounts();
+}
+
+async function activateBrokerAccount(id) {
+  // Find account label for description
+  const list = document.getElementById('broker-account-list');
+  const btn = list.querySelector(`button[onclick="activateBrokerAccount(${id})"]`);
+  const card = btn?.closest('div[style]');
+  const labelEl = card?.querySelector('[style*="font-weight:600"]');
+  const label = labelEl?.textContent || `#${id}`;
+
+  const ok = await openPinModal('Conferma operazione', `Attivare account "${label}"? Il bridge MT5 verrà riavviato con le nuove credenziali.`);
+  if (!ok) return;
+
+  const r = await fetch(`/api/broker/accounts/${id}/activate`, { method: 'POST' });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    showToast('error', err.detail || 'Errore attivazione account');
+    return;
+  }
+  showToast('success', 'Account attivato. Bridge MT5 in riavvio...');
+  loadBrokerAccounts();
+}
+
+async function removeBrokerAccount(id, label) {
+  const ok = await openPinModal('Conferma eliminazione', `Rimuovere definitivamente l'account "${label}"?`);
+  if (!ok) return;
+
+  const r = await fetch(`/api/broker/accounts/${id}`, { method: 'DELETE' });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    showToast('error', err.detail || 'Errore rimozione account');
+    return;
+  }
+  showToast('success', `Account "${label}" rimosso.`);
+  loadBrokerAccounts();
 }
 
 // ── World Clock ───────────────────────────────────────────────────────────────
