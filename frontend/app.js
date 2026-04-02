@@ -231,6 +231,13 @@ function addComm(agent, message, isThinking = false) {
   while (feed.children.length > 200) feed.removeChild(feed.firstChild);
 }
 
+function fmtPrice(v) {
+  if (v == null) return '-';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '-';
+  return n.toFixed(5);
+}
+
 function escHtml(str) {
   return String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
@@ -317,7 +324,7 @@ function renderTradesTable(trades) {
     const isBE  = entry > 0 && sl > 0 && Math.abs(sl - entry) <= pip * 2;
     const slStyle = isBE ? 'color:#86efac;font-weight:700' : '';
     const slLabel = t.stop_loss != null
-      ? `<span style="${slStyle}">${t.stop_loss}${isBE ? '<span style="font-size:0.68em;color:#86efac;margin-left:3px">BE</span>' : ''}</span>`
+      ? `<span style="${slStyle}">${fmtPrice(t.stop_loss)}${isBE ? '<span style="font-size:0.68em;color:#86efac;margin-left:3px">BE</span>' : ''}</span>`
       : '-';
 
     const tp1 = t.take_profit_1;
@@ -331,7 +338,7 @@ function renderTradesTable(trades) {
     const tp2hit = hits >= 2 || (tp2 && cp > 0 && (isBuy ? cp >= tp2 : cp <= tp2));
     const tp3hit = hits >= 3 || (tp3 && cp > 0 && (isBuy ? cp >= tp3 : cp <= tp3));
     const tpFmt = (val, hit) => val != null
-      ? `<span style="${hit ? 'color:#4ade80;font-weight:600' : ''}">${val}${hit ? ' ✓' : ''}</span>`
+      ? `<span style="${hit ? 'color:#4ade80;font-weight:600' : ''}">${fmtPrice(val)}${hit ? ' ✓' : ''}</span>`
       : '<span style="color:var(--text-muted)">-</span>';
 
     return `
@@ -341,9 +348,9 @@ function renderTradesTable(trades) {
       <td class="${t.direction==='BUY'?'text-win':'text-loss'}">${t.direction}</td>
       <td><span class="badge">${t.ict_setup||'-'}</span></td>
       <td style="font-size:0.78rem;color:var(--text-secondary)">${fmtDate(t.open_time)}</td>
-      <td>${t.entry_price ?? '-'}</td>
+      <td>${fmtPrice(t.entry_price)}</td>
       <td style="font-size:0.78rem;color:var(--text-secondary)">${t.close_time ? fmtDate(t.close_time) : '-'}</td>
-      <td>${t.close_price ?? '-'}</td>
+      <td>${fmtPrice(t.close_price)}</td>
       <td>${slLabel}</td>
       <td>${tpFmt(tp1, tp1hit)}</td>
       <td>${tpFmt(tp2, tp2hit)}</td>
