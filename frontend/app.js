@@ -310,7 +310,28 @@ function renderTradesTable(trades) {
   if (!tbody) return;
   const filter = document.getElementById('trades-filter')?.value || '';
   const filtered = filter ? trades.filter(t => t.status === filter) : trades;
-  tbody.innerHTML = filtered.map(t => `
+  tbody.innerHTML = filtered.map(t => {
+    const entry = parseFloat(t.entry_price) || 0;
+    const sl    = parseFloat(t.stop_loss)   || 0;
+    const pip   = t.symbol?.includes('JPY') ? 0.01 : (["XAUUSD","XAGUSD","US30","NAS100","US500"].includes(t.symbol) ? 1.0 : 0.0001);
+    const isBE  = entry > 0 && sl > 0 && Math.abs(sl - entry) <= pip * 2;
+    const slStyle = isBE ? 'color:#86efac;font-weight:700' : '';
+    const slLabel = t.stop_loss != null ? `<span style="${slStyle}" title="${isBE ? 'Breakeven' : ''}">${t.stop_loss}${isBE ? ' 🟢' : ''}</span>` : '-';
+
+    const tp1 = t.take_profit_1;
+    const tp2 = t.take_profit_2;
+    const tp3 = t.take_profit_3;
+    // For closed trades, show TP as green if close_price reached it
+    const cp = parseFloat(t.close_price) || 0;
+    const isBuy = t.direction === 'BUY';
+    const tp1hit = tp1 && cp > 0 && (isBuy ? cp >= tp1 : cp <= tp1);
+    const tp2hit = tp2 && cp > 0 && (isBuy ? cp >= tp2 : cp <= tp2);
+    const tp3hit = tp3 && cp > 0 && (isBuy ? cp >= tp3 : cp <= tp3);
+    const tpFmt = (val, hit) => val != null
+      ? `<span style="${hit ? 'color:#4ade80;font-weight:600' : ''}">${val}${hit ? ' ✓' : ''}</span>`
+      : '<span style="color:var(--text-muted)">-</span>';
+
+    return `
     <tr>
       <td>#${t.id}</td>
       <td><strong>${t.symbol}</strong></td>
@@ -320,8 +341,10 @@ function renderTradesTable(trades) {
       <td>${t.entry_price ?? '-'}</td>
       <td style="font-size:0.78rem;color:var(--text-secondary)">${t.close_time ? fmtDate(t.close_time) : '-'}</td>
       <td>${t.close_price ?? '-'}</td>
-      <td>${t.stop_loss ?? '-'}</td>
-      <td>${t.take_profit_1 ?? '-'}</td>
+      <td>${slLabel}</td>
+      <td>${tpFmt(tp1, tp1hit)}</td>
+      <td>${tpFmt(tp2, tp2hit)}</td>
+      <td>${tpFmt(tp3, tp3hit)}</td>
       <td>${t.lot_size ?? '-'}</td>
       <td><span class="badge ${t.status==='ACTIVE'?'badge-active':t.result==='WIN'?'badge-win':t.result==='LOSS'?'badge-loss':''}">${t.status}</span></td>
       <td class="${(t.pnl_usd||0)>0?'text-win':(t.pnl_usd||0)<0?'text-loss':''}">${t.pnl_usd!=null ? '$'+t.pnl_usd.toFixed(2) : '-'}</td>
@@ -329,8 +352,8 @@ function renderTradesTable(trades) {
         ${t.status==='ACTIVE' ? `<button class="btn btn-danger btn-sm" onclick="closeTrade(${t.id})">Close</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="viewTrade(${t.id})">View</button>
       </td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
 }
 
 function renderOpenTrades(trades, livePnlMap = {}) {
@@ -346,6 +369,49 @@ function renderOpenTrades(trades, livePnlMap = {}) {
     const pips = live.pnl_pips;
     const pnlClass = pnl == null ? '' : pnl >= 0 ? 'text-win' : 'text-loss';
     const pnlStr = pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pips >= 0 ? '+' : ''}${pips?.toFixed(1)} pip)` : '—';
+
+    const entry = parseFloat(t.entry_price) || 0;
+    const sl    = parseFloat(t.stop_loss)   || 0;
+    const isBuy = t.direction === 'BUY';
+
+    // Breakeven: SL has reached entry (within 1 pip tolerance)
+    const pip = t.symbol?.includes('JPY') ? 0.01 : (["XAUUSD","XAGUSD","US30","NAS100","US500"].includes(t.symbol) ? 1.0 : 0.0001);
+    const isBreakeven = entry > 0 && sl > 0 && Math.abs(sl - entry) <= pip * 2;
+
+    // TP hit detection using current price
+    const tp1 = parseFloat(t.take_profit_1) || 0;
+    const tp2 = parseFloat(t.take_profit_2) || 0;
+    const tp3 = parseFloat(t.take_profit_3) || 0;
+    const price = parseFloat(cp) || 0;
+    const tp1hit = tp1 > 0 && price > 0 && (isBuy ? price >= tp1 : price <= tp1);
+    const tp2hit = tp2 > 0 && price > 0 && (isBuy ? price >= tp2 : price <= tp2);
+    const tp3hit = tp3 > 0 && price > 0 && (isBuy ? price >= tp3 : price <= tp3);
+
+    // Status text
+    const statusParts = [];
+    if (tp3hit)      statusParts.push('TP3 raggiunto');
+    else if (tp2hit) statusParts.push('TP2 raggiunto');
+    else if (tp1hit) statusParts.push('TP1 raggiunto');
+    if (isBreakeven) statusParts.push('SL a breakeven');
+    else if (tp1hit) statusParts.push('SL in profitto');
+    const statusText = statusParts.length ? statusParts.join(' · ') : (pnl != null && pnl > 0 ? 'In profitto' : pnl != null && pnl < 0 ? 'In perdita' : 'Aperto');
+
+    const slStyle = isBreakeven
+      ? 'color:#86efac;font-weight:700' // light green = BE
+      : 'color:var(--danger)';
+
+    const tpLevels = [
+      tp1 ? { label: 'TP1', val: tp1, hit: tp1hit } : null,
+      tp2 ? { label: 'TP2', val: tp2, hit: tp2hit } : null,
+      tp3 ? { label: 'TP3', val: tp3, hit: tp3hit } : null,
+    ].filter(Boolean);
+
+    const tpHtml = tpLevels.map(tp => `
+      <div>
+        <div class="trade-level-label" style="${tp.hit ? 'color:#4ade80' : ''}">${tp.label}${tp.hit ? ' ✓' : ''}</div>
+        <div class="trade-level-val" style="${tp.hit ? 'color:#4ade80;font-weight:700' : 'color:var(--text-secondary)'}">${tp.val}</div>
+      </div>`).join('');
+
     return `
     <div class="open-trade-card">
       <div class="trade-header-row">
@@ -360,8 +426,14 @@ function renderOpenTrades(trades, livePnlMap = {}) {
       <div class="trade-levels">
         <div><div class="trade-level-label">Entry</div><div class="trade-level-val">${t.entry_price}</div></div>
         <div><div class="trade-level-label">Now</div><div class="trade-level-val">${cp ?? '—'}</div></div>
-        <div><div class="trade-level-label">SL</div><div class="trade-level-val text-loss">${t.stop_loss}</div></div>
-        <div><div class="trade-level-label">TP1</div><div class="trade-level-val text-win">${t.take_profit_1 ?? '—'}</div></div>
+        <div>
+          <div class="trade-level-label" style="${isBreakeven ? 'color:#86efac' : ''}">SL${isBreakeven ? ' (BE)' : ''}</div>
+          <div class="trade-level-val" style="${slStyle}">${t.stop_loss}</div>
+        </div>
+        ${tpHtml}
+      </div>
+      <div style="font-size:0.72rem;color:var(--text-muted);margin-top:5px;padding:4px 6px;background:var(--bg-input);border-radius:5px">
+        📍 ${statusText}
       </div>
       <div style="font-size:0.82rem;font-weight:700;margin-top:6px;text-align:right" class="${pnlClass}">
         P&L: ${pnlStr}
