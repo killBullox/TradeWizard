@@ -480,10 +480,14 @@ def _make_app(bridge: MT5Bridge):
         test_server   = body.get("server", "")
         if not test_login:
             return {"ok": False, "error": "Login required"}
-        # Save current connection params
-        orig_login    = bridge.login
-        orig_password = bridge.password
-        orig_server   = bridge.server
+
+        # Capture current live account info BEFORE disconnecting (more reliable than bridge.login)
+        orig_info     = mt5.account_info()
+        orig_login    = orig_info.login    if orig_info else bridge.login
+        orig_server   = orig_info.server   if orig_info else bridge.server
+        orig_password = bridge.password  # no way to read it back from MT5
+
+        result = {"ok": False, "error": "Unknown error"}
         try:
             mt5.shutdown()
             kwargs = {"login": test_login}
@@ -492,18 +496,18 @@ def _make_app(bridge: MT5Bridge):
             if bridge.path:   kwargs["path"]     = bridge.path
             if not mt5.initialize(**kwargs):
                 err = mt5.last_error()
-                return {"ok": False, "error": f"MT5 error {err[0]}: {err[1]}"}
-            info = mt5.account_info()
-            result = {
-                "ok": True,
-                "login":   info.login    if info else test_login,
-                "balance": info.balance  if info else None,
-                "server":  info.server   if info else test_server,
-                "name":    info.name     if info else "",
-            }
-            return result
+                result = {"ok": False, "error": f"MT5 error {err[0]}: {err[1]}"}
+            else:
+                info = mt5.account_info()
+                result = {
+                    "ok":      True,
+                    "login":   info.login   if info else test_login,
+                    "balance": info.balance if info else None,
+                    "server":  info.server  if info else test_server,
+                    "name":    info.name    if info else "",
+                }
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            result = {"ok": False, "error": str(e)}
         finally:
             # Always reconnect to original account
             try:
@@ -513,13 +517,11 @@ def _make_app(bridge: MT5Bridge):
                 if orig_password: rkw["password"] = orig_password
                 if orig_server:   rkw["server"]   = orig_server
                 if bridge.path:   rkw["path"]     = bridge.path
-                if rkw:
-                    mt5.initialize(**rkw)
-                else:
-                    mt5.initialize()
+                mt5.initialize(**rkw)
                 bridge.connected = True
             except Exception:
                 pass
+        return result
 
     @app.get("/candles")
     async def candles(symbol: str = "EURUSD", timeframe: str = "H1", count: int = 500):
