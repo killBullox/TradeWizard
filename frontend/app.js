@@ -547,7 +547,7 @@ function renderConfig(cfg) {
   const form = document.getElementById('config-form');
   if (!form) return;
 
-  const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval'];
+  const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval','min_sl_pips'];
   const maxRiskUsd   = cfg['max_risk_usd'] ?? '250';
   const paperOn      = cfg['paper_mode'] === 'true' || cfg['paper_mode'] === true;
   const weekendOn    = cfg['trade_on_weekend'] === 'true';
@@ -757,7 +757,7 @@ async function triggerMeeting(type) {
 window.triggerMeeting = triggerMeeting;
 
 async function saveConfig() {
-  const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval','max_risk_usd'];
+  const editable = ['risk_percent','rr_ratio','max_open_trades','account_balance','analysis_interval','max_risk_usd','min_sl_pips'];
   for (const key of editable) {
     const el = document.getElementById(`cfg-${key}`);
     if (!el) continue;

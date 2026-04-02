@@ -956,17 +956,28 @@ class Orchestrator:
         sl_pips = abs(entry - sl) / pip
         tp_pips = abs(entry - tp) / pip
 
-        # Min SL = 0.5 × ATR (same logic as backtester)
+        # Min SL = max(0.5 × ATR, configurable min_sl_pips)
         atr_pips = float((market_data.get("H1") or {}).get("indicators", {}).get("atr_pips") or 0)
-        min_sl_pips = max(atr_pips * 0.5, pip * 10 / pip)  # at least 0.5 ATR, fallback 10 pips
+        cfg_min_sl = float((config or {}).get("min_sl_pips") or 30)
+        min_sl_pips = max(atr_pips * 0.5, cfg_min_sl)
         if sl_pips < min_sl_pips:
-            return f"SL too tight: {sl_pips:.1f} pips (min {min_sl_pips:.1f} = 0.5×ATR)"
+            return f"SL too tight: {sl_pips:.1f} pips (min {min_sl_pips:.1f}, cfg_min={cfg_min_sl}p, 0.5×ATR={atr_pips*0.5:.1f}p)"
 
         # RR must meet configured minimum (default 2.0)
         required_rr = float((config or {}).get("rr_ratio") or 2.0)
         actual_rr   = tp_pips / sl_pips if sl_pips else 0
         if actual_rr < required_rr - 0.001:  # small tolerance for floating-point
             return f"RR {actual_rr:.2f} below required {required_rr} (SL={sl_pips:.1f}p TP={tp_pips:.1f}p)"
+
+        # Net RR after friction (spread + slippage) must also meet minimum
+        friction_pips = 3.0  # ~1.5 spread + ~1.5 slippage conservative estimate
+        net_tp_pips = tp_pips - friction_pips
+        net_sl_pips = sl_pips + friction_pips
+        net_rr = net_tp_pips / net_sl_pips if net_sl_pips > 0 else 0
+        if net_rr < required_rr - 0.001:
+            return (f"Net RR {net_rr:.2f} below required {required_rr} after friction "
+                    f"(gross RR={actual_rr:.2f}, friction={friction_pips}p, "
+                    f"net TP={net_tp_pips:.1f}p, net SL={net_sl_pips:.1f}p)")
 
         # Direction logic
         if direction == "BUY":

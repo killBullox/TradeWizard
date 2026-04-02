@@ -283,6 +283,7 @@ async def init_db():
                     SystemConfig(key="news_block_minutes_after",  value="30",    description="Minutes after high-impact news to block trading"),
                     SystemConfig(key="news_block_medium",         value="false", description="Also block Medium-impact events"),
                     SystemConfig(key="model_mode",      value="economy", description="AI model mode: economy (Haiku) or quality (Sonnet)"),
+                    SystemConfig(key="min_sl_pips",     value="30",      description="Minimum SL distance in pips (anti-scalping)"),
                 ]
             session.add_all(defaults)
             await session.commit()
@@ -305,6 +306,10 @@ async def init_db():
                 res = await session.execute(select(SystemConfig).where(SystemConfig.key == key))
                 if not res.scalar_one_or_none():
                     session.add(SystemConfig(key=key, value="", description=desc))
+            # Ensure min_sl_pips exists on older DBs
+            msl = await session.execute(select(SystemConfig).where(SystemConfig.key == "min_sl_pips"))
+            if not msl.scalar_one_or_none():
+                session.add(SystemConfig(key="min_sl_pips", value="30", description="Minimum SL distance in pips (anti-scalping)"))
             await session.commit()
 
 
