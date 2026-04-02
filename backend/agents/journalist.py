@@ -328,6 +328,213 @@ Each agent must respond from their own perspective:
         })
         return result
 
+    async def emergency_meeting_interactive(
+        self,
+        topic: str,
+        trades: list,
+        performance_stats: dict,
+        system_config: dict,
+        agents: dict,        # {"ICTEA": agent, "RM": agent, "TR": agent, "AT": agent}
+        meeting_state: dict, # shared state with user_queue
+    ) -> dict:
+        """Interactive emergency meeting: each agent responds separately, user can intervene."""
+        import asyncio
+
+        user_queue: asyncio.Queue = meeting_state["user_queue"]
+
+        # Build trade summary (same as non-interactive)
+        trades_summary = []
+        for t in trades[-20:]:
+            d = t if isinstance(t, dict) else {k: v for k, v in t.__dict__.items() if not k.startswith("_")}
+            trades_summary.append({
+                "symbol": d.get("symbol"), "direction": d.get("direction"),
+                "setup": d.get("ict_setup"), "result": d.get("result"),
+                "pnl_usd": d.get("pnl_usd"), "entry": d.get("entry_price"),
+                "sl": d.get("stop_loss"), "tp1": d.get("take_profit_1"),
+                "open_time": str(d.get("open_time", ""))[:16],
+                "close_time": str(d.get("close_time", ""))[:16],
+            })
+
+        base_context = (
+            f"## EMERGENCY MEETING — Topic: {topic}\n\n"
+            f"### Recent Trades\n{json.dumps(trades_summary, indent=2)}\n\n"
+            f"### System Config\n{json.dumps(system_config, indent=2)}\n\n"
+            f"### Performance\n{json.dumps(performance_stats, indent=2)}\n"
+        )
+
+        meeting_rules = (
+            "\n## CRITICAL MEETING RULES:\n"
+            "1. Be critical and data-driven. If the concern is valid, say so with evidence.\n"
+            "2. Challenge assumptions — push back if data doesn't support the concern.\n"
+            "3. No sycophancy. No 'you're absolutely right' or 'great point'.\n"
+            "4. Quantify everything with numbers from the trade data.\n"
+            "5. Disagree openly if warranted.\n"
+            "6. Propose concrete changes with specific numbers.\n"
+            "7. Respond in 150-250 words MAX. Be concise and direct.\n"
+            "8. Respond in the SAME LANGUAGE as the topic (if Italian, respond in Italian).\n"
+        )
+
+        agent_roles = {
+            "ICTEA": "You are ICTEA (ICT Expert Advisor). Focus on: Are the setups technically valid? Are entry levels correct? Is the ICT methodology being applied properly?",
+            "RM":    "You are RM (Risk Manager). Focus on: Is the risk/reward realistic? Are SLs appropriately sized vs ATR and spread costs? Is position sizing correct?",
+            "TR":    "You are TR (Trader). Focus on: Is execution timing correct? Market vs limit orders? Are entries within kill zones? Is slippage being managed?",
+            "AT":    "You are AT (Trade Analyst). Focus on: What do trade durations and PnL distributions tell us? Are there statistical patterns in wins/losses?",
+        }
+        agent_order = ["ICTEA", "RM", "TR", "AT"]
+
+        transcript: list[dict] = []
+        meeting_state["transcript"] = transcript
+
+        await self.broadcast({
+            "type": "meeting_started",
+            "meeting_type": "EMERGENCY",
+            "interactive": True,
+            "participants": ["ICTEA", "RM", "TR", "AT", "JR"],
+            "topic": topic,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+
+        round_num = 0
+        while True:
+            round_num += 1
+            meeting_state["round"] = round_num
+
+            # --- Each agent speaks ---
+            for agent_name in agent_order:
+                agent = agents[agent_name]
+
+                await self.broadcast({
+                    "type": "meeting_agent_turn",
+                    "agent": agent_name,
+                    "emoji": agent.emoji,
+                    "color": agent.color,
+                    "round": round_num,
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+
+                # Build prompt with full transcript context
+                transcript_text = ""
+                for entry in transcript:
+                    speaker = entry.get("speaker", "?")
+                    text = entry.get("message", "")
+                    transcript_text += f"\n**{speaker}**: {text}\n"
+
+                round_label = f" (Round {round_num})" if round_num > 1 else ""
+                prompt = (
+                    f"{agent_roles[agent_name]}\n\n"
+                    f"{base_context}\n"
+                    f"{meeting_rules}\n"
+                    f"{'## Discussion so far:' + transcript_text if transcript_text else ''}\n"
+                    f"---\nRespond to the Head Trader's concern{round_label}. "
+                    f"{'Build on previous discussion, do NOT repeat what others said.' if transcript_text else ''}"
+                )
+
+                # Use agent's own _call_claude (broadcasts agent_thinking + agent_response)
+                raw = await agent._call_claude(
+                    f"You are {agent_name} in an emergency meeting. {agent_roles[agent_name]}",
+                    prompt,
+                    max_tokens=1500,
+                    use_thinking=True,
+                )
+
+                transcript.append({"speaker": agent_name, "message": raw, "round": round_num})
+
+                await self.broadcast({
+                    "type": "meeting_agent_response",
+                    "agent": agent_name,
+                    "emoji": agent.emoji,
+                    "color": agent.color,
+                    "message": raw[:500] + ("..." if len(raw) > 500 else ""),
+                    "full_response": raw,
+                    "round": round_num,
+                    "timestamp": datetime.utcnow().isoformat(),
+                })
+
+                # Wait briefly for user input after each agent
+                try:
+                    user_msg = await asyncio.wait_for(user_queue.get(), timeout=5.0)
+                    if user_msg == "__APPROVE__":
+                        # User approved early — skip to verdict
+                        break
+                    transcript.append({"speaker": "HEAD_TRADER", "message": user_msg, "round": round_num})
+                    await self.broadcast({
+                        "type": "meeting_user_message",
+                        "message": user_msg,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    })
+                except asyncio.TimeoutError:
+                    pass  # No user input, continue to next agent
+            else:
+                # All agents spoke — now JR produces verdict
+                # (the `else` on the for-loop runs only if we didn't `break`)
+                pass
+
+            # --- JR Verdict ---
+            transcript_text = ""
+            for entry in transcript:
+                transcript_text += f"\n**{entry['speaker']}**: {entry['message']}\n"
+
+            verdict_prompt = (
+                f"## EMERGENCY MEETING VERDICT\n\n"
+                f"Topic: {topic}\n\n"
+                f"## Full Discussion:\n{transcript_text}\n\n"
+                f"---\n"
+                f"As the Journalist (JR), produce the final verdict.\n"
+                f"Synthesize ALL agent perspectives and Head Trader comments.\n"
+                f"Respond in the SAME LANGUAGE as the discussion.\n\n"
+                f"Return a JSON object with:\n"
+                f'{{"conclusions": ["conclusion 1", "conclusion 2", ...], '
+                f'"system_improvements": [{{"category": "...", "improvement": "...", '
+                f'"config_change": {{"key": "...", "new_value": "..."}}}}], '
+                f'"setup_memory_updates": [{{"setup_type": "...", "lessons": ["..."], '
+                f'"failure_patterns": ["..."], "success_patterns": ["..."]}}]}}\n\n'
+                f"IMPORTANT: Respond ONLY with valid JSON."
+            )
+
+            verdict_result = await self._call_claude(
+                SYSTEM_PROMPT, verdict_prompt, max_tokens=3000, use_thinking=True
+            )
+            verdict_parsed = self._extract_json(verdict_result)
+
+            transcript.append({"speaker": "JR", "message": verdict_result, "round": round_num, "is_verdict": True})
+
+            await self.broadcast({
+                "type": "meeting_verdict",
+                "conclusions": verdict_parsed.get("conclusions", []),
+                "improvements": verdict_parsed.get("system_improvements", []),
+                "round": round_num,
+                "full_response": verdict_result,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
+
+            # --- Wait for user: approve or continue ---
+            while True:
+                try:
+                    user_msg = await asyncio.wait_for(user_queue.get(), timeout=300)
+                except asyncio.TimeoutError:
+                    # 5 min timeout — auto-approve
+                    user_msg = "__APPROVE__"
+
+                if user_msg == "__APPROVE__":
+                    await self.broadcast({
+                        "type": "meeting_completed",
+                        "meeting_type": "EMERGENCY",
+                        "conclusions": verdict_parsed.get("conclusions", []),
+                        "improvements": verdict_parsed.get("system_improvements", []),
+                        "rounds": round_num,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    })
+                    return verdict_parsed
+                else:
+                    # User wants to continue — add their message and start new round
+                    transcript.append({"speaker": "HEAD_TRADER", "message": user_msg, "round": round_num})
+                    await self.broadcast({
+                        "type": "meeting_user_message",
+                        "message": user_msg,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    })
+                    break  # Break inner while, continue outer while (new round)
+
     async def generate_performance_report(self, stats: dict) -> dict:
         await self.broadcast_status("REPORTING", "Generating performance report...")
 

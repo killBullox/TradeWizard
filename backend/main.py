@@ -199,6 +199,13 @@ async def handle_ws_command(ws: WebSocket, msg: dict):
     elif cmd == "run_meeting":
         meeting_type = msg.get("meeting_type", "POST_TRADE")
         asyncio.create_task(orchestrator.run_meeting(meeting_type))
+    elif cmd == "meeting_message":
+        text = msg.get("message", "").strip()
+        if text and orchestrator and orchestrator._active_meeting:
+            orchestrator.send_meeting_message(text)
+    elif cmd == "meeting_approve":
+        if orchestrator and orchestrator._active_meeting:
+            orchestrator.approve_meeting_close()
     elif cmd == "ping":
         await ws.send_text(json.dumps({"type": "pong", "ts": datetime.utcnow().isoformat()}))
 
@@ -404,46 +411,16 @@ async def trigger_meeting(data: dict):
 
 @app.post("/api/meetings/emergency")
 async def trigger_emergency_meeting(data: dict):
-    """User-convened emergency meeting with critical/challenging agent responses."""
+    """User-convened interactive emergency meeting."""
     if not orchestrator:
         raise HTTPException(503, "System not ready")
     topic = data.get("topic", "").strip()
     if not topic:
         raise HTTPException(400, "Topic is required")
-    asyncio.create_task(_run_emergency_meeting(topic))
-    return {"status": "Emergency meeting started", "topic": topic}
-
-
-async def _run_emergency_meeting(topic: str):
-    try:
-        async with async_session_factory() as s:
-            config   = await orchestrator._load_config(s)
-            perf_raw = await get_config("system_performance", s)
-            perf     = json.loads(perf_raw or "{}")
-            result   = await s.execute(
-                select(Trade).where(Trade.status == "CLOSED").order_by(Trade.close_time.desc()).limit(20)
-            )
-            trades = result.scalars().all()
-        result = await orchestrator.jr.emergency_meeting(topic, list(trades), perf, config)
-        # Apply any system improvements proposed
-        improvements = result.get("system_improvements", [])
-        if improvements:
-            await orchestrator._apply_improvements(improvements)
-        # Save to DB
-        async with async_session_factory() as s:
-            meeting = Meeting(
-                meeting_type="EMERGENCY",
-                trigger="User",
-                participants="ICTEA,RM,TR,AT,JR",
-                agenda=topic[:500],
-                summary=json.dumps(result.get("conclusions", {})),
-                improvements=json.dumps(improvements),
-                created_at=datetime.utcnow(),
-            )
-            s.add(meeting)
-            await s.commit()
-    except Exception as exc:
-        logger.error("Emergency meeting failed: %s", exc, exc_info=True)
+    if orchestrator._active_meeting:
+        raise HTTPException(409, "A meeting is already in progress")
+    asyncio.create_task(orchestrator.start_interactive_meeting(topic))
+    return {"status": "Interactive emergency meeting started", "topic": topic}
 
 
 @app.get("/api/logs")

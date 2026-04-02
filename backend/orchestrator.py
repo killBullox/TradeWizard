@@ -53,6 +53,7 @@ class Orchestrator:
         self._news:  NewsFilter   | None = None
         self._tg:    TelegramBot  | None = None
         self._paper: PaperAccount | None = None
+        self._active_meeting: dict | None = None  # interactive meeting state
 
     # ------------------------------------------------------------------ #
     #  Startup / Shutdown
@@ -657,6 +658,78 @@ class Orchestrator:
             except Exception:
                 pass
         return "\n".join(lines) if lines else ""
+
+    # ------------------------------------------------------------------ #
+    #  Interactive Emergency Meeting
+    # ------------------------------------------------------------------ #
+    async def start_interactive_meeting(self, topic: str):
+        """Launch an interactive emergency meeting with per-agent responses."""
+        if self._active_meeting:
+            return {"error": "A meeting is already in progress"}
+
+        self._active_meeting = {
+            "topic": topic,
+            "transcript": [],
+            "user_queue": asyncio.Queue(),
+            "round": 0,
+        }
+
+        # Load context
+        async with async_session_factory() as s:
+            config   = await self._load_config(s)
+            perf_raw = await get_config("system_performance", s)
+            perf     = json.loads(perf_raw or "{}")
+            result   = await s.execute(
+                select(Trade).where(Trade.status == "CLOSED")
+                    .order_by(Trade.close_time.desc()).limit(20)
+            )
+            trades = result.scalars().all()
+
+        try:
+            final = await self.jr.emergency_meeting_interactive(
+                topic=topic,
+                trades=list(trades),
+                performance_stats=perf,
+                system_config=config,
+                agents={"ICTEA": self.ictea, "RM": self.rm, "TR": self.tr, "AT": self.at},
+                meeting_state=self._active_meeting,
+            )
+            # Apply improvements
+            improvements = final.get("system_improvements", [])
+            if improvements:
+                await self._apply_improvements(improvements)
+            # Save meeting to DB
+            async with async_session_factory() as s:
+                meeting = Meeting(
+                    meeting_type="EMERGENCY",
+                    trigger="User (Interactive)",
+                    participants="ICTEA,RM,TR,AT,JR",
+                    agenda=topic[:500],
+                    summary=json.dumps(final.get("conclusions", []), default=str),
+                    improvements=json.dumps(improvements, default=str),
+                    created_at=datetime.utcnow(),
+                )
+                s.add(meeting)
+                await s.commit()
+            # Update strategy memory
+            mem_updates = final.get("setup_memory_updates", [])
+            if mem_updates:
+                await _mem_update_meeting(mem_updates)
+        except Exception as exc:
+            logger.error("Interactive meeting failed: %s", exc, exc_info=True)
+            await self.broadcast({"type": "error", "message": f"Meeting failed: {exc}"})
+        finally:
+            self._active_meeting = None
+
+    def send_meeting_message(self, text: str):
+        """Queue a user message for the active meeting."""
+        if self._active_meeting:
+            self._active_meeting["user_queue"].put_nowait(text)
+
+    def approve_meeting_close(self):
+        """Signal that the user approves the meeting verdict."""
+        if self._active_meeting:
+            self._active_meeting["user_queue"].put_nowait("__APPROVE__")
 
     async def _apply_improvements(self, improvements: list):
         """Apply system config changes proposed by JR."""

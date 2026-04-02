@@ -122,11 +122,29 @@ function handleMessage(msg) {
 
     case 'meeting_started':
       addActivity(`🗣️ ${msg.meeting_type} meeting started | Participants: ${msg.participants?.join(', ')}`, 'info');
+      if (msg.interactive) openMeetingChat(msg.topic);
+      break;
+
+    case 'meeting_agent_turn':
+      addMeetingMessage(msg.agent, `${AGENTS[msg.agent]?.emoji || '🤖'} ${AGENTS[msg.agent]?.name || msg.agent} sta analizzando...`, 'thinking');
+      break;
+
+    case 'meeting_agent_response':
+      addMeetingMessage(msg.agent, msg.full_response || msg.message, 'agent', msg.round);
+      break;
+
+    case 'meeting_user_message':
+      // Already shown optimistically by sendMeetingMsg — skip echo
+      break;
+
+    case 'meeting_verdict':
+      addMeetingVerdict(msg.conclusions, msg.improvements, msg.round, msg.full_response);
       break;
 
     case 'meeting_completed':
     case 'meeting_summary':
       addActivity(`✅ Meeting completed: ${msg.improvements?.length || 0} improvements proposed`, 'success');
+      closeMeetingChat();
       refreshMeetings();
       break;
 
@@ -2432,6 +2450,123 @@ async function submitEmergencyMeeting() {
     btn.disabled = false;
   }
 }
+
+// ── Interactive Meeting Chat ──────────────────────────────────────────────────
+function openMeetingChat(topic) {
+  const panel = document.getElementById('meeting-chat');
+  const msgs  = document.getElementById('meeting-messages');
+  const topicEl = document.getElementById('meeting-topic-display');
+  const approveBtn = document.getElementById('btn-meeting-approve');
+  msgs.innerHTML = '';
+  topicEl.textContent = topic || '';
+  approveBtn.style.display = 'none';
+  panel.style.display = 'flex';
+  document.getElementById('meeting-input').focus();
+}
+
+function closeMeetingChat() {
+  document.getElementById('meeting-chat').style.display = 'none';
+}
+
+function addMeetingMessage(speaker, text, msgType, round) {
+  const msgs = document.getElementById('meeting-messages');
+  if (!msgs) return;
+
+  // Remove "thinking" placeholders for this agent
+  if (msgType === 'agent') {
+    const thinking = msgs.querySelectorAll(`.meeting-msg-thinking[data-agent="${speaker}"]`);
+    thinking.forEach(el => el.remove());
+  }
+
+  const div = document.createElement('div');
+  const now = new Date().toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+
+  if (msgType === 'thinking') {
+    div.className = 'meeting-msg meeting-msg-thinking';
+    div.dataset.agent = speaker;
+    div.style.cssText = 'padding:8px 12px;border-radius:8px;background:var(--bg-primary);border-left:3px solid ' + (AGENTS[speaker]?.color || '#666') + ';opacity:0.6;font-size:0.82rem';
+    div.innerHTML = `<span style="color:${AGENTS[speaker]?.color || '#666'};font-weight:600">${escHtml(text)}</span>`;
+  } else if (msgType === 'user') {
+    div.className = 'meeting-msg meeting-msg-user';
+    div.style.cssText = 'padding:10px 14px;border-radius:8px;background:#1e3a5f;align-self:flex-end;max-width:80%;font-size:0.88rem';
+    div.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span style="font-weight:600;color:#60a5fa">👤 Head Trader</span>
+        <span style="font-size:0.7rem;color:var(--text-muted)">${now}</span>
+      </div>
+      <div style="color:#e2e8f0;white-space:pre-wrap">${escHtml(text)}</div>`;
+  } else {
+    // Agent response
+    const agent = AGENTS[speaker] || {emoji:'🤖', color:'#666', name: speaker};
+    const roundLabel = round ? ` — Round ${round}` : '';
+    div.className = 'meeting-msg meeting-msg-agent';
+    div.style.cssText = 'padding:10px 14px;border-radius:8px;background:var(--bg-primary);border-left:3px solid ' + agent.color + ';max-width:90%;font-size:0.88rem';
+    div.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <span style="font-weight:600;color:${agent.color}">${agent.emoji} ${agent.name}${roundLabel}</span>
+        <span style="font-size:0.7rem;color:var(--text-muted)">${now}</span>
+      </div>
+      <div style="color:#e2e8f0;white-space:pre-wrap;line-height:1.5">${escHtml(text)}</div>`;
+  }
+
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function addMeetingVerdict(conclusions, improvements, round, fullResponse) {
+  const msgs = document.getElementById('meeting-messages');
+  if (!msgs) return;
+
+  const now = new Date().toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'});
+  const div = document.createElement('div');
+  div.className = 'meeting-msg meeting-msg-verdict';
+  div.style.cssText = 'padding:14px 16px;border-radius:8px;background:#1a1a2e;border:2px solid #f59e0b;font-size:0.88rem';
+
+  const conclusionsList = (conclusions || []).map(c => `<li>${escHtml(String(c))}</li>`).join('');
+  const improvementsList = (improvements || []).map(i =>
+    `<li><strong>${escHtml(i.category || '')}</strong>: ${escHtml(i.improvement || '')}</li>`
+  ).join('');
+
+  div.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span style="font-weight:700;color:#f59e0b">📝 Verdetto JR — Round ${round || 1}</span>
+      <span style="font-size:0.7rem;color:var(--text-muted)">${now}</span>
+    </div>
+    ${conclusionsList ? `<div style="margin-bottom:8px"><strong style="color:#e2e8f0;font-size:0.78rem">Conclusioni:</strong><ul style="margin:4px 0;padding-left:20px;color:#e2e8f0">${conclusionsList}</ul></div>` : ''}
+    ${improvementsList ? `<div><strong style="color:#e2e8f0;font-size:0.78rem">Improvements proposti:</strong><ul style="margin:4px 0;padding-left:20px;color:#e2e8f0">${improvementsList}</ul></div>` : ''}
+    <div style="margin-top:10px;font-size:0.78rem;color:var(--text-muted)">Scrivi un commento per continuare la discussione, oppure approva per chiudere il meeting.</div>`;
+
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+
+  // Show approve button
+  document.getElementById('btn-meeting-approve').style.display = 'inline-flex';
+  // Update round badge
+  document.getElementById('meeting-round-badge').textContent = `Round ${round || 1}`;
+}
+
+function sendMeetingMsg() {
+  const input = document.getElementById('meeting-input');
+  const text = input.value.trim();
+  if (!text) return;
+  sendWS({ command: 'meeting_message', message: text });
+  // Immediately show in chat (optimistic)
+  addMeetingMessage('HEAD_TRADER', text, 'user');
+  input.value = '';
+  // Hide approve button when user sends a message (new round coming)
+  document.getElementById('btn-meeting-approve').style.display = 'none';
+}
+
+function approveMeeting() {
+  sendWS({ command: 'meeting_approve' });
+  document.getElementById('btn-meeting-approve').style.display = 'none';
+  addMeetingMessage('SYS', '✅ Meeting approvato — applicando improvements...', 'thinking');
+}
+
+window.openMeetingChat  = openMeetingChat;
+window.closeMeetingChat = closeMeetingChat;
+window.sendMeetingMsg   = sendMeetingMsg;
+window.approveMeeting   = approveMeeting;
 
 // ── Toast Notification ────────────────────────────────────────────────────────
 function showToast(type, msg) {
