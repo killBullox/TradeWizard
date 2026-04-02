@@ -203,12 +203,12 @@ class PaperAccount:
                     # Check SL / TP auto-close
                     hit = self._check_sl_tp(pos, price)
                     if hit:
-                        # Close at the exact SL/TP price, not the current market price.
-                        # This prevents inflated losses caused by the 30s update interval.
                         if hit == "SL_HIT":
                             close_at = pos["stop_loss"] or price
+                            note = f"SL colpito @ {close_at:.5f}"
                         else:  # TP_HIT
                             close_at = pos["take_profit"] or price
+                            note = f"TP colpito @ {close_at:.5f} — trade chiuso su target"
                         result = self.close_position(tid, close_at)
                         updates.append({
                             "type":      "paper_auto_close",
@@ -219,7 +219,7 @@ class PaperAccount:
                             "pnl_usd":   result.get("pnl_usd", 0),
                             "pnl_pips":  result.get("pnl_pips", 0),
                         })
-                        await self._close_in_db(tid, close_at)
+                        await self._close_in_db(tid, close_at, note)
             except Exception as exc:
                 logger.debug("Price fetch error for %s: %s", sym, exc)
 
@@ -312,7 +312,7 @@ class PaperAccount:
         except Exception as exc:
             logger.warning("Could not restore paper positions: %s", exc)
 
-    async def _close_in_db(self, trade_id: int, close_price: float):
+    async def _close_in_db(self, trade_id: int, close_price: float, note: str = ""):
         try:
             from models.database import async_session_factory, Trade
             pos = self._positions.get(trade_id)  # already popped; use local copy
@@ -334,6 +334,11 @@ class PaperAccount:
                     t.pnl_pips    = round(pips, 1)
                     t.pnl_usd     = round(usd, 2)
                     t.result      = "WIN" if usd > 0 else ("LOSS" if usd < 0 else "BREAKEVEN")
+                    if note:
+                        from datetime import datetime as _dt
+                        ts = _dt.utcnow().strftime("%H:%M")
+                        existing = t.close_notes or ""
+                        t.close_notes = (existing + "\n" if existing else "") + f"[{ts}] {note}"
                     await s.commit()
             # Persist updated balance
             async with async_session_factory() as s:

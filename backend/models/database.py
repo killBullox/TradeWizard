@@ -51,7 +51,8 @@ class Trade(Base):
     pnl_usd = Column(Float, nullable=True)
     result = Column(String(20), nullable=True)  # WIN / LOSS / BREAKEVEN
     trailing_sl_updates = Column(Integer, default=0)
-    tp_hits = Column(Integer, default=0)             # how many TPs have been partially closed (0/1/2/3)
+    tp_hits = Column(Integer, default=0)
+    close_notes = Column(Text, nullable=True)        # audit trail: why/how trade was closed
     is_paper = Column(Boolean, default=False)
     archived = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -204,6 +205,7 @@ def _migrate_trades(conn):
     new_cols = [
         ("trailing_sl_updates", "INTEGER DEFAULT 0"),
         ("tp_hits",             "INTEGER DEFAULT 0"),
+        ("close_notes",         "TEXT"),
         ("is_paper",            "BOOLEAN DEFAULT 0"),
         ("archived",            "BOOLEAN DEFAULT 0"),
     ]

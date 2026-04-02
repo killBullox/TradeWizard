@@ -383,8 +383,11 @@ class Orchestrator:
 
                 if action == "TRAIL_SL" and decision.get("new_stop_loss"):
                     new_sl = decision["new_stop_loss"]
+                    at_reason = decision.get("reason", "")
                     await self.cc.modify_sl(trade.mt5_ticket or "", new_sl, trade.symbol)
                     await self._update_trade_sl(trade.id, new_sl)
+                    await self._append_close_note(trade.id,
+                        f"SL trailato → {new_sl:.5f}" + (f" — {at_reason}" if at_reason else ""))
                     await self.broadcast({
                         "type": "sl_trailed",
                         "trade_id": trade.id,
@@ -397,9 +400,13 @@ class Orchestrator:
 
                 elif action == "PARTIAL_CLOSE" and decision.get("close_percent"):
                     pct = decision["close_percent"]
+                    tp_num = (trade.tp_hits or 0) + 1
+                    at_reason = decision.get("reason", "")
                     await self.cc.close_partial(trade.mt5_ticket or "", trade.symbol, pct)
-                    # Null out the TP level just hit so the AT won't trigger it again next cycle
                     await self._consume_next_tp(trade.id)
+                    await self._append_close_note(trade.id,
+                        f"PARTIAL CLOSE {int(pct*100)}% su TP{tp_num} @ {current_price:.5f}" +
+                        (f" — {at_reason}" if at_reason else ""))
 
                     # Move SL to breakeven after TP1 hit (protects the remaining position)
                     entry = trade.entry_price or 0
@@ -413,6 +420,7 @@ class Orchestrator:
                         await self._update_trade_sl(trade.id, entry)
                         if self._paper:
                             self._paper.modify_sl(trade.id, entry)
+                        await self._append_close_note(trade.id, f"SL spostato a breakeven ({entry:.5f})")
                         await self.broadcast({
                             "type": "sl_trailed",
                             "trade_id": trade.id,
@@ -427,6 +435,9 @@ class Orchestrator:
                         asyncio.create_task(self._tg.notify_partial_close(trade.symbol, trade.id, pct))
 
                 elif action in ("CLOSE_ALL", "CLOSE"):
+                    at_reason = decision.get("reason", "")
+                    await self._append_close_note(trade.id,
+                        f"CLOSE @ {current_price:.5f}" + (f" — {at_reason}" if at_reason else ""))
                     await self._close_trade(trade, current_price, "AT Management Decision")
 
             except Exception as e:
@@ -664,6 +675,7 @@ class Orchestrator:
 
         data = await fetch_ohlcv(trade.symbol, "H1", 5)
         close_price = data.get("indicators", {}).get("current_price", trade.entry_price)
+        await self._append_close_note(trade_id, f"Chiuso manualmente @ {close_price:.5f}")
         await self._close_trade(trade, close_price, reason)
         return {"success": True}
 
@@ -742,6 +754,17 @@ class Orchestrator:
                 return
             t.tp_hits = (t.tp_hits or 0) + 1
             await s.commit()
+
+    async def _append_close_note(self, trade_id: int, note: str):
+        """Append a timestamped note to trade.close_notes for audit trail."""
+        from datetime import datetime as _dt
+        ts = _dt.utcnow().strftime("%H:%M")
+        async with async_session_factory() as s:
+            t = await s.get(Trade, trade_id)
+            if t:
+                existing = t.close_notes or ""
+                t.close_notes = (existing + "\n" if existing else "") + f"[{ts}] {note}"
+                await s.commit()
 
     async def _update_trade_sl(self, trade_id: int, new_sl: float):
         async with async_session_factory() as s:

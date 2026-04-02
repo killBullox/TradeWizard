@@ -351,6 +351,11 @@ function renderTradesTable(trades) {
       <td>${t.lot_size ?? '-'}</td>
       <td><span class="badge ${t.status==='ACTIVE'?'badge-active':t.result==='WIN'?'badge-win':t.result==='LOSS'?'badge-loss':''}">${t.status}</span></td>
       <td class="${(t.pnl_usd||0)>0?'text-win':(t.pnl_usd||0)<0?'text-loss':''}">${t.pnl_usd!=null ? '$'+t.pnl_usd.toFixed(2) : '-'}</td>
+      <td style="max-width:160px">
+        ${t.close_notes
+          ? `<span title="${escHtml(t.close_notes)}" style="cursor:help;font-size:0.75rem;color:var(--text-muted);white-space:pre-line">${escHtml(t.close_notes.split('\n')[0])}</span>`
+          : '<span style="color:var(--text-muted)">—</span>'}
+      </td>
       <td>
         ${t.status==='ACTIVE' ? `<button class="btn btn-danger btn-sm" onclick="closeTrade(${t.id})">Close</button>` : ''}
         <button class="btn btn-ghost btn-sm" onclick="viewTrade(${t.id})">View</button>
@@ -715,6 +720,11 @@ async function viewTrade(id) {
         ['MT5 Ticket', trade.mt5_ticket||'N/A'], ['SL Updates', trade.trailing_sl_updates||0],
       ].map(([l,v]) => `<div><div style="color:var(--text-muted);font-size:0.7rem">${l}</div><div>${escHtml(String(v??'-'))}</div></div>`).join('')}
     </div>
+    ${trade.close_notes ? `
+      <div style="margin-top:14px;padding:10px 12px;background:var(--bg-input);border-radius:8px;border-left:3px solid var(--accent)">
+        <div style="font-size:0.7rem;color:var(--text-muted);margin-bottom:4px;font-weight:600">📋 AUDIT TRAIL</div>
+        <pre style="font-size:0.78rem;color:var(--text-primary);white-space:pre-wrap;margin:0;font-family:inherit">${escHtml(trade.close_notes)}</pre>
+      </div>` : ''}
     ${trade.status === 'ACTIVE' ? `
       <div style="margin-top:16px">
         <button class="btn btn-danger" onclick="closeTrade(${id});closeModal()">Close Trade</button>
