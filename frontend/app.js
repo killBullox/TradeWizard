@@ -1239,7 +1239,8 @@ function _syncModeButtons(isPaper) {
 
 async function setTradingMode(mode) {
   const isPaper = mode === 'paper';
-  await fetchJSON(isPaper ? '/api/paper/enable' : '/api/paper/disable', { method: 'POST', body: JSON.stringify({}) });
+  // Note: don't pass balance on enable — preserves current paper balance
+  await fetchJSON(isPaper ? '/api/paper/enable' : '/api/paper/disable', { method: 'POST' });
   _syncModeButtons(isPaper);
   addActivity(isPaper ? '📄 Modalità Paper attivata' : '📊 Modalità MT5 Live attivata', 'info');
   if (!isPaper) refreshMT5Account();

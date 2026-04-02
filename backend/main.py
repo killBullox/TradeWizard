@@ -696,9 +696,11 @@ async def paper_trades(limit: int = 50):
 async def paper_enable(data: dict | None = None):
     if not orchestrator:
         raise HTTPException(503, "System not ready")
-    balance = float((data or {}).get("balance", 10000.0))
+    # Only pass balance if explicitly provided — avoids resetting current paper balance
+    balance_param = (data or {}).get("balance")
+    balance = float(balance_param) if balance_param else None
     await orchestrator.enable_paper_mode(balance)
-    return {"status": "paper_mode enabled", "balance": balance}
+    return {"status": "paper_mode enabled"}
 
 
 @app.post("/api/paper/disable")
@@ -943,19 +945,26 @@ async def archived_count():
 
 @app.post("/api/reset-all")
 async def reset_all(data: dict | None = None):
-    """Full reset: delete all trades, agent logs, journal entries, meetings and reset performance stats."""
+    """Full reset: delete closed trades, agent logs, journal entries, meetings. Preserves ACTIVE trades."""
     balance = float((data or {}).get("balance", 5000.0))
     await _create_backup("reset_all")
     async with async_session_factory() as s:
         await s.execute(delete(AgentLog))
         await s.execute(delete(JournalEntry))
         await s.execute(delete(Meeting))
-        await s.execute(delete(Trade))
+        # Only delete non-active trades — preserve open positions
+        await s.execute(delete(Trade).where(Trade.status != "ACTIVE"))
         await set_config("system_performance", "{}", s)
         await s.commit()
-    # Reset paper account in memory
+    # Reset paper account in memory only if no active trades remain
     if orchestrator and orchestrator.paper_account:
-        await orchestrator.paper_account.reset(balance)
+        from sqlalchemy import func as _func
+        async with async_session_factory() as s:
+            active_count = (await s.execute(
+                select(_func.count()).select_from(Trade).where(Trade.status == "ACTIVE")
+            )).scalar()
+        if active_count == 0:
+            await orchestrator.paper_account.reset(balance)
     await orchestrator.broadcast({"type": "full_reset", "balance": balance})
     return {"status": "reset", "balance": balance}
 
