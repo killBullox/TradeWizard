@@ -1112,7 +1112,7 @@ async def activate_broker_account(account_id: int):
 
 @app.get("/api/broker/accounts/{account_id}/test")
 async def test_broker_account(account_id: int):
-    """Test bridge connectivity for a specific account."""
+    """Test credentials for a specific account via the bridge."""
     async with async_session_factory() as s:
         acc = await s.get(MT5Account, account_id)
         bridge_url = await get_config("mt5_bridge_url", s) or ""
@@ -1122,22 +1122,12 @@ async def test_broker_account(account_id: int):
         return {"ok": False, "error": "MT5 bridge non configurato"}
     import httpx
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{bridge_url.rstrip('/')}/account")
-            if r.status_code != 200:
-                return {"ok": False, "error": f"Bridge non raggiungibile (HTTP {r.status_code})"}
-            data = r.json()
-            bridge_login = str(data.get("login", ""))
-            if bridge_login == str(acc.login):
-                # This is the active account — full test
-                return {"ok": True, "login": data.get("login"), "balance": data.get("balance"), "server": data.get("server")}
-            else:
-                # Different account — bridge is alive but can't verify this account without activating it
-                return {
-                    "ok": None,  # partial — bridge alive but not this account
-                    "bridge_login": bridge_login,
-                    "requested_login": acc.login,
-                }
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{bridge_url.rstrip('/')}/test-credentials",
+                json={"login": acc.login, "password": acc.password, "server": acc.server},
+            )
+            return r.json()
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

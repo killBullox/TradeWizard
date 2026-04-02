@@ -469,6 +469,58 @@ def _make_app(bridge: MT5Bridge):
         return {"status": "ok", "mt5_available": MT5_AVAILABLE,
                 "connected": bridge.connected}
 
+    @app.post("/test-credentials")
+    async def test_credentials(request: Request):
+        """Temporarily connect with given credentials to verify them, then reconnect to original."""
+        if not MT5_AVAILABLE:
+            return {"ok": True, "note": "Simulation mode — credentials not verified"}
+        body = await request.json()
+        test_login    = int(body.get("login", 0))
+        test_password = body.get("password", "")
+        test_server   = body.get("server", "")
+        if not test_login:
+            return {"ok": False, "error": "Login required"}
+        # Save current connection params
+        orig_login    = bridge.login
+        orig_password = bridge.password
+        orig_server   = bridge.server
+        try:
+            mt5.shutdown()
+            kwargs = {"login": test_login}
+            if test_password: kwargs["password"] = test_password
+            if test_server:   kwargs["server"]   = test_server
+            if bridge.path:   kwargs["path"]     = bridge.path
+            if not mt5.initialize(**kwargs):
+                err = mt5.last_error()
+                return {"ok": False, "error": f"MT5 error {err[0]}: {err[1]}"}
+            info = mt5.account_info()
+            result = {
+                "ok": True,
+                "login":   info.login    if info else test_login,
+                "balance": info.balance  if info else None,
+                "server":  info.server   if info else test_server,
+                "name":    info.name     if info else "",
+            }
+            return result
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        finally:
+            # Always reconnect to original account
+            try:
+                mt5.shutdown()
+                rkw = {}
+                if orig_login:    rkw["login"]    = orig_login
+                if orig_password: rkw["password"] = orig_password
+                if orig_server:   rkw["server"]   = orig_server
+                if bridge.path:   rkw["path"]     = bridge.path
+                if rkw:
+                    mt5.initialize(**rkw)
+                else:
+                    mt5.initialize()
+                bridge.connected = True
+            except Exception:
+                pass
+
     @app.get("/candles")
     async def candles(symbol: str = "EURUSD", timeframe: str = "H1", count: int = 500):
         """Return the last `count` OHLCV bars for symbol/timeframe."""

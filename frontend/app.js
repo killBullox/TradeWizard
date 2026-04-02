@@ -2496,6 +2496,7 @@ function hideAddAccountForm() {
 async function submitAddAccount() {
   const label    = document.getElementById('acc-label').value.trim();
   const login    = document.getElementById('acc-login').value.trim();
+  const password = document.getElementById('acc-password').value;
   const server   = document.getElementById('acc-server').value.trim() || 'XM.COM-MT5';
   const acc_type = document.getElementById('acc-type').value;
   if (!label || !login) { alert('Etichetta e Login sono obbligatori.'); return; }
@@ -2506,11 +2507,11 @@ async function submitAddAccount() {
   await fetch('/api/broker/accounts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ label, login, server, account_type: acc_type }),
+    body: JSON.stringify({ label, login, password, server, account_type: acc_type }),
   });
   hideAddAccountForm();
   // Clear form
-  ['acc-label','acc-login'].forEach(id => document.getElementById(id).value = '');
+  ['acc-label','acc-login','acc-password'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('acc-server').value = 'XM.COM-MT5';
   loadBrokerAccounts();
 }
@@ -2544,10 +2545,9 @@ async function testBrokerAccount(id, btn) {
     const r = await fetch(`/api/broker/accounts/${id}/test`);
     const data = await r.json();
     if (data.ok === true) {
-      showToast('success', `✓ Connesso — Login: ${data.login} | Balance: $${parseFloat(data.balance||0).toLocaleString('it-IT',{minimumFractionDigits:2})}`);
-    } else if (data.ok === null) {
-      // Bridge alive but connected to different account
-      showToast('info', `ℹ Bridge attivo (connesso a login ${data.bridge_login}). Per testare questo account attivalo prima.`);
+      const name = data.name ? ` — ${data.name}` : '';
+      const bal  = data.balance != null ? ` | Balance: $${parseFloat(data.balance).toLocaleString('it-IT',{minimumFractionDigits:2})}` : '';
+      showToast('success', `✓ Connesso${name} | Login: ${data.login}${bal}`);
     } else {
       showToast('error', `✗ ${data.error}`);
     }
