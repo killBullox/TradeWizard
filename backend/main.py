@@ -426,6 +426,9 @@ async def update_config(key: str, data: dict):
     value = str(data.get("value", ""))
     async with async_session_factory() as s:
         await set_config(key, value, s)
+        # Keep paper_balance in sync with account_balance
+        if key == "account_balance":
+            await set_config("paper_balance", value, s)
     return {"key": key, "value": value}
 
 

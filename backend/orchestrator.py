@@ -72,7 +72,11 @@ class Orchestrator:
 
         # Initialize paper trading account
         async with async_session_factory() as s:
-            paper_bal = float(await get_config("paper_balance", s) or 10000.0)
+            paper_bal = await get_config("paper_balance", s)
+            if not paper_bal:
+                # Fall back to the account_balance from Settings
+                paper_bal = await get_config("account_balance", s)
+            paper_bal = float(paper_bal or 10000.0)
         self._paper = get_paper_account(
             broadcast_fn=self.broadcast,
             initial_balance=paper_bal,
