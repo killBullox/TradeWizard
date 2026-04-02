@@ -316,7 +316,9 @@ function renderTradesTable(trades) {
     const pip   = t.symbol?.includes('JPY') ? 0.01 : (["XAUUSD","XAGUSD","US30","NAS100","US500"].includes(t.symbol) ? 1.0 : 0.0001);
     const isBE  = entry > 0 && sl > 0 && Math.abs(sl - entry) <= pip * 2;
     const slStyle = isBE ? 'color:#86efac;font-weight:700' : '';
-    const slLabel = t.stop_loss != null ? `<span style="${slStyle}" title="${isBE ? 'Breakeven' : ''}">${t.stop_loss}${isBE ? ' 🟢' : ''}</span>` : '-';
+    const slLabel = t.stop_loss != null
+      ? `<span style="${slStyle}" title="${isBE ? 'Breakeven' : ''}">${t.stop_loss}${isBE ? ' <sup style="font-size:0.65em;background:#166534;color:#86efac;padding:1px 3px;border-radius:3px">BE</sup>' : ''}</span>`
+      : '-';
 
     const tp1 = t.take_profit_1;
     const tp2 = t.take_profit_2;
