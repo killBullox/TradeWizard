@@ -491,10 +491,10 @@ Each agent must respond from their own perspective:
                 f"IMPORTANT: Respond ONLY with valid JSON."
             )
 
-            verdict_result = await self._call_claude(
-                SYSTEM_PROMPT, verdict_prompt, max_tokens=3000, use_thinking=True
+            verdict_parsed = await self._call_claude_structured(
+                SYSTEM_PROMPT, verdict_prompt, max_tokens=3000
             )
-            verdict_parsed = self._extract_json(verdict_result)
+            verdict_result = json.dumps(verdict_parsed, indent=2, default=str)
 
             transcript.append({"speaker": "JR", "message": verdict_result, "round": round_num, "is_verdict": True})
 
