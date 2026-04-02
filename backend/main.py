@@ -1360,6 +1360,7 @@ def _trade_to_dict(t: Trade) -> dict:
         "close_time": t.close_time.isoformat() if t.close_time else None,
         "close_price": t.close_price, "pnl_pips": t.pnl_pips, "pnl_usd": t.pnl_usd,
         "result": t.result, "trailing_sl_updates": t.trailing_sl_updates,
+        "tp_hits": t.tp_hits or 0,
     }
 
 

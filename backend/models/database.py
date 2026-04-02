@@ -51,8 +51,9 @@ class Trade(Base):
     pnl_usd = Column(Float, nullable=True)
     result = Column(String(20), nullable=True)  # WIN / LOSS / BREAKEVEN
     trailing_sl_updates = Column(Integer, default=0)
-    is_paper = Column(Boolean, default=False)     # True = paper trade
-    archived = Column(Boolean, default=False)     # True = hidden from stats (soft-archived)
+    tp_hits = Column(Integer, default=0)             # how many TPs have been partially closed (0/1/2/3)
+    is_paper = Column(Boolean, default=False)
+    archived = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     logs = relationship("AgentLog", back_populates="trade")
@@ -202,6 +203,7 @@ def _migrate_trades(conn):
     from sqlalchemy import text as _text
     new_cols = [
         ("trailing_sl_updates", "INTEGER DEFAULT 0"),
+        ("tp_hits",             "INTEGER DEFAULT 0"),
         ("is_paper",            "BOOLEAN DEFAULT 0"),
         ("archived",            "BOOLEAN DEFAULT 0"),
     ]

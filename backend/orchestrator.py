@@ -363,12 +363,16 @@ class Orchestrator:
                 data = await fetch_ohlcv(trade.symbol, "H1", 50)
                 current_price = data.get("indicators", {}).get("current_price", 0)
 
+                tp_hits = trade.tp_hits or 0
                 decision = await self.at.manage_trade(
                     {
                         "id": trade.id, "symbol": trade.symbol, "direction": trade.direction,
                         "entry_price": trade.entry_price, "stop_loss": trade.stop_loss,
-                        "take_profit_1": trade.take_profit_1, "take_profit_2": trade.take_profit_2,
-                        "take_profit_3": trade.take_profit_3, "lot_size": trade.lot_size,
+                        # Null out already-hit TPs so AT targets the correct next level
+                        "take_profit_1": trade.take_profit_1 if tp_hits < 1 else None,
+                        "take_profit_2": trade.take_profit_2 if tp_hits < 2 else None,
+                        "take_profit_3": trade.take_profit_3 if tp_hits < 3 else None,
+                        "lot_size": trade.lot_size,
                         "ict_setup": trade.ict_setup, "trailing_sl_updates": trade.trailing_sl_updates,
                     },
                     current_price,
@@ -730,17 +734,13 @@ class Orchestrator:
                 await s.commit()
 
     async def _consume_next_tp(self, trade_id: int):
-        """After a partial close, null the lowest non-null TP so the AT won't re-trigger it."""
+        """After a partial close, increment tp_hits so AT won't re-trigger the same TP.
+        Original TP prices are kept intact for UI display."""
         async with async_session_factory() as s:
             t = await s.get(Trade, trade_id)
             if not t:
                 return
-            if t.take_profit_1 is not None:
-                t.take_profit_1 = None
-            elif t.take_profit_2 is not None:
-                t.take_profit_2 = None
-            elif t.take_profit_3 is not None:
-                t.take_profit_3 = None
+            t.tp_hits = (t.tp_hits or 0) + 1
             await s.commit()
 
     async def _update_trade_sl(self, trade_id: int, new_sl: float):

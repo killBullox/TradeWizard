@@ -321,12 +321,13 @@ function renderTradesTable(trades) {
     const tp1 = t.take_profit_1;
     const tp2 = t.take_profit_2;
     const tp3 = t.take_profit_3;
-    // For closed trades, show TP as green if close_price reached it
-    const cp = parseFloat(t.close_price) || 0;
     const isBuy = t.direction === 'BUY';
-    const tp1hit = tp1 && cp > 0 && (isBuy ? cp >= tp1 : cp <= tp1);
-    const tp2hit = tp2 && cp > 0 && (isBuy ? cp >= tp2 : cp <= tp2);
-    const tp3hit = tp3 && cp > 0 && (isBuy ? cp >= tp3 : cp <= tp3);
+    const hits = t.tp_hits || 0;
+    // Active trades: use tp_hits counter; closed trades: check close_price vs TP
+    const cp = parseFloat(t.close_price) || 0;
+    const tp1hit = hits >= 1 || (tp1 && cp > 0 && (isBuy ? cp >= tp1 : cp <= tp1));
+    const tp2hit = hits >= 2 || (tp2 && cp > 0 && (isBuy ? cp >= tp2 : cp <= tp2));
+    const tp3hit = hits >= 3 || (tp3 && cp > 0 && (isBuy ? cp >= tp3 : cp <= tp3));
     const tpFmt = (val, hit) => val != null
       ? `<span style="${hit ? 'color:#4ade80;font-weight:600' : ''}">${val}${hit ? ' ✓' : ''}</span>`
       : '<span style="color:var(--text-muted)">-</span>';
@@ -378,14 +379,14 @@ function renderOpenTrades(trades, livePnlMap = {}) {
     const pip = t.symbol?.includes('JPY') ? 0.01 : (["XAUUSD","XAGUSD","US30","NAS100","US500"].includes(t.symbol) ? 1.0 : 0.0001);
     const isBreakeven = entry > 0 && sl > 0 && Math.abs(sl - entry) <= pip * 2;
 
-    // TP hit detection using current price
+    // TP hit detection: use tp_hits counter (incremented on each partial close)
     const tp1 = parseFloat(t.take_profit_1) || 0;
     const tp2 = parseFloat(t.take_profit_2) || 0;
     const tp3 = parseFloat(t.take_profit_3) || 0;
-    const price = parseFloat(cp) || 0;
-    const tp1hit = tp1 > 0 && price > 0 && (isBuy ? price >= tp1 : price <= tp1);
-    const tp2hit = tp2 > 0 && price > 0 && (isBuy ? price >= tp2 : price <= tp2);
-    const tp3hit = tp3 > 0 && price > 0 && (isBuy ? price >= tp3 : price <= tp3);
+    const hits = t.tp_hits || 0;
+    const tp1hit = hits >= 1 || (tp1 > 0 && parseFloat(cp) > 0 && (isBuy ? parseFloat(cp) >= tp1 : parseFloat(cp) <= tp1));
+    const tp2hit = hits >= 2 || (tp2 > 0 && parseFloat(cp) > 0 && (isBuy ? parseFloat(cp) >= tp2 : parseFloat(cp) <= tp2));
+    const tp3hit = hits >= 3 || (tp3 > 0 && parseFloat(cp) > 0 && (isBuy ? parseFloat(cp) >= tp3 : parseFloat(cp) <= tp3));
 
     // Status text
     const statusParts = [];
