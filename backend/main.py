@@ -1112,27 +1112,32 @@ async def activate_broker_account(account_id: int):
 
 @app.get("/api/broker/accounts/{account_id}/test")
 async def test_broker_account(account_id: int):
-    """Test connectivity for a specific account by querying the bridge."""
+    """Test bridge connectivity for a specific account."""
     async with async_session_factory() as s:
         acc = await s.get(MT5Account, account_id)
         bridge_url = await get_config("mt5_bridge_url", s) or ""
     if not acc:
         raise HTTPException(404, "Account not found")
     if not bridge_url:
-        return {"ok": False, "error": "MT5 bridge not configured"}
-    # If this is the active account, just query the bridge directly
+        return {"ok": False, "error": "MT5 bridge non configurato"}
     import httpx
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             r = await client.get(f"{bridge_url.rstrip('/')}/account")
-            if r.status_code == 200:
-                data = r.json()
-                if str(data.get("login")) == str(acc.login):
-                    return {"ok": True, "login": data.get("login"), "balance": data.get("balance"), "server": data.get("server")}
-                else:
-                    return {"ok": False, "error": f"Bridge connesso a login {data.get('login')}, non {acc.login}. Attiva prima questo account."}
+            if r.status_code != 200:
+                return {"ok": False, "error": f"Bridge non raggiungibile (HTTP {r.status_code})"}
+            data = r.json()
+            bridge_login = str(data.get("login", ""))
+            if bridge_login == str(acc.login):
+                # This is the active account — full test
+                return {"ok": True, "login": data.get("login"), "balance": data.get("balance"), "server": data.get("server")}
             else:
-                return {"ok": False, "error": f"Bridge risposta {r.status_code}"}
+                # Different account — bridge is alive but can't verify this account without activating it
+                return {
+                    "ok": None,  # partial — bridge alive but not this account
+                    "bridge_login": bridge_login,
+                    "requested_login": acc.login,
+                }
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

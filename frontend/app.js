@@ -2395,7 +2395,7 @@ async function deleteBackup(filename) {
 // ── Toast Notification ────────────────────────────────────────────────────────
 function showToast(type, msg) {
   const el = document.createElement('div');
-  const bg = type === 'error' ? '#ef4444' : type === 'success' ? '#22c55e' : '#3b82f6';
+  const bg = type === 'error' ? '#ef4444' : type === 'success' ? '#22c55e' : type === 'info' ? '#f59e0b' : '#3b82f6';
   el.style.cssText = `position:fixed;bottom:24px;right:24px;z-index:99999;background:${bg};color:#fff;padding:12px 18px;border-radius:8px;font-size:0.9rem;box-shadow:0 4px 12px rgba(0,0,0,0.4);max-width:340px;word-break:break-word;transition:opacity 0.4s`;
   el.textContent = msg;
   document.body.appendChild(el);
@@ -2543,10 +2543,13 @@ async function testBrokerAccount(id, btn) {
   try {
     const r = await fetch(`/api/broker/accounts/${id}/test`);
     const data = await r.json();
-    if (data.ok) {
-      showToast('success', `✓ Connesso — Login: ${data.login}, Balance: $${parseFloat(data.balance||0).toLocaleString('it-IT',{minimumFractionDigits:2})}`);
+    if (data.ok === true) {
+      showToast('success', `✓ Connesso — Login: ${data.login} | Balance: $${parseFloat(data.balance||0).toLocaleString('it-IT',{minimumFractionDigits:2})}`);
+    } else if (data.ok === null) {
+      // Bridge alive but connected to different account
+      showToast('info', `ℹ Bridge attivo (connesso a login ${data.bridge_login}). Per testare questo account attivalo prima.`);
     } else {
-      showToast('error', `✗ Test fallito: ${data.error}`);
+      showToast('error', `✗ ${data.error}`);
     }
   } catch(e) {
     showToast('error', `Errore: ${e.message}`);
