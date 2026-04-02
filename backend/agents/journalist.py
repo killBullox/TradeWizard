@@ -249,6 +249,85 @@ Be specific and actionable, not generic.
         })
         return result
 
+    async def emergency_meeting(
+        self,
+        topic: str,
+        trades: list,
+        performance_stats: dict,
+        system_config: dict,
+    ) -> dict:
+        """User-convened emergency meeting. Agents must be critical and challenging, not compliant."""
+        await self.broadcast_status("EMERGENCY_MEETING", f"Emergency meeting convened: {topic[:60]}")
+        await self.broadcast({
+            "type":         "meeting_started",
+            "meeting_type": "EMERGENCY",
+            "participants": ["ICTEA", "RM", "TR", "AT", "JR"],
+            "timestamp":    datetime.utcnow().isoformat(),
+        })
+
+        trades_summary = []
+        for t in trades[-20:]:
+            d = t if isinstance(t, dict) else {k: v for k, v in t.__dict__.items() if not k.startswith("_")}
+            trades_summary.append({
+                "symbol":      d.get("symbol"),
+                "direction":   d.get("direction"),
+                "setup":       d.get("ict_setup"),
+                "result":      d.get("result"),
+                "pnl_usd":     d.get("pnl_usd"),
+                "entry":       d.get("entry_price"),
+                "exit":        d.get("close_price"),
+                "sl":          d.get("stop_loss"),
+                "tp1":         d.get("take_profit_1"),
+                "open_time":   str(d.get("open_time", ""))[:16],
+                "close_time":  str(d.get("close_time", ""))[:16],
+            })
+
+        emergency_prompt = f"""
+## 🚨 EMERGENCY MEETING — Convened by the Head Trader
+
+### Topic Raised by the Head Trader:
+{topic}
+
+### Recent Trades
+{json.dumps(trades_summary, indent=2)}
+
+### Current System Configuration
+{json.dumps(system_config, indent=2)}
+
+### Performance Statistics
+{json.dumps(performance_stats, indent=2)}
+
+---
+
+## CRITICAL INSTRUCTION FOR ALL AGENTS:
+
+This meeting was called by the Head Trader because they have serious concerns.
+Your role is NOT to reassure or validate — it is to provide HONEST, RIGOROUS analysis.
+
+Rules for this meeting:
+1. **Be critical and data-driven.** If the Head Trader's concern is valid, say so clearly and explain WHY with evidence from the trade data.
+2. **Challenge assumptions.** If the Head Trader's concern contains a misunderstanding or is partially wrong, push back with reasoning and data — do not just agree.
+3. **No sycophancy.** Phrases like "you're absolutely right", "great point", "I agree completely" are forbidden. Engage with the substance.
+4. **Quantify everything.** Don't say "SL is too tight" — say "average SL is 22 pips, with typical slippage of 2-3 pips that represents 10-14% friction on each trade."
+5. **Disagree openly if warranted.** If the data does NOT support the concern, say so directly.
+6. **Propose concrete changes** with specific numbers, not vague directions.
+
+Each agent must respond from their own perspective:
+- **ICTEA**: Are the setups technically valid? Are we entering at the right levels?
+- **RM**: Is the risk/reward realistic? Are SLs appropriately sized vs ATR and spread costs?
+- **TR**: Is execution timing correct? Are we entering at market or limit?
+- **AT**: What do the trade durations and PnL distributions tell us?
+- **JR**: What is the objective verdict? What must change immediately?
+"""
+        result = await self._call_claude_structured(SYSTEM_PROMPT, emergency_prompt, max_tokens=5000)
+        await self.broadcast({
+            "type":         "meeting_completed",
+            "meeting_type": "EMERGENCY",
+            "improvements": result.get("system_improvements", []),
+            "timestamp":    datetime.utcnow().isoformat(),
+        })
+        return result
+
     async def generate_performance_report(self, stats: dict) -> dict:
         await self.broadcast_status("REPORTING", "Generating performance report...")
 

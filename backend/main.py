@@ -402,6 +402,50 @@ async def trigger_meeting(data: dict):
     return {"status": "Meeting scheduled", "type": meeting_type}
 
 
+@app.post("/api/meetings/emergency")
+async def trigger_emergency_meeting(data: dict):
+    """User-convened emergency meeting with critical/challenging agent responses."""
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    topic = data.get("topic", "").strip()
+    if not topic:
+        raise HTTPException(400, "Topic is required")
+    asyncio.create_task(_run_emergency_meeting(topic))
+    return {"status": "Emergency meeting started", "topic": topic}
+
+
+async def _run_emergency_meeting(topic: str):
+    try:
+        async with async_session_factory() as s:
+            config   = await orchestrator._load_config(s)
+            perf_raw = await get_config("system_performance", s)
+            perf     = json.loads(perf_raw or "{}")
+            result   = await s.execute(
+                select(Trade).where(Trade.status == "CLOSED").order_by(Trade.close_time.desc()).limit(20)
+            )
+            trades = result.scalars().all()
+        result = await orchestrator.jr.emergency_meeting(topic, list(trades), perf, config)
+        # Apply any system improvements proposed
+        improvements = result.get("system_improvements", [])
+        if improvements:
+            await orchestrator._apply_improvements(improvements)
+        # Save to DB
+        async with async_session_factory() as s:
+            meeting = Meeting(
+                meeting_type="EMERGENCY",
+                trigger="User",
+                participants="ICTEA,RM,TR,AT,JR",
+                agenda=topic[:500],
+                summary=json.dumps(result.get("conclusions", {})),
+                improvements=json.dumps(improvements),
+                created_at=datetime.utcnow(),
+            )
+            s.add(meeting)
+            await s.commit()
+    except Exception as exc:
+        logger.error("Emergency meeting failed: %s", exc, exc_info=True)
+
+
 @app.get("/api/logs")
 async def get_logs(agent: str | None = None, limit: int = 100):
     async with async_session_factory() as s:

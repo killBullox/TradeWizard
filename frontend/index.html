@@ -24,6 +24,7 @@
     <div class="header-right">
       <button class="btn btn-primary" id="btn-analyze-all">🔍 Analyze All</button>
       <button class="btn btn-secondary" id="btn-meeting">📋 Run Meeting</button>
+      <button class="btn btn-danger" id="btn-emergency-meeting" onclick="openEmergencyMeeting()" style="background:#dc2626">🚨 Emergency Meeting</button>
       <button class="btn btn-ghost" id="btn-settings">⚙️ Settings</button>
     </div>
   </header>
@@ -890,6 +891,23 @@
         <div style="display:flex;gap:10px;justify-content:flex-end">
           <button class="btn btn-secondary btn-sm" onclick="closePinModal()">Annulla</button>
           <button class="btn btn-primary btn-sm" onclick="confirmPinModal()">Conferma</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Emergency Meeting Modal -->
+    <div id="emergency-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center">
+      <div style="background:var(--bg-secondary);border:2px solid #dc2626;border-radius:12px;padding:28px;width:520px;max-width:92vw">
+        <h3 style="margin:0 0 6px;color:#f87171">🚨 Emergency Meeting</h3>
+        <p style="margin:0 0 16px;color:var(--text-muted);font-size:0.83rem">
+          Convoca tutti gli agenti su un tema critico. Gli agenti risponderanno in modo indipendente e critico — <strong>non compiacente</strong>.
+        </p>
+        <label style="font-size:0.78rem;color:var(--text-muted);display:block;margin-bottom:6px">Descrivi il tema / la tua preoccupazione</label>
+        <textarea id="emergency-topic" rows="5" placeholder="es. Gli agenti stanno applicando logica di scalping estremo con SL da 20-22 pips. In un ambiente live con slippage questi trade non sarebbero sostenibili. Voglio che ogni agente valuti la situazione oggettivamente e proponga modifiche concrete..."
+          class="form-input" style="width:100%;box-sizing:border-box;resize:vertical;font-size:0.88rem;line-height:1.5"></textarea>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+          <button class="btn btn-secondary btn-sm" onclick="closeEmergencyMeeting()">Annulla</button>
+          <button class="btn btn-danger btn-sm" onclick="submitEmergencyMeeting()" style="background:#dc2626">🚨 Convoca</button>
         </div>
       </div>
     </div>

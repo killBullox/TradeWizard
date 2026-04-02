@@ -2397,6 +2397,42 @@ async function deleteBackup(filename) {
   loadBackups();
 }
 
+// ── Emergency Meeting ─────────────────────────────────────────────────────────
+function openEmergencyMeeting() {
+  const modal = document.getElementById('emergency-modal');
+  modal.style.display = 'flex';
+  setTimeout(() => document.getElementById('emergency-topic').focus(), 50);
+}
+
+function closeEmergencyMeeting() {
+  document.getElementById('emergency-modal').style.display = 'none';
+}
+
+async function submitEmergencyMeeting() {
+  const topic = document.getElementById('emergency-topic').value.trim();
+  if (!topic) { alert('Descrivi il tema della riunione.'); return; }
+  const btn = document.querySelector('#emergency-modal .btn-danger');
+  btn.textContent = '⏳ In corso...';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/meetings/emergency', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    closeEmergencyMeeting();
+    addActivity('🚨 Emergency Meeting convocato — gli agenti stanno analizzando...', 'warning');
+    // Switch to meetings tab to see the result
+    document.querySelector('[data-tab="meetings"]')?.click();
+  } catch(e) {
+    showToast('error', 'Errore: ' + e.message);
+  } finally {
+    btn.textContent = '🚨 Convoca';
+    btn.disabled = false;
+  }
+}
+
 // ── Toast Notification ────────────────────────────────────────────────────────
 function showToast(type, msg) {
   const el = document.createElement('div');
