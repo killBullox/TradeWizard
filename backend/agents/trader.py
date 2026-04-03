@@ -114,9 +114,14 @@ class TraderAgent(BaseAgent):
 - FVGs: {json.dumps(ind.get('fvgs', [])[:3])}
 - Order Blocks: {json.dumps(ind.get('order_blocks', [])[:3])}
 
+### Hard Constraints (auto-enforced — violation = rejection)
+- Minimum SL distance: {position.get('sl_pips', 30)} pips (from risk manager). If this is < 30, use 30.
+- TP1 must give net RR ≥ {position.get('rr_ratio', 2.0)} AFTER ~3 pips friction
+- SL must be at a STRUCTURAL level (swing low/high, OB edge), not arbitrary
+
 Generate the precise trade parameters.
 Choose the most optimal entry within the ICT zone.
-Set SL at the ICT-defined invalidation level.
+Set SL at the ICT-defined invalidation level (must be ≥ min SL distance).
 Define TP levels at key liquidity targets.
 """
         result = await self._call_claude_structured(SYSTEM_PROMPT, user_msg, max_tokens=3000)

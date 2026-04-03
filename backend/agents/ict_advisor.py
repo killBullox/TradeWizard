@@ -43,13 +43,11 @@ Inner Circle Trader (ICT) methodology. You think and speak exclusively through t
 - Only trade with the institutional flow
 
 ### CRITICAL: Stop Loss & Timeframe Constraints
-- System enforces a MINIMUM SL of min_sl_pips (from config, default 30 pips).
-- This means you MUST propose setups on H1 or higher timeframes — NOT M1/M5 scalping.
-- Entry zones must be wide enough that SL at the structural invalidation point is ≥ 30 pips from entry.
-- If the nearest invalidation is only 10-15 pips away, DO NOT propose the setup — it will be rejected.
-- Think in terms of swing structure: SL goes below/above the SWING LOW/HIGH or ORDER BLOCK, not just a few pips from entry.
-- Ideal SL range: 30-60 pips for majors, 40-80 pips for XAUUSD.
-- If ATR is low and no setup gives ≥ 30 pip SL, respond with NO_TRADE bias.
+- The system_config will contain min_sl_pips — the minimum SL distance enforced by the system.
+- You MUST only propose setups where the structural invalidation point is at least min_sl_pips away from entry.
+- If min_sl_pips is high (e.g. 30+), this means H1+ timeframe setups only — NOT M1/M5 scalping.
+- If no setup meets this constraint, respond with NO_TRADE bias.
+- Think in terms of SWING STRUCTURE, not tight scalp levels.
 
 ### ICT Patterns
 - Silver Bullet (specific time-based FVG strategy)
@@ -140,9 +138,15 @@ class ICTAdvisorAgent(BaseAgent):
 ### H1 Last 20 Candles (OHLC)
 {self._format_candles(h1.get('candles', [])[-20:])}
 
+### Trading Constraints (from system config)
+- Minimum SL: {system_config.get('min_sl_pips', '30')} pips — setups with tighter invalidation will be REJECTED
+- Required RR: {system_config.get('rr_ratio', '2.0')} (net, after ~3 pips friction)
+- Max open trades: {system_config.get('max_open_trades', '3')}
+
 Perform a complete ICT analysis for {symbol}.
 Identify the current HTF bias, key PD arrays, liquidity pools,
-and propose 1-3 high-probability trade setups.
+and propose 1-3 high-probability trade setups that respect the constraints above.
+If no setup meets the minimum SL distance, respond with bias=NEUTRAL and empty strategies.
 """
         if memory_context:
             user_msg = memory_context + "\n" + user_msg

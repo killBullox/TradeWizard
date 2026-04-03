@@ -20,8 +20,8 @@ Your role is to protect trading capital by rigorously evaluating every proposed 
 - CRITICAL: When computing RR, account for execution friction (~3 pips: spread + slippage).
   Subtract friction from TP distance, add friction to SL distance to get NET RR.
   Example: SL=30p, TP=60p → net RR = (60-3)/(30+3) = 1.73, NOT 2.0.
-  The system enforces min_sl_pips (configurable, default 30p) — do NOT approve setups
-  that require SL tighter than this, as they indicate scalping not sustainable in live.
+- The system config contains min_sl_pips — reject any setup with SL below this value.
+- The system config contains rr_ratio — the minimum NET RR required after friction.
 
 ### Statistical Edge
 - Evaluate win probability based on historical ICT setup performance:
@@ -48,8 +48,8 @@ Your role is to protect trading capital by rigorously evaluating every proposed 
   * Gold (XAUUSD) is often inversely correlated with USD
 
 ### Red Flags (auto-reject if present)
-- SL distance < min_sl_pips (default 30 pips) — ALWAYS reject, no exceptions
-- Net RR < configured rr_ratio after friction (~3 pips) — ALWAYS reject
+- SL distance < min_sl_pips from system config — ALWAYS reject, no exceptions
+- Net RR < rr_ratio from system config after friction — ALWAYS reject
 - RR < 1.2
 - Win probability < 45%
 - Expected Value < 0
@@ -57,9 +57,8 @@ Your role is to protect trading capital by rigorously evaluating every proposed 
 - High-impact news in next 2 hours (if provided)
 
 ### SL Sizing Guidelines
-- sl_pips MUST be ≥ min_sl_pips from config (default 30). If ICTEA's invalidation is tighter, REJECT the setup.
-- tp1_pips must give net RR ≥ 2.0 after friction. Formula: tp1_pips ≥ (sl_pips + 3) × required_rr + 3
-- Example: sl=35p → tp1 ≥ (35+3)×2.0+3 = 79p gross for net RR 2.0
+- sl_pips MUST be ≥ min_sl_pips (read from system config). If ICTEA's invalidation is tighter, REJECT.
+- tp1_pips must give net RR ≥ rr_ratio after friction. Formula: tp1_pips ≥ (sl_pips + 3) × rr_ratio + 3
 
 ## Output Format
 Respond with JSON:
@@ -135,9 +134,10 @@ class RiskManagerAgent(BaseAgent):
 ### Account Parameters
 - Account Balance: ${account_balance:,.2f}
 - Max Risk Per Trade: {max_risk}%
-- Target RR Ratio: {rr_ratio}
+- Target RR Ratio: {rr_ratio} (NET, after ~3 pips friction)
 - Max Open Trades: {max_trades}
 - Currently Open Trades: {open_trades_count}
+- **Minimum SL Distance: {system_config.get('min_sl_pips', '30')} pips** (HARD LIMIT — reject if setup SL is below this)
 
 ### Market Conditions
 - Current Price: {current_price}
@@ -151,9 +151,9 @@ class RiskManagerAgent(BaseAgent):
 
 Evaluate the risk for this trade.
 Calculate exact position size, win probability, expected value, and risk factors.
-The SL should be placed below the Order Block / FVG (for longs) or above (for shorts),
-approximately {atr_pips * 1.5:.0f} pips from entry (adjust based on setup).
-TP1 at {rr_ratio}x risk, TP2 at {rr_ratio * 1.5:.1f}x risk if applicable.
+SL MUST be ≥ {system_config.get('min_sl_pips', '30')} pips. Place SL at structural level (OB/FVG/swing) — reject if invalidation is too close.
+TP1 must give NET RR ≥ {rr_ratio} after ~3 pips friction: tp1_pips ≥ (sl_pips + 3) × {rr_ratio} + 3.
+TP2 at {rr_ratio * 1.5:.1f}x risk if applicable.
 """
         if memory_context:
             user_msg = memory_context + "\n" + user_msg
