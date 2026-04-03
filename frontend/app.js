@@ -138,7 +138,7 @@ function handleMessage(msg) {
       break;
 
     case 'meeting_verdict':
-      addMeetingVerdict(msg.conclusions, msg.improvements, msg.round, msg.full_response);
+      addMeetingVerdict(msg.conclusions, msg.improvements, msg.round, msg.full_response, msg.verdict_text);
       break;
 
     case 'meeting_completed':
@@ -2513,7 +2513,7 @@ function addMeetingMessage(speaker, text, msgType, round) {
   msgs.scrollTop = msgs.scrollHeight;
 }
 
-function addMeetingVerdict(conclusions, improvements, round, fullResponse) {
+function addMeetingVerdict(conclusions, improvements, round, fullResponse, verdictText) {
   const msgs = document.getElementById('meeting-messages');
   if (!msgs) return;
 
@@ -2527,11 +2527,17 @@ function addMeetingVerdict(conclusions, improvements, round, fullResponse) {
     `<li><strong>${escHtml(i.category || '')}</strong>: ${escHtml(i.improvement || '')}</li>`
   ).join('');
 
+  // Show verdict text (readable summary) if available
+  const verdictHtml = verdictText
+    ? `<div style="margin-bottom:10px;color:#e2e8f0;white-space:pre-wrap;line-height:1.5">${escHtml(verdictText)}</div>`
+    : '';
+
   div.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <span style="font-weight:700;color:#f59e0b">📝 Verdetto JR — Round ${round || 1}</span>
       <span style="font-size:0.7rem;color:var(--text-muted)">${now}</span>
     </div>
+    ${verdictHtml}
     ${conclusionsList ? `<div style="margin-bottom:8px"><strong style="color:#e2e8f0;font-size:0.78rem">Conclusioni:</strong><ul style="margin:4px 0;padding-left:20px;color:#e2e8f0">${conclusionsList}</ul></div>` : ''}
     ${improvementsList ? `<div><strong style="color:#e2e8f0;font-size:0.78rem">Improvements proposti:</strong><ul style="margin:4px 0;padding-left:20px;color:#e2e8f0">${improvementsList}</ul></div>` : ''}
     <div style="margin-top:10px;font-size:0.78rem;color:var(--text-muted)">Scrivi un commento per continuare la discussione, oppure approva per chiudere il meeting.</div>`;

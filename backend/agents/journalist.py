@@ -474,45 +474,61 @@ Each agent must respond from their own perspective:
             for entry in transcript:
                 transcript_text += f"\n**{entry['speaker']}**: {entry['message']}\n"
 
-            verdict_prompt = (
-                f"## EMERGENCY MEETING VERDICT\n\n"
+            # Step 1: Get a readable verdict summary (plain text)
+            summary_prompt = (
+                f"## EMERGENCY MEETING — FINAL VERDICT\n\n"
                 f"Topic: {topic}\n\n"
                 f"## Full Discussion:\n{transcript_text}\n\n"
                 f"---\n"
-                f"As the Journalist (JR), produce the final verdict.\n"
-                f"Synthesize ALL agent perspectives and Head Trader comments.\n"
-                f"Respond in the SAME LANGUAGE as the discussion.\n\n"
-                f"Return a JSON object with:\n"
-                f'{{"conclusions": ["conclusion 1", "conclusion 2", ...], '
-                f'"system_improvements": [{{"category": "...", "improvement": "...", '
-                f'"config_change": {{"key": "...", "new_value": "..."}}}}], '
-                f'"setup_memory_updates": [{{"setup_type": "...", "lessons": ["..."], '
-                f'"failure_patterns": ["..."], "success_patterns": ["..."]}}]}}\n\n'
-                f"IMPORTANT: Respond ONLY with valid JSON."
+                f"As JR, write a concise verdict (200 words max) summarizing:\n"
+                f"1. Key conclusions (numbered list)\n"
+                f"2. Concrete changes to implement\n"
+                f"3. What each agent should do differently\n"
+                f"Respond in the SAME LANGUAGE as the discussion. Plain text, no JSON."
+            )
+            verdict_text = await self._call_claude(
+                SYSTEM_PROMPT, summary_prompt, max_tokens=1500, use_thinking=True
             )
 
+            # Step 2: Extract structured data (JSON) in a separate call
+            json_prompt = (
+                f"Based on this meeting verdict:\n\n{verdict_text}\n\n"
+                f"Extract the structured data as a JSON object. Keys:\n"
+                f"- conclusions: array of 3-6 short conclusion strings\n"
+                f"- system_improvements: array of objects with category, improvement, "
+                f"config_change (key + new_value). ONLY include config changes for known "
+                f"numeric or JSON keys. Leave config_change empty if no config change needed.\n"
+                f"- setup_memory_updates: array of objects with setup_type, lessons, "
+                f"failure_patterns, success_patterns\n\n"
+                f"Respond ONLY with valid JSON. No markdown fences."
+            )
             verdict_parsed = await self._call_claude_structured(
-                SYSTEM_PROMPT, verdict_prompt, max_tokens=3000
+                "You extract structured data from meeting verdicts. Return ONLY valid JSON.",
+                json_prompt, max_tokens=2000
             )
-            verdict_result = json.dumps(verdict_parsed, indent=2, default=str)
 
-            # Debug: log verdict keys so we can diagnose empty saves
-            import logging
-            _log = logging.getLogger(__name__)
-            _log.info(f"[MEETING VERDICT] Keys: {list(verdict_parsed.keys())}")
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+            _log.info(f"[MEETING VERDICT] Keys: {list(verdict_parsed.keys())}, "
+                      f"conclusions={len(verdict_parsed.get('conclusions', []))}, "
+                      f"improvements={len(verdict_parsed.get('system_improvements', []))}")
             if "error" in verdict_parsed:
-                _log.error(f"[MEETING VERDICT] Parse error: {verdict_parsed.get('raw', '')[:300]}")
-            _log.info(f"[MEETING VERDICT] conclusions={len(verdict_parsed.get('conclusions', []))}, "
-                       f"improvements={len(verdict_parsed.get('system_improvements', []))}")
+                _log.error(f"[MEETING VERDICT] Parse failed: {verdict_parsed.get('raw', '')[:300]}")
+                # Fallback: save the text verdict as a single conclusion
+                verdict_parsed = {
+                    "conclusions": [verdict_text[:500]],
+                    "system_improvements": [],
+                    "setup_memory_updates": [],
+                }
 
-            transcript.append({"speaker": "JR", "message": verdict_result, "round": round_num, "is_verdict": True})
+            transcript.append({"speaker": "JR", "message": verdict_text, "round": round_num, "is_verdict": True})
 
             await self.broadcast({
                 "type": "meeting_verdict",
                 "conclusions": verdict_parsed.get("conclusions", []),
                 "improvements": verdict_parsed.get("system_improvements", []),
+                "verdict_text": verdict_text,
                 "round": round_num,
-                "full_response": verdict_result,
                 "timestamp": datetime.utcnow().isoformat(),
             })
 
