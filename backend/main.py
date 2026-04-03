@@ -125,6 +125,7 @@ async def lifespan(app: FastAPI):
     _start_mt5_bridge()
     orchestrator = Orchestrator(broadcast_fn=manager.broadcast)
     await orchestrator.start()
+    app.state.start_time = datetime.utcnow()
     logger.info("TradeWizard system started ✅")
     yield
     if orchestrator:
@@ -299,6 +300,75 @@ async def root():
             "Pragma": "no-cache",
         })
     return HTMLResponse(content='{"message":"TradeWizard API"}')
+
+
+@app.get("/api/health")
+async def health_check():
+    """Comprehensive health check for watchdog and monitoring."""
+    import psutil
+    now = datetime.utcnow()
+    start = getattr(app.state, "start_time", now)
+    uptime = (now - start).total_seconds()
+
+    # MT5 bridge status
+    mt5_ok = False
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3) as client:
+            async with async_session_factory() as s:
+                bridge_url = await get_config("mt5_bridge_url", s) or "http://localhost:5002"
+            r = await client.get(f"{bridge_url}/health")
+            mt5_ok = r.status_code == 200 and r.json().get("connected", False)
+    except Exception:
+        pass
+
+    # Last analysis time
+    last_analysis = None
+    try:
+        async with async_session_factory() as s:
+            from sqlalchemy import desc as _desc
+            result = await s.execute(
+                select(AgentLog).where(AgentLog.action == "ANALYSIS")
+                .order_by(_desc(AgentLog.timestamp)).limit(1)
+            )
+            row = result.scalar_one_or_none()
+            if row:
+                last_analysis = row.timestamp.isoformat()
+    except Exception:
+        pass
+
+    # Open trades count
+    open_trades = 0
+    try:
+        async with async_session_factory() as s:
+            result = await s.execute(select(Trade).where(Trade.status == "ACTIVE"))
+            open_trades = len(result.scalars().all())
+    except Exception:
+        pass
+
+    # System resources
+    mem = psutil.Process().memory_info()
+    disk = shutil.disk_usage(os.path.dirname(__file__))
+
+    # Determine overall status
+    status = "healthy"
+    if not orchestrator or not orchestrator._running:
+        status = "critical"
+    elif not mt5_ok:
+        status = "degraded"
+
+    return {
+        "status": status,
+        "uptime_seconds": int(uptime),
+        "backend_running": bool(orchestrator and orchestrator._running),
+        "mt5_connected": mt5_ok,
+        "last_analysis": last_analysis,
+        "open_trades": open_trades,
+        "memory_mb": round(mem.rss / 1024 / 1024, 1),
+        "disk_free_gb": round(disk.free / 1024**3, 1),
+        "active_meeting": bool(orchestrator and orchestrator._active_meeting),
+        "timestamp": now.isoformat(),
+    }
 
 
 @app.get("/api/status")
