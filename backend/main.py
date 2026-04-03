@@ -573,6 +573,27 @@ async def telegram_set_webhook(data: dict):
     return result
 
 
+@app.post("/whatsapp/webhook")
+async def whatsapp_webhook(request: Request):
+    """Receive incoming WhatsApp messages from Twilio webhook."""
+    if not orchestrator or not orchestrator._wa:
+        return {"ok": False}
+    form = await request.form()
+    form_data = dict(form)
+    asyncio.create_task(orchestrator._wa.handle_webhook(form_data))
+    # Twilio expects a TwiML response (empty is fine if we reply via API)
+    from fastapi.responses import Response
+    return Response(content="<Response></Response>", media_type="application/xml")
+
+
+@app.post("/api/whatsapp/test")
+async def whatsapp_test():
+    if not orchestrator or not orchestrator._wa:
+        raise HTTPException(503, "WhatsApp bot not configured")
+    result = await orchestrator._wa.send_test()
+    return result
+
+
 @app.get("/api/news")
 async def get_news(hours: int = 24, symbol: str | None = None):
     if not orchestrator or not orchestrator.news_filter:

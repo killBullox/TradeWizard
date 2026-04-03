@@ -30,6 +30,7 @@ from agents import (
 from services.forex_data import get_multi_timeframe_data, fetch_ohlcv
 from services.news_filter import get_news_filter, NewsFilter
 from services.telegram_bot import get_telegram_bot, TelegramBot
+from services.whatsapp_bot import get_whatsapp_bot, WhatsAppBot
 from services.paper_account import get_paper_account, PaperAccount
 
 logger = logging.getLogger(__name__)
@@ -52,8 +53,21 @@ class Orchestrator:
         self._monitor_task:  asyncio.Task | None = None
         self._news:  NewsFilter   | None = None
         self._tg:    TelegramBot  | None = None
+        self._wa:    WhatsAppBot  | None = None
         self._paper: PaperAccount | None = None
         self._active_meeting: dict | None = None  # interactive meeting state
+
+    # ------------------------------------------------------------------ #
+    #  Notification helper (sends to all configured channels)
+    # ------------------------------------------------------------------ #
+    async def _notify(self, method: str, *args, **kwargs):
+        """Call a notification method on all active bots (Telegram + WhatsApp)."""
+        for bot in (self._tg, self._wa):
+            if bot and hasattr(bot, method):
+                try:
+                    asyncio.create_task(getattr(bot, method)(*args, **kwargs))
+                except Exception as exc:
+                    logger.warning("Notification %s failed on %s: %s", method, type(bot).__name__, exc)
 
     # ------------------------------------------------------------------ #
     #  Startup / Shutdown
@@ -86,11 +100,12 @@ class Orchestrator:
         if paper_on:
             await self._paper.start()
 
-        # Initialize Telegram bot
+        # Initialize notification bots
         self._tg = get_telegram_bot(orchestrator=self)
         polling  = os.getenv("TELEGRAM_POLLING", "true").lower() == "true"
         if polling:
             self._tg.start_polling()
+        self._wa = get_whatsapp_bot(orchestrator=self)
 
         self._analysis_task = asyncio.create_task(self._analysis_loop())
         self._monitor_task  = asyncio.create_task(self._monitor_loop())
@@ -231,8 +246,7 @@ class Orchestrator:
                         "message": msg,
                     })
                     logger.info("News block: %s — %s", symbol, msg)
-                    if self._tg:
-                        asyncio.create_task(self._tg.notify_news_block(event.to_dict(), symbol))
+                    await self._notify("notify_news_block", event.to_dict(), symbol)
                     return
 
             # 1. Fetch market data
@@ -350,14 +364,13 @@ class Orchestrator:
                 "ticket": cc_result.get("ticket"),
                 "timestamp": datetime.utcnow().isoformat(),
             })
-            if self._tg:
-                asyncio.create_task(self._tg.notify_trade_open({
-                    **trade_params,
-                    "id": trade_id,
-                    "ict_setup": strategy.get("setup"),
-                    "mt5_ticket": cc_result.get("ticket"),
-                    "rr_ratio": rm_result.get("position_size", {}).get("rr_ratio", 2.0),
-                }))
+            await self._notify("notify_trade_open", {
+                **trade_params,
+                "id": trade_id,
+                "ict_setup": strategy.get("setup"),
+                "mt5_ticket": cc_result.get("ticket"),
+                "rr_ratio": rm_result.get("position_size", {}).get("rr_ratio", 2.0),
+            })
 
         except Exception as e:
             logger.error(f"Error analyzing {symbol}: {e}", exc_info=True)
@@ -418,8 +431,7 @@ class Orchestrator:
                         "new_sl": new_sl,
                         "reason": decision.get("reason"),
                     })
-                    if self._tg:
-                        asyncio.create_task(self._tg.notify_sl_trailed(trade.symbol, trade.id, new_sl))
+                    await self._notify("notify_sl_trailed", trade.symbol, trade.id, new_sl)
 
                 elif action == "PARTIAL_CLOSE" and decision.get("close_percent"):
                     pct = decision["close_percent"]
@@ -473,8 +485,7 @@ class Orchestrator:
                         logger.info("SL moved to breakeven %.5f for trade #%d after partial close", entry, trade.id)
 
                     await self.broadcast({"type": "partial_close", "trade_id": trade.id, "percent": pct})
-                    if self._tg:
-                        asyncio.create_task(self._tg.notify_partial_close(trade.symbol, trade.id, pct))
+                    await self._notify("notify_partial_close", trade.symbol, trade.id, pct)
 
                 elif action in ("CLOSE_ALL", "CLOSE"):
                     at_reason = decision.get("reason", "")
@@ -542,15 +553,14 @@ class Orchestrator:
             "pnl_pips": pnl_pips,
             "reason": reason,
         })
-        if self._tg:
-            asyncio.create_task(self._tg.notify_trade_close(
-                {
-                    "id": trade.id, "symbol": trade.symbol, "direction": trade.direction,
-                    "entry_price": trade.entry_price, "close_price": close_price,
-                    "ict_setup": trade.ict_setup, "result": result_str,
-                },
-                pnl_usd, pnl_pips, reason,
-            ))
+        await self._notify("notify_trade_close",
+            {
+                "id": trade.id, "symbol": trade.symbol, "direction": trade.direction,
+                "entry_price": trade.entry_price, "close_price": close_price,
+                "ict_setup": trade.ict_setup, "result": result_str,
+            },
+            pnl_usd, pnl_pips, reason,
+        )
 
         # Trigger post-trade meeting
         asyncio.create_task(self._schedule_meeting("POST_TRADE", [trade]))
