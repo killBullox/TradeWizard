@@ -285,17 +285,37 @@ class MT5Bridge:
         return {"success": True, "ticket": str(ticket),
                 "close_price": price, "message": "Position closed"}
 
+    # Common broker aliases for standard symbol names
+    _SYMBOL_ALIASES = {
+        "XAUUSD": ["GOLD", "#GOLD", "XAUUSD", "XAUUSDm", "GOLD.z", "XAUUSD.z"],
+        "XAGUSD": ["SILVER", "#SILVER", "XAGUSD", "XAGUSDm"],
+        "US30":   ["US30", "DJ30", "#DJ30", "US30.z", "US30m"],
+        "NAS100": ["NAS100", "USTEC", "#NAS100", "NAS100.z", "NAS100m"],
+        "US500":  ["US500", "SP500", "#SP500", "US500.z", "US500m"],
+    }
+
     def _normalise_symbol(self, raw: str) -> str:
         if not MT5_AVAILABLE:
             return raw
+        # Direct match
         info = mt5.symbol_info(raw)
         if info:
             return raw
-        for suffix in [".z", "m", "+", "pro", ".r", ".stp"]:
+        # Try aliases for known symbols
+        aliases = self._SYMBOL_ALIASES.get(raw.upper(), [])
+        for alias in aliases:
+            info = mt5.symbol_info(alias)
+            if info:
+                mt5.symbol_select(alias, True)
+                logger.info("Symbol %s resolved to broker name: %s", raw, alias)
+                return alias
+        # Try common suffixes
+        for suffix in [".z", "m", "+", "pro", ".r", ".stp", ".a", "-C"]:
             test = raw + suffix
             info = mt5.symbol_info(test)
             if info:
                 mt5.symbol_select(test, True)
+                logger.info("Symbol %s resolved with suffix: %s", raw, test)
                 return test
         mt5.symbol_select(raw, True)
         return raw if mt5.symbol_info(raw) else ""
