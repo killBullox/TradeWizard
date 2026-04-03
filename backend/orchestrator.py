@@ -717,9 +717,31 @@ class Orchestrator:
                     agenda=topic[:500],
                     summary=json.dumps(conclusions, default=str),
                     improvements=json.dumps(improvements, default=str),
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(ZoneInfo("Europe/Rome")),
                 )
                 s.add(meeting)
+                await s.flush()  # get meeting.id
+                # Create journal entry for the meeting
+                journal_content = f"Emergency Meeting: {topic[:200]}\n\n"
+                journal_content += "Conclusioni:\n"
+                for c in conclusions:
+                    journal_content += f"• {c}\n"
+                if improvements:
+                    journal_content += "\nImprovements:\n"
+                    for imp in improvements:
+                        journal_content += f"• [{imp.get('category', '')}] {imp.get('improvement', '')}\n"
+                journal = JournalEntry(
+                    meeting_id=meeting.id,
+                    entry_type="MEETING_SUMMARY",
+                    content=journal_content,
+                    metrics=json.dumps({
+                        "conclusions_count": len(conclusions),
+                        "improvements_count": len(improvements),
+                        "rounds": meeting_state.get("round", 1) if self._active_meeting else 1,
+                    }, default=str),
+                    created_at=datetime.now(ZoneInfo("Europe/Rome")),
+                )
+                s.add(journal)
                 await s.commit()
             logger.info(f"[MEETING] Saved to DB: {len(conclusions)} conclusions, {len(improvements)} improvements")
             # Update strategy memory
