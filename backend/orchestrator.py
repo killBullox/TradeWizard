@@ -425,6 +425,25 @@ class Orchestrator:
                     pct = decision["close_percent"]
                     tp_num = (trade.tp_hits or 0) + 1
                     at_reason = decision.get("reason", "")
+
+                    # HARD CHECK: only partial close if price actually reached the next TP
+                    next_tp = (
+                        trade.take_profit_1 if tp_num == 1 else
+                        trade.take_profit_2 if tp_num == 2 else
+                        trade.take_profit_3 if tp_num == 3 else None
+                    )
+                    if next_tp is not None:
+                        tp_reached = (
+                            (trade.direction == "BUY"  and current_price >= next_tp) or
+                            (trade.direction == "SELL" and current_price <= next_tp)
+                        )
+                        if not tp_reached:
+                            logger.info(f"Trade #{trade.id}: AT wanted PARTIAL_CLOSE but price "
+                                        f"{current_price} has not reached TP{tp_num} ({next_tp}). Holding.")
+                            await self._append_close_note(trade.id,
+                                f"[BLOCKED] AT partial close denied: price {current_price:.5f} "
+                                f"not at TP{tp_num} ({next_tp:.5f})")
+                            continue
                     await self.cc.close_partial(trade.mt5_ticket or "", trade.symbol, pct)
                     await self._consume_next_tp(trade.id)
                     await self._append_close_note(trade.id,
