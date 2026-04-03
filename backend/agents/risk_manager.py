@@ -151,9 +151,16 @@ class RiskManagerAgent(BaseAgent):
 
 Evaluate the risk for this trade.
 Calculate exact position size, win probability, expected value, and risk factors.
-SL MUST be ≥ {system_config.get('min_sl_pips', '30')} pips. Place SL at structural level (OB/FVG/swing) — reject if invalidation is too close.
-TP1 must give NET RR ≥ {rr_ratio} after ~3 pips friction: tp1_pips ≥ (sl_pips + 3) × {rr_ratio} + 3.
-TP2 at {rr_ratio * 1.5:.1f}x risk if applicable.
+
+SL MUST be ≥ {system_config.get('min_sl_pips', '30')} pips. Reject if invalidation is too close.
+
+CRITICAL TP CALCULATION — the system checks NET RR after 3 pips friction on both sides:
+  net_rr = (tp1_pips - 3) / (sl_pips + 3)  must be ≥ {rr_ratio}
+
+For example with sl_pips={int(float(system_config.get('min_sl_pips', '30')))}:
+  tp1_pips ≥ ({int(float(system_config.get('min_sl_pips', '30')))} + 3) × {rr_ratio} + 3 = {(int(float(system_config.get('min_sl_pips', '30'))) + 3) * rr_ratio + 3:.0f} pips MINIMUM
+
+Set sl_pips and tp1_pips in your position_size output accordingly. If the setup cannot achieve this TP distance to a realistic liquidity target, REJECT the trade.
 """
         if memory_context:
             user_msg = memory_context + "\n" + user_msg
