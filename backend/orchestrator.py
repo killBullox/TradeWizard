@@ -731,14 +731,61 @@ class Orchestrator:
         if self._active_meeting:
             self._active_meeting["user_queue"].put_nowait("__APPROVE__")
 
+    # Keys that must contain valid JSON arrays/objects
+    _JSON_CONFIG_KEYS = frozenset({
+        "enabled_pairs", "kill_zones", "ict_strategies", "system_performance",
+        "paper_mode_exit_criteria", "trading_sessions",
+    })
+    # Keys that must be numeric
+    _NUMERIC_CONFIG_KEYS = frozenset({
+        "risk_percent", "rr_ratio", "max_open_trades", "account_balance",
+        "analysis_interval", "max_risk_usd", "min_sl_pips", "paper_balance",
+        "news_block_minutes_before", "news_block_minutes_after",
+        "max_consecutive_losses", "trade_max_duration_hours",
+    })
+    # Keys that agents are NOT allowed to change (user-only)
+    _PROTECTED_CONFIG_KEYS = frozenset({
+        "mt5_login", "mt5_password", "mt5_server", "oanda_api_key",
+        "oanda_practice", "mt5_bridge_url", "paper_mode", "model_mode",
+    })
+
+    def _validate_config_change(self, key: str, val: str) -> str | None:
+        """Return rejection reason if the proposed config change is invalid, else None."""
+        if key in self._PROTECTED_CONFIG_KEYS:
+            return f"Key '{key}' is protected and cannot be changed by agents"
+        if key in self._JSON_CONFIG_KEYS:
+            try:
+                parsed = json.loads(val)
+                if not isinstance(parsed, (list, dict)):
+                    return f"Key '{key}' requires a JSON array/object, got {type(parsed).__name__}"
+            except (json.JSONDecodeError, TypeError):
+                return f"Key '{key}' requires valid JSON, got: {val[:80]}"
+        if key in self._NUMERIC_CONFIG_KEYS:
+            try:
+                float(val)
+            except (ValueError, TypeError):
+                return f"Key '{key}' requires a number, got: {val[:80]}"
+        return None
+
     async def _apply_improvements(self, improvements: list):
-        """Apply system config changes proposed by JR."""
+        """Apply system config changes proposed by JR — with validation."""
         async with async_session_factory() as s:
             for imp in improvements:
                 change = imp.get("config_change", {})
                 if change and change.get("key") and change.get("new_value") is not None:
                     key = change["key"]
                     val = str(change["new_value"])
+                    # Validate before writing
+                    rejection = self._validate_config_change(key, val)
+                    if rejection:
+                        logger.warning(f"Improvement REJECTED: {key}={val[:80]} — {rejection}")
+                        await self.broadcast({
+                            "type": "config_update_rejected",
+                            "key": key,
+                            "value": val[:100],
+                            "reason": rejection,
+                        })
+                        continue
                     await set_config(key, val, s)
                     await self.broadcast({
                         "type": "config_updated",
