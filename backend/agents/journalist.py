@@ -496,6 +496,15 @@ Each agent must respond from their own perspective:
             )
             verdict_result = json.dumps(verdict_parsed, indent=2, default=str)
 
+            # Debug: log verdict keys so we can diagnose empty saves
+            import logging
+            _log = logging.getLogger(__name__)
+            _log.info(f"[MEETING VERDICT] Keys: {list(verdict_parsed.keys())}")
+            if "error" in verdict_parsed:
+                _log.error(f"[MEETING VERDICT] Parse error: {verdict_parsed.get('raw', '')[:300]}")
+            _log.info(f"[MEETING VERDICT] conclusions={len(verdict_parsed.get('conclusions', []))}, "
+                       f"improvements={len(verdict_parsed.get('system_improvements', []))}")
+
             transcript.append({"speaker": "JR", "message": verdict_result, "round": round_num, "is_verdict": True})
 
             await self.broadcast({

@@ -694,25 +694,36 @@ class Orchestrator:
                 agents={"ICTEA": self.ictea, "RM": self.rm, "TR": self.tr, "AT": self.at},
                 meeting_state=self._active_meeting,
             )
+            # Debug: log verdict content
+            logger.info(f"[MEETING] Verdict keys: {list(final.keys())}")
+            logger.info(f"[MEETING] conclusions: {final.get('conclusions', 'MISSING')}")
+            logger.info(f"[MEETING] system_improvements: {final.get('system_improvements', 'MISSING')}")
+            if "error" in final:
+                logger.error(f"[MEETING] Verdict parse error! raw: {final.get('raw', '')[:500]}")
+
             # Apply improvements
             improvements = final.get("system_improvements", [])
             if improvements:
                 await self._apply_improvements(improvements)
-            # Save meeting to DB
+            # Save meeting to DB — use all possible key variations
+            conclusions = final.get("conclusions") or final.get("conclusion") or final.get("verdict") or []
+            if isinstance(conclusions, str):
+                conclusions = [conclusions]
             async with async_session_factory() as s:
                 meeting = Meeting(
                     meeting_type="EMERGENCY",
                     trigger="User (Interactive)",
                     participants="ICTEA,RM,TR,AT,JR",
                     agenda=topic[:500],
-                    summary=json.dumps(final.get("conclusions", []), default=str),
+                    summary=json.dumps(conclusions, default=str),
                     improvements=json.dumps(improvements, default=str),
                     created_at=datetime.utcnow(),
                 )
                 s.add(meeting)
                 await s.commit()
+            logger.info(f"[MEETING] Saved to DB: {len(conclusions)} conclusions, {len(improvements)} improvements")
             # Update strategy memory
-            mem_updates = final.get("setup_memory_updates", [])
+            mem_updates = final.get("setup_memory_updates") or final.get("memory_updates") or []
             if mem_updates:
                 await _mem_update_meeting(mem_updates)
         except Exception as exc:
