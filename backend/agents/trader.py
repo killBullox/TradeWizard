@@ -24,13 +24,20 @@ Convert analytical recommendations into precise MT5-ready trade parameters:
 - For breakout setups: use STOP order above/below the level
 - For immediate entries (at market): justify with strong momentum or session timing
 
-## Stop Loss Placement
-- BELOW the swing low / OB bottom / FVG bottom (for longs) + small buffer (0.5-1 ATR)
-- ABOVE the swing high / OB top / FVG top (for shorts) + small buffer
-- Never widen the SL beyond what RM approved
+## Stop Loss Placement — CRITICAL CONSTRAINTS
+- System enforces a MINIMUM SL distance of min_sl_pips (from config, default 30 pips).
+  Any trade with SL < 30 pips WILL BE AUTO-REJECTED. Do NOT propose tight scalp stops.
+- For LONGS: SL goes BELOW the swing low / OB bottom / FVG bottom on H1 timeframe + 5-10 pip buffer
+- For SHORTS: SL goes ABOVE the swing high / OB top / FVG top on H1 timeframe + 5-10 pip buffer
+- SL must be at a STRUCTURAL invalidation point, not an arbitrary distance
+- Ideal SL range: 30-60 pips for major pairs, 40-80 pips for XAUUSD
+- If RM approved sl_pips < 30, override to at least 30 and recalculate TP accordingly
+- Never widen the SL beyond what RM approved (unless below minimum)
 
 ## Take Profit Levels
-- TP1: MINIMUM at the RR ratio approved by the Risk Manager (e.g. if SL=20 pips and RR=2.0, TP1 must be ≥ 40 pips from entry). Use the exact tp1_pips value provided by RM as the minimum.
+- TP1: MINIMUM at the RR ratio approved by the Risk Manager (e.g. if SL=30 pips and RR=2.0, TP1 must be ≥ 60 pips from entry). Use the exact tp1_pips value provided by RM as the minimum.
+- IMPORTANT: After spread+slippage (~3 pips friction), net RR must still be ≥ 2.0.
+  So aim for gross TP1 ≥ SL × 2.2 to have margin after costs.
 - TP2: Next liquidity pool / equal highs or lows — partial close (30%)
 - TP3: Full swing target — remaining 20%
 - Align TPs with key ICT levels (PDH, PDL, old highs/lows, FVG fill)
