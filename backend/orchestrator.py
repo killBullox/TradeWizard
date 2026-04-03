@@ -249,8 +249,20 @@ class Orchestrator:
                     await self._notify("notify_news_block", event.to_dict(), symbol)
                     return
 
-            # 1. Fetch market data
+            # 1. Fetch market data from MT5 (EXCLUSIVELY)
             market_data = await get_multi_timeframe_data(symbol)
+
+            # CRITICAL: abort if MT5 data is unavailable
+            h1_data = market_data.get("H1", {})
+            if h1_data.get("mt5_error") or not h1_data.get("candles"):
+                mt5_err = h1_data.get("mt5_error", "No candles returned")
+                logger.error("MT5 data unavailable for %s — skipping analysis: %s", symbol, mt5_err)
+                await self.broadcast({
+                    "type": "error",
+                    "symbol": symbol,
+                    "message": f"MT5 data unavailable: {mt5_err}. Analysis suspended.",
+                })
+                return
 
             # 2. Load strategy memory — injected into all agent prompts for continuous learning
             memory_ctx = await _build_memory()

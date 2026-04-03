@@ -1,123 +1,136 @@
 """
 Forex data service.
-Fetches OHLCV data using yfinance and computes basic market structure
-indicators used by ICT analysis (swing highs/lows, ATR, spreads).
+Fetches OHLCV data EXCLUSIVELY from MT5 bridge.
+If MT5 is not available, sends WhatsApp alarm and returns empty data.
+yfinance is NOT used — all price data must come from the broker via MT5.
 """
 
 import asyncio
 import json
+import logging
+import os
 from datetime import datetime, timedelta
 from typing import Optional
 import pandas as pd
 import numpy as np
 
-try:
-    import yfinance as yf
-    YFINANCE_AVAILABLE = True
-except ImportError:
-    YFINANCE_AVAILABLE = False
+import httpx
+
+logger = logging.getLogger("forex_data")
+
+# ── MT5 bridge connection ─────────────────────────────────────────────────────
+_mt5_bridge_url: str = ""
+_last_alarm_time: float = 0  # track alarm frequency
 
 
-# Map common forex pair names to yfinance tickers
-SYMBOL_MAP = {
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "JPY=X",
-    "USDCHF": "CHF=X",
-    "AUDUSD": "AUDUSD=X",
-    "USDCAD": "CAD=X",
-    "NZDUSD": "NZDUSD=X",
-    "GBPJPY": "GBPJPY=X",
-    "EURJPY": "EURJPY=X",
-    "EURGBP": "EURGBP=X",
-    "XAUUSD": "GC=F",    # Gold
-    "XAGUSD": "SI=F",    # Silver
-    "US30":   "^DJI",
-    "US500":  "^GSPC",
-    "NAS100": "^NDX",
-}
-
-TIMEFRAME_MAP = {
-    "M1":  ("1m",  "1d"),
-    "M5":  ("5m",  "5d"),
-    "M15": ("15m", "5d"),
-    "M30": ("30m", "10d"),
-    "H1":  ("1h",  "30d"),
-    "H4":  ("1h",  "60d"),   # yfinance doesn't have 4h; use 1h and resample
-    "D1":  ("1d",  "365d"),
-    "W1":  ("1wk", "730d"),
-}
+async def _get_bridge_url() -> str:
+    """Get MT5 bridge URL from DB config or env."""
+    global _mt5_bridge_url
+    if _mt5_bridge_url:
+        return _mt5_bridge_url
+    # Try from DB
+    try:
+        from models.database import async_session_factory, get_config
+        async with async_session_factory() as s:
+            url = await get_config("mt5_bridge_url", s)
+            if url:
+                _mt5_bridge_url = url.rstrip("/")
+                return _mt5_bridge_url
+    except Exception:
+        pass
+    # Fallback to env or default
+    _mt5_bridge_url = os.getenv("MT5_BRIDGE_URL", "http://localhost:5002")
+    return _mt5_bridge_url
 
 
-def _resample_to_h4(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.resample("4h").agg({
-        "Open":   "first",
-        "High":   "max",
-        "Low":    "min",
-        "Close":  "last",
-        "Volume": "sum",
-    }).dropna()
-    return df
+async def _send_mt5_alarm(reason: str):
+    """Send WhatsApp alarm when MT5 data is unavailable. Max once per minute."""
+    import time
+    global _last_alarm_time
+    now = time.time()
+    if now - _last_alarm_time < 60:
+        return  # Already sent alarm recently
+    _last_alarm_time = now
+
+    try:
+        from services.whatsapp_bot import get_whatsapp_bot
+        wa = get_whatsapp_bot()
+        await wa.send_message(
+            f"🚨 *MT5 DATA UNAVAILABLE*\n\n"
+            f"Cannot fetch live price data from MT5.\n"
+            f"Reason: {reason}\n\n"
+            f"⚠️ All trading decisions are SUSPENDED until MT5 reconnects.\n"
+            f"This alarm repeats every 60 seconds."
+        )
+    except Exception as exc:
+        logger.error("Failed to send MT5 alarm via WhatsApp: %s", exc)
 
 
 async def fetch_ohlcv(symbol: str, timeframe: str = "H1", limit: int = 200) -> dict:
     """
-    Fetch OHLCV data for a symbol/timeframe.
-    Returns a dict with 'candles' list and 'indicators'.
+    Fetch OHLCV data EXCLUSIVELY from MT5 bridge.
+    If MT5 is unavailable, sends WhatsApp alarm and returns empty data.
     """
-    if not YFINANCE_AVAILABLE:
-        return _generate_mock_data(symbol, timeframe, limit)
-
-    ticker_symbol = SYMBOL_MAP.get(symbol, symbol)
-    interval, period = TIMEFRAME_MAP.get(timeframe, ("1h", "30d"))
+    bridge_url = await _get_bridge_url()
 
     try:
-        loop = asyncio.get_event_loop()
-        df = await loop.run_in_executor(None, lambda: _download(ticker_symbol, interval, period))
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{bridge_url}/candles",
+                params={"symbol": symbol, "timeframe": timeframe, "count": limit},
+            )
+            if r.status_code != 200:
+                raise ConnectionError(f"MT5 bridge returned {r.status_code}: {r.text[:200]}")
 
-        if df is None or df.empty:
-            return _generate_mock_data(symbol, timeframe, limit)
+            data = r.json()
+            candles = data.get("candles", [])
+            if not candles:
+                raise ValueError(f"MT5 returned 0 candles for {symbol} {timeframe}")
 
-        if timeframe == "H4":
-            df = _resample_to_h4(df)
+    except Exception as exc:
+        logger.error("MT5 data fetch failed for %s %s: %s", symbol, timeframe, exc)
+        await _send_mt5_alarm(f"{symbol} {timeframe}: {exc}")
+        # Return empty data — caller must handle gracefully
+        return {
+            "symbol": symbol, "timeframe": timeframe,
+            "candles": [],
+            "indicators": _empty_indicators(symbol),
+            "mt5_error": str(exc),
+        }
 
-        # Normalize column names (yfinance 1.x uses lowercase)
-        df.columns = [c.capitalize() for c in df.columns]
+    # Build DataFrame from MT5 candles
+    df = pd.DataFrame(candles)
+    df.columns = [c.capitalize() for c in df.columns]
+    if "Time" in df.columns:
+        df.index = pd.to_datetime(df["Time"])
+        df.drop(columns=["Time"], inplace=True, errors="ignore")
 
-        df = df.tail(limit)
-        candles = []
-        for ts, row in df.iterrows():
-            candles.append({
-                "time":   ts.isoformat(),
-                "open":   round(float(row["Open"]), 5),
-                "high":   round(float(row["High"]), 5),
-                "low":    round(float(row["Low"]), 5),
-                "close":  round(float(row["Close"]), 5),
-                "volume": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0,
-            })
+    # Ensure numeric types
+    for col in ("Open", "High", "Low", "Close"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "Volume" in df.columns:
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0).astype(int)
 
-        indicators = _compute_indicators(df, symbol)
-        return {"symbol": symbol, "timeframe": timeframe, "candles": candles, "indicators": indicators}
+    df = df.tail(limit)
 
-    except Exception as e:
-        import logging
-        logging.getLogger("forex_data").warning("yfinance fetch failed (%s), using mock data: %s", symbol, e)
-        return _generate_mock_data(symbol, timeframe, limit)
+    indicators = _compute_indicators(df, symbol)
+    return {"symbol": symbol, "timeframe": timeframe, "candles": candles, "indicators": indicators}
 
 
-def _download(ticker: str, interval: str, period: str) -> Optional[pd.DataFrame]:
-    try:
-        t = yf.Ticker(ticker)
-        df = t.history(period=period, interval=interval)
-        if df is None or df.empty:
-            return None
-        # Normalize to capitalized column names for both old and new yfinance
-        df.columns = [c.capitalize() for c in df.columns]
-        return df
-    except Exception as e:
-        import logging
-        logging.getLogger("forex_data").warning("_download error: %s", e)
-        return None
+def _empty_indicators(symbol: str) -> dict:
+    """Return empty indicator dict when MT5 data is unavailable."""
+    pip_value = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","XAGUSD","US30","NAS100","US500") else 0.0001)
+    return {
+        "current_price": 0,
+        "atr": 0, "atr_pips": 0,
+        "ema20": 0, "ema50": 0,
+        "trend": "unknown",
+        "pdh": 0, "pdl": 0, "pdc": 0,
+        "pip_value": pip_value,
+        "swing_highs": [], "swing_lows": [],
+        "fvgs": [], "order_blocks": [],
+    }
 
 
 def _compute_indicators(df: pd.DataFrame, symbol: str) -> dict:
@@ -268,58 +281,6 @@ def _detect_order_blocks(df: pd.DataFrame) -> list:
                 })
 
     return obs[-5:]
-
-
-def _generate_mock_data(symbol: str, timeframe: str, limit: int) -> dict:
-    """Generate realistic mock OHLCV data when live data is unavailable."""
-    base_prices = {
-        "EURUSD": 1.0850, "GBPUSD": 1.2650, "USDJPY": 149.50,
-        "XAUUSD": 2050.0, "USDCHF": 0.8950, "AUDUSD": 0.6550,
-    }
-    base = base_prices.get(symbol, 1.1000)
-    pip = 0.0001 if "JPY" not in symbol else 0.01
-
-    candles = []
-    now = datetime.utcnow()
-    intervals = {"M1":1,"M5":5,"M15":15,"M30":30,"H1":60,"H4":240,"D1":1440}
-    minutes = intervals.get(timeframe, 60)
-
-    price = base
-    rng = np.random.default_rng(42)
-    for i in range(limit):
-        ts = now - timedelta(minutes=minutes * (limit - i))
-        o = price
-        h = o + rng.uniform(0, 20) * pip
-        l = o - rng.uniform(0, 20) * pip
-        c = rng.uniform(l, h)
-        price = c
-        candles.append({
-            "time": ts.isoformat(), "open": round(o, 5), "high": round(h, 5),
-            "low": round(l, 5), "close": round(c, 5), "volume": int(rng.integers(100, 5000)),
-        })
-
-    current = candles[-1]["close"]
-    return {
-        "symbol": symbol,
-        "timeframe": timeframe,
-        "candles": candles,
-        "indicators": {
-            "current_price": current,
-            "atr": round(15 * pip, 5),
-            "atr_pips": 15.0,
-            "trend": "bullish",
-            "ema20": round(current * 0.9999, 5),
-            "ema50": round(current * 0.9997, 5),
-            "swing_highs": [{"price": round(current + 30 * pip, 5)}],
-            "swing_lows":  [{"price": round(current - 30 * pip, 5)}],
-            "pdh": round(current + 20 * pip, 5),
-            "pdl": round(current - 20 * pip, 5),
-            "pdc": round(current - 5 * pip, 5),
-            "fvgs": [],
-            "order_blocks": [],
-            "pip_value": pip,
-        },
-    }
 
 
 async def get_multi_timeframe_data(symbol: str) -> dict:
