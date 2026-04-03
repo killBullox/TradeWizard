@@ -286,6 +286,9 @@ async def main():
         ComponentMonitor("MT5 Terminal", check_mt5_terminal, restart_mt5_terminal, is_async=False),
     ]
 
+    # Daily backup tracker
+    last_backup_date = None
+
     while True:
         for m in monitors:
             try:
@@ -294,6 +297,20 @@ async def main():
                 logger.debug("%s %s: %s", status_icon, m.name, m.last_status)
             except Exception as exc:
                 logger.error("Monitor error for %s: %s", m.name, exc)
+
+        # Daily backup at 03:00 Rome time
+        try:
+            from zoneinfo import ZoneInfo
+            now_rome = datetime.now(ZoneInfo("Europe/Rome"))
+            today = now_rome.date()
+            if now_rome.hour == 3 and last_backup_date != today:
+                last_backup_date = today
+                logger.info("Running daily backup...")
+                from services.backup import run_backup_with_notification
+                result = await run_backup_with_notification()
+                logger.info("Backup done: %d files, %d errors", len(result["files"]), len(result["errors"]))
+        except Exception as exc:
+            logger.error("Backup error: %s", exc)
 
         await asyncio.sleep(CHECK_INTERVAL)
 
