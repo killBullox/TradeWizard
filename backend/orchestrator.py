@@ -778,7 +778,7 @@ class Orchestrator:
                     metrics=json.dumps({
                         "conclusions_count": len(conclusions),
                         "improvements_count": len(improvements),
-                        "rounds": meeting_state.get("round", 1) if self._active_meeting else 1,
+                        "rounds": self._active_meeting.get("round", 1) if self._active_meeting else 1,
                     }, default=str),
                     created_at=datetime.now(ZoneInfo("Europe/Rome")),
                 )
