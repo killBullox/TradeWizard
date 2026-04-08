@@ -411,7 +411,74 @@ class Orchestrator:
                 data = await fetch_ohlcv(trade.symbol, "H1", 50)
                 current_price = data.get("indicators", {}).get("current_price", 0)
 
+                if not current_price:
+                    continue  # Skip if no price data available
+
+                # ── HARD CHECK: Auto-close on SL hit (code-enforced, not LLM) ──
+                sl = trade.stop_loss or 0
+                if sl > 0:
+                    sl_hit = (
+                        (trade.direction == "BUY"  and current_price <= sl) or
+                        (trade.direction == "SELL" and current_price >= sl)
+                    )
+                    if sl_hit:
+                        logger.warning("SL HIT on trade #%d %s @ %.5f (SL=%.5f)",
+                                       trade.id, trade.symbol, current_price, sl)
+                        await self._append_close_note(trade.id,
+                            f"SL HIT @ {current_price:.5f} (SL={sl:.5f})")
+                        await self._close_trade(trade, sl, "Stop Loss Hit")
+                        await self._notify("notify_trade_close", {
+                            "id": trade.id, "symbol": trade.symbol, "direction": trade.direction,
+                            "entry_price": trade.entry_price, "close_price": sl,
+                            "ict_setup": trade.ict_setup, "result": "LOSS",
+                        }, self._calc_trade_pnl(trade, sl), self._calc_trade_pips(trade, sl), "Stop Loss Hit")
+                        continue
+
+                # ── HARD CHECK: Auto-partial-close on TP hit (code-enforced) ──
                 tp_hits = trade.tp_hits or 0
+                next_tp = (
+                    trade.take_profit_1 if tp_hits < 1 else
+                    trade.take_profit_2 if tp_hits < 2 else
+                    trade.take_profit_3 if tp_hits < 3 else None
+                )
+                if next_tp:
+                    tp_reached = (
+                        (trade.direction == "BUY"  and current_price >= next_tp) or
+                        (trade.direction == "SELL" and current_price <= next_tp)
+                    )
+                    if tp_reached:
+                        tp_num = tp_hits + 1
+                        logger.info("TP%d HIT on trade #%d %s @ %.5f (TP=%.5f)",
+                                    tp_num, trade.id, trade.symbol, current_price, next_tp)
+                        pct = 0.5 if tp_num == 1 else (0.3 if tp_num == 2 else 1.0)
+                        await self.cc.close_partial(trade.mt5_ticket or "", trade.symbol, pct)
+                        await self._consume_next_tp(trade.id)
+                        await self._append_close_note(trade.id,
+                            f"TP{tp_num} HIT @ {current_price:.5f} — auto partial close {int(pct*100)}%")
+                        # Move SL to breakeven after TP1
+                        if tp_num == 1:
+                            entry = trade.entry_price or 0
+                            if entry:
+                                await self.cc.modify_sl(trade.mt5_ticket or "", entry, trade.symbol)
+                                await self._update_trade_sl(trade.id, entry)
+                                if self._paper:
+                                    self._paper.modify_sl(trade.id, entry)
+                                await self._append_close_note(trade.id, f"SL spostato a breakeven ({entry:.5f}) dopo TP1")
+                        # Move SL to TP1 after TP2
+                        elif tp_num == 2 and trade.take_profit_1:
+                            await self.cc.modify_sl(trade.mt5_ticket or "", trade.take_profit_1, trade.symbol)
+                            await self._update_trade_sl(trade.id, trade.take_profit_1)
+                            if self._paper:
+                                self._paper.modify_sl(trade.id, trade.take_profit_1)
+                            await self._append_close_note(trade.id, f"SL trailato a TP1 ({trade.take_profit_1:.5f}) dopo TP2")
+                        await self.broadcast({"type": "partial_close", "trade_id": trade.id, "percent": pct})
+                        await self._notify("notify_partial_close", trade.symbol, trade.id, pct)
+                        if tp_num == 3:
+                            # All TPs hit — close remaining
+                            await self._close_trade(trade, current_price, "All TPs reached")
+                        continue
+
+                # ── AT agent: only for TRAIL_SL and early exit decisions ──
                 decision = await self.at.manage_trade(
                     {
                         "id": trade.id, "symbol": trade.symbol, "direction": trade.direction,
@@ -507,6 +574,19 @@ class Orchestrator:
 
             except Exception as e:
                 logger.error(f"Monitor error for trade {trade.id}: {e}")
+
+    def _calc_trade_pips(self, trade, price: float) -> float:
+        pip = 0.01 if "JPY" in (trade.symbol or "") else (1.0 if trade.symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+        if trade.direction == "BUY":
+            return round((price - (trade.entry_price or 0)) / pip, 1)
+        return round(((trade.entry_price or 0) - price) / pip, 1)
+
+    def _calc_trade_pnl(self, trade, price: float) -> float:
+        pips = self._calc_trade_pips(trade, price)
+        _pip_usd = {"XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0,
+                    "USDJPY": 6.5, "EURJPY": 6.5, "GBPJPY": 6.5}
+        pip_usd = _pip_usd.get(trade.symbol or "", 10.0)
+        return round(pips * pip_usd * (trade.lot_size or 0.01), 2)
 
     async def _close_trade(self, trade, close_price: float, reason: str):
         cc_result = await self.cc.close_trade(trade.mt5_ticket or "", trade.symbol)
