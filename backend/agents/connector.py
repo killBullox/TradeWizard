@@ -24,9 +24,33 @@ class ConnectorAgent(BaseAgent):
 
     def __init__(self, broadcast_fn=None):
         super().__init__(broadcast_fn)
-        self.mt5_url = os.environ.get("MT5_WEBHOOK_URL", "http://localhost:5000/webhook")
         self.mt5_secret = os.environ.get("MT5_WEBHOOK_SECRET", "tradewizard_secret")
-        self.simulation_mode = not os.environ.get("MT5_WEBHOOK_URL")
+        self._mt5_bridge_url = None  # loaded from DB on first use
+        self.simulation_mode = False  # will be set based on bridge availability
+
+    async def _get_mt5_url(self) -> str:
+        """Get MT5 bridge URL from DB config (cached after first call)."""
+        if self._mt5_bridge_url:
+            return self._mt5_bridge_url
+        try:
+            from models.database import async_session_factory, get_config
+            async with async_session_factory() as s:
+                url = await get_config("mt5_bridge_url", s)
+                if url:
+                    self._mt5_bridge_url = url.rstrip("/") + "/webhook"
+                    self.simulation_mode = False
+                    return self._mt5_bridge_url
+        except Exception:
+            pass
+        # Fallback to env var or default bridge
+        env_url = os.environ.get("MT5_WEBHOOK_URL") or os.environ.get("MT5_BRIDGE_URL")
+        if env_url:
+            self._mt5_bridge_url = env_url.rstrip("/") + ("/webhook" if "/webhook" not in env_url else "")
+            self.simulation_mode = False
+        else:
+            self._mt5_bridge_url = "http://localhost:5002/webhook"
+            self.simulation_mode = False  # try bridge anyway, simulate only on connect failure
+        return self._mt5_bridge_url
 
     def _sign_payload(self, payload: str) -> str:
         return hmac.new(
@@ -106,15 +130,14 @@ class ConnectorAgent(BaseAgent):
         return await self._send_to_mt5(payload)
 
     async def _send_to_mt5(self, payload: dict) -> dict:
-        if self.simulation_mode:
-            return self._simulate_response(payload)
+        mt5_url = await self._get_mt5_url()
 
         try:
             body = json.dumps(payload)
             signature = self._sign_payload(body)
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
-                    self.mt5_url,
+                    mt5_url,
                     content=body,
                     headers={
                         "Content-Type":      "application/json",
@@ -123,12 +146,16 @@ class ConnectorAgent(BaseAgent):
                     },
                 )
                 if resp.status_code == 200:
-                    return resp.json()
+                    result = resp.json()
+                    if result.get("simulated"):
+                        logger.warning("MT5 bridge returned simulated response — MT5 may not be available")
+                    return result
                 return {"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
         except httpx.ConnectError:
-            logger.warning("MT5 webhook not reachable — falling back to simulation")
+            logger.error("MT5 bridge not reachable at %s — falling back to simulation", mt5_url)
             return self._simulate_response(payload)
         except Exception as e:
+            logger.error("MT5 bridge error: %s", e)
             return {"success": False, "error": str(e)}
 
     @staticmethod
