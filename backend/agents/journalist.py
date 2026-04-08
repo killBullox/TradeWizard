@@ -532,13 +532,9 @@ Each agent must respond from their own perspective:
                 "timestamp": datetime.utcnow().isoformat(),
             })
 
-            # --- Wait for user: approve or continue ---
+            # --- Wait for user: approve or continue (no timeout — meeting stays open until user decides) ---
             while True:
-                try:
-                    user_msg = await asyncio.wait_for(user_queue.get(), timeout=300)
-                except asyncio.TimeoutError:
-                    # 5 min timeout — auto-approve
-                    user_msg = "__APPROVE__"
+                user_msg = await user_queue.get()
 
                 if user_msg == "__APPROVE__":
                     await self.broadcast({

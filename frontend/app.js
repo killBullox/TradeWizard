@@ -146,10 +146,15 @@ function handleMessage(msg) {
       if (msg.error) {
         addActivity(`🚨 Meeting error: ${msg.conclusions?.[0] || 'Unknown error'}`, 'error');
         addMeetingMessage('SYS', `🚨 Errore: ${msg.conclusions?.[0] || 'Meeting terminato con errore'}. Puoi chiudere manualmente.`, 'thinking');
-      } else {
+      } else if (window._meetingApprovedByUser) {
         addActivity(`✅ Meeting completed: ${msg.improvements?.length || 0} improvements proposed`, 'success');
         addMeetingMessage('SYS', '✅ Meeting approvato e chiuso. Improvements applicati.', 'thinking');
+        window._meetingApprovedByUser = false;
         setTimeout(() => closeMeetingChat(), 3000);
+      } else {
+        // Meeting completed without user clicking approve — show message but don't close
+        addActivity(`✅ Meeting completed: ${msg.improvements?.length || 0} improvements proposed`, 'success');
+        addMeetingMessage('SYS', '✅ Meeting completato. Improvements applicati. Puoi chiudere il pannello.', 'thinking');
       }
       refreshMeetings();
       break;
@@ -2601,6 +2606,7 @@ function sendMeetingMsg() {
 }
 
 function approveMeeting() {
+  window._meetingApprovedByUser = true;
   sendWS({ command: 'meeting_approve' });
   document.getElementById('btn-meeting-approve').style.display = 'none';
   addMeetingMessage('SYS', '✅ Meeting approvato — applicando improvements...', 'thinking');
