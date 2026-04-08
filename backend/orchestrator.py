@@ -715,21 +715,28 @@ class Orchestrator:
             "round": 0,
         }
 
-        # Load context
+        # Load context — both closed AND open trades
         async with async_session_factory() as s:
             config   = await self._load_config(s)
             perf_raw = await get_config("system_performance", s)
             perf     = json.loads(perf_raw or "{}")
+            # Closed trades (last 20)
             result   = await s.execute(
                 select(Trade).where(Trade.status == "CLOSED")
                     .order_by(Trade.close_time.desc()).limit(20)
             )
-            trades = result.scalars().all()
+            closed_trades = result.scalars().all()
+            # Open/active trades
+            result = await s.execute(
+                select(Trade).where(Trade.status.in_(["ACTIVE", "PROPOSED", "APPROVED"]))
+            )
+            open_trades = result.scalars().all()
+            trades = list(open_trades) + list(closed_trades)
 
         try:
             final = await self.jr.emergency_meeting_interactive(
                 topic=topic,
-                trades=list(trades),
+                trades=trades,
                 performance_stats=perf,
                 system_config=config,
                 agents={"ICTEA": self.ictea, "RM": self.rm, "TR": self.tr, "AT": self.at},

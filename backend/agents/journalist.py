@@ -342,22 +342,33 @@ Each agent must respond from their own perspective:
 
         user_queue: asyncio.Queue = meeting_state["user_queue"]
 
-        # Build trade summary (same as non-interactive)
-        trades_summary = []
-        for t in trades[-20:]:
+        # Build trade summary — separate open and closed trades
+        open_trades_summary = []
+        closed_trades_summary = []
+        for t in trades:
             d = t if isinstance(t, dict) else {k: v for k, v in t.__dict__.items() if not k.startswith("_")}
-            trades_summary.append({
+            trade_info = {
                 "symbol": d.get("symbol"), "direction": d.get("direction"),
-                "setup": d.get("ict_setup"), "result": d.get("result"),
-                "pnl_usd": d.get("pnl_usd"), "entry": d.get("entry_price"),
-                "sl": d.get("stop_loss"), "tp1": d.get("take_profit_1"),
+                "status": d.get("status"), "setup": d.get("ict_setup"),
+                "result": d.get("result"), "pnl_usd": d.get("pnl_usd"),
+                "entry": d.get("entry_price"), "sl": d.get("stop_loss"),
+                "tp1": d.get("take_profit_1"), "tp2": d.get("take_profit_2"),
+                "tp3": d.get("take_profit_3"), "lot_size": d.get("lot_size"),
+                "tp_hits": d.get("tp_hits", 0),
                 "open_time": str(d.get("open_time", ""))[:16],
                 "close_time": str(d.get("close_time", ""))[:16],
-            })
+            }
+            if d.get("status") in ("ACTIVE", "PROPOSED", "APPROVED"):
+                open_trades_summary.append(trade_info)
+            else:
+                closed_trades_summary.append(trade_info)
 
         base_context = (
             f"## EMERGENCY MEETING — Topic: {topic}\n\n"
-            f"### Recent Trades\n{json.dumps(trades_summary, indent=2)}\n\n"
+            f"### Currently OPEN Trades ({len(open_trades_summary)})\n"
+            f"{json.dumps(open_trades_summary, indent=2)}\n\n"
+            f"### Recently CLOSED Trades ({len(closed_trades_summary)})\n"
+            f"{json.dumps(closed_trades_summary[-20:], indent=2)}\n\n"
             f"### System Config\n{json.dumps(system_config, indent=2)}\n\n"
             f"### Performance\n{json.dumps(performance_stats, indent=2)}\n"
         )
