@@ -399,82 +399,113 @@ function renderOpenTrades(trades, livePnlMap = {}) {
   if (!el) return;
   if (cntEl) cntEl.textContent = trades.length;
   if (!trades.length) { el.innerHTML = '<div class="empty-state">No open trades</div>'; return; }
+
+  // Total P&L across all open trades
+  const totalPnl = trades.reduce((sum, t) => sum + ((livePnlMap[t.id] || {}).pnl_usd || 0), 0);
+  const totalEl = document.getElementById('open-trades-total-pnl');
+  if (totalEl) {
+    const sign = totalPnl >= 0 ? '+' : '';
+    totalEl.textContent = `P&L live: ${sign}${totalPnl.toFixed(2)}$`;
+    totalEl.className = totalPnl >= 0 ? 'text-win' : 'text-loss';
+  }
+
   el.innerHTML = trades.map(t => {
     const live = livePnlMap[t.id] || {};
     const cp   = live.current_price;
     const pnl  = live.pnl_usd;
     const pips = live.pnl_pips;
     const pnlClass = pnl == null ? '' : pnl >= 0 ? 'text-win' : 'text-loss';
-    const pnlStr = pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} (${pips >= 0 ? '+' : ''}${pips?.toFixed(1)} pip)` : '—';
+    const pnlStr = pnl != null ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}$` : '—';
 
     const entry = parseFloat(t.entry_price) || 0;
     const sl    = parseFloat(t.stop_loss)   || 0;
     const isBuy = t.direction === 'BUY';
-
-    // Breakeven: SL has reached entry (within 1 pip tolerance)
     const pip = t.symbol?.includes('JPY') ? 0.01 : (["XAUUSD","XAGUSD","US30","NAS100","US500"].includes(t.symbol) ? 1.0 : 0.0001);
-    const isBreakeven = entry > 0 && sl > 0 && Math.abs(sl - entry) <= pip * 2;
 
-    // TP hit detection: use tp_hits counter (incremented on each partial close)
+    // SL distance in points
+    const slDist = sl > 0 && entry > 0 ? Math.abs(entry - sl) / pip : 0;
+
+    // TP values
     const tp1 = parseFloat(t.take_profit_1) || 0;
     const tp2 = parseFloat(t.take_profit_2) || 0;
     const tp3 = parseFloat(t.take_profit_3) || 0;
     const hits = t.tp_hits || 0;
-    const tp1hit = hits >= 1 || (tp1 > 0 && parseFloat(cp) > 0 && (isBuy ? parseFloat(cp) >= tp1 : parseFloat(cp) <= tp1));
-    const tp2hit = hits >= 2 || (tp2 > 0 && parseFloat(cp) > 0 && (isBuy ? parseFloat(cp) >= tp2 : parseFloat(cp) <= tp2));
-    const tp3hit = hits >= 3 || (tp3 > 0 && parseFloat(cp) > 0 && (isBuy ? parseFloat(cp) >= tp3 : parseFloat(cp) <= tp3));
 
-    // Status text
-    const statusParts = [];
-    if (tp3hit)      statusParts.push('TP3 raggiunto');
-    else if (tp2hit) statusParts.push('TP2 raggiunto');
-    else if (tp1hit) statusParts.push('TP1 raggiunto');
-    if (isBreakeven) statusParts.push('SL a breakeven');
-    else if (tp1hit) statusParts.push('SL in profitto');
-    const statusText = statusParts.length ? statusParts.join(' · ') : (pnl != null && pnl > 0 ? 'In profitto' : pnl != null && pnl < 0 ? 'In perdita' : 'Aperto');
+    // Progress bar: distance from entry to TP1 vs current position
+    let progressPct = 0;
+    let nextTpLabel = 'TP1';
+    let nextTpVal = tp1;
+    let ptsToTp = 0;
+    if (cp && entry) {
+      const curPrice = parseFloat(cp);
+      const target = hits < 1 ? tp1 : hits < 2 ? tp2 : tp3;
+      nextTpVal = target;
+      nextTpLabel = hits < 1 ? 'TP1' : hits < 2 ? 'TP2' : 'TP3';
+      if (target && entry) {
+        const totalDist = Math.abs(target - entry);
+        const curDist = isBuy ? (curPrice - entry) : (entry - curPrice);
+        progressPct = totalDist > 0 ? Math.max(0, Math.min(100, (curDist / totalDist) * 100)) : 0;
+        ptsToTp = isBuy ? (target - curPrice) / pip : (curPrice - target) / pip;
+      }
+    }
 
-    const slStyle = isBreakeven
-      ? 'color:#86efac;font-weight:700' // light green = BE
-      : 'color:var(--danger)';
+    // Ticket info
+    const ticket = t.mt5_ticket || 'PAPER';
 
-    const tpLevels = [
-      tp1 ? { label: 'TP1', val: tp1, hit: tp1hit } : null,
-      tp2 ? { label: 'TP2', val: tp2, hit: tp2hit } : null,
-      tp3 ? { label: 'TP3', val: tp3, hit: tp3hit } : null,
-    ].filter(Boolean);
+    // Direction badge color
+    const dirColor = isBuy ? '#22c55e' : '#ef4444';
+    const dirBg = isBuy ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
 
-    const tpHtml = tpLevels.map(tp => `
-      <div>
-        <div class="trade-level-label" style="${tp.hit ? 'color:#4ade80' : ''}">${tp.label}${tp.hit ? ' ✓' : ''}</div>
-        <div class="trade-level-val" style="${tp.hit ? 'color:#4ade80;font-weight:700' : 'color:var(--text-secondary)'}">${tp.val}</div>
-      </div>`).join('');
+    // Format time
+    const openTime = t.open_time ? new Date(t.open_time).toLocaleString('it-IT', {day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
 
     return `
-    <div class="open-trade-card">
-      <div class="trade-header-row">
-        <span class="trade-symbol">${t.symbol}</span>
-        <span class="trade-dir ${t.direction}">${t.direction}</span>
-        <span class="trade-setup">${t.ict_setup||'ICT'}</span>
-        <button class="btn btn-danger btn-sm" onclick="closeTrade(${t.id})">✕</button>
-      </div>
-      <div style="font-size:0.7rem;color:var(--text-muted);margin:2px 0 6px">
-        Aperto: ${fmtDate(t.open_time)}
-      </div>
-      <div class="trade-levels">
-        <div><div class="trade-level-label">Entry</div><div class="trade-level-val">${t.entry_price}</div></div>
-        <div><div class="trade-level-label">Now</div><div class="trade-level-val">${cp ?? '—'}</div></div>
-        <div>
-          <div class="trade-level-label" style="${isBreakeven ? 'color:#86efac' : ''}">SL${isBreakeven ? ' (BE)' : ''}</div>
-          <div class="trade-level-val" style="${slStyle}">${t.stop_loss}</div>
+    <div class="open-trade-card-v2">
+      <div class="otc-header">
+        <div class="otc-header-left">
+          <span class="otc-symbol">${t.symbol}</span>
+          <span class="otc-dir-badge" style="background:${dirBg};color:${dirColor}">▲ ${t.direction}</span>
+          <span class="otc-id">#${t.id}</span>
         </div>
-        ${tpHtml}
+        <div class="otc-pnl ${pnlClass}">${pnlStr} <span style="font-size:0.7rem;opacity:0.7">live</span></div>
       </div>
-      <div style="font-size:0.72rem;color:var(--text-muted);margin-top:5px;padding:4px 6px;background:var(--bg-input);border-radius:5px">
-        📍 ${statusText}
+
+      <div class="otc-price-box">
+        <div class="otc-price-label">Prezzo attuale</div>
+        <div class="otc-price-value">${cp ? parseFloat(cp).toFixed(5) : '—'}</div>
       </div>
-      <div style="font-size:0.82rem;font-weight:700;margin-top:6px;text-align:right" class="${pnlClass}">
-        P&L: ${pnlStr}
+
+      <div class="otc-details-grid">
+        <div class="otc-detail-left">
+          <div class="otc-row"><span class="otc-lbl">Entry time</span><span class="otc-val">${openTime}</span></div>
+          <div class="otc-row"><span class="otc-lbl">Entry price</span><span class="otc-val">${entry ? entry.toFixed(5) : '—'}</span></div>
+          <div class="otc-row"><span class="otc-lbl">Lotti aperti</span><span class="otc-val">${t.lot_size ?? '—'} lot</span></div>
+        </div>
+        <div class="otc-detail-right">
+          <div class="otc-row"><span class="otc-lbl">Stop Loss</span><span class="otc-val" style="color:#ef4444">${sl ? sl.toFixed(5) : '—'} <span style="font-size:0.7rem;opacity:0.7">(${slDist.toFixed(0)} pts)</span></span></div>
+          <div class="otc-row"><span class="otc-lbl">TP1</span><span class="otc-val" style="color:${hits>=1?'#4ade80':'#e2e8f0'}">${tp1 ? tp1.toFixed(5) : '—'}</span></div>
+          <div class="otc-row"><span class="otc-lbl">TP2</span><span class="otc-val" style="color:${hits>=2?'#4ade80':'#e2e8f0'}">${tp2 ? tp2.toFixed(5) : '—'}</span></div>
+          <div class="otc-row"><span class="otc-lbl">TP3</span><span class="otc-val" style="color:${hits>=3?'#4ade80':'#e2e8f0'}">${tp3 ? tp3.toFixed(5) : '—'}</span></div>
+        </div>
       </div>
+
+      <div class="otc-progress">
+        <div class="otc-progress-labels">
+          <span>Entry ${entry ? entry.toFixed(5) : ''}</span>
+          <span style="color:#4ade80">${nextTpLabel} ${nextTpVal ? nextTpVal.toFixed(5) : ''}</span>
+        </div>
+        <div class="otc-progress-bar">
+          <div class="otc-progress-fill" style="width:${progressPct.toFixed(1)}%"></div>
+        </div>
+        <div class="otc-progress-dist">${ptsToTp > 0 ? ptsToTp.toFixed(2) : '0.00'} pts al prossimo TP</div>
+      </div>
+
+      <div class="otc-ticket-row">
+        <span class="otc-ticket">Ticket ${ticket}</span>
+        <span class="otc-setup">${t.ict_setup||'ICT'}</span>
+      </div>
+
+      <button class="otc-close-btn" onclick="closeTrade(${t.id})">Chiudi trade</button>
     </div>`;
   }).join('');
 }

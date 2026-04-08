@@ -212,14 +212,112 @@ body {
 .activity-time { color: var(--text-muted); font-size: 0.65rem; margin-right: 6px; }
 
 /* ── Open Trade Cards ── */
-.open-trade-card {
+/* ── Open Trade Cards V2 ── */
+.open-trade-card-v2 {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 12px;
-  margin-bottom: 8px;
-  font-size: 0.8rem;
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 12px;
 }
+.otc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.otc-header-left { display: flex; align-items: center; gap: 8px; }
+.otc-symbol { font-weight: 800; font-size: 1.3rem; color: var(--text-primary); }
+.otc-dir-badge {
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 4px;
+}
+.otc-id { font-size: 0.78rem; color: var(--text-muted); }
+.otc-pnl {
+  font-size: 1.4rem;
+  font-weight: 800;
+}
+
+.otc-price-box {
+  background: var(--bg-primary);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.otc-price-label { font-size: 0.72rem; color: var(--text-muted); margin-bottom: 2px; }
+.otc-price-value { font-size: 1.6rem; font-weight: 700; color: var(--text-primary); text-align: right; }
+
+.otc-details-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 24px;
+  margin-bottom: 14px;
+}
+.otc-detail-left, .otc-detail-right { display: flex; flex-direction: column; gap: 4px; }
+.otc-row { display: flex; justify-content: space-between; align-items: center; }
+.otc-lbl { font-size: 0.78rem; color: var(--text-muted); }
+.otc-val { font-size: 0.88rem; font-weight: 600; color: var(--text-primary); }
+
+.otc-progress { margin-bottom: 12px; }
+.otc-progress-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.otc-progress-bar {
+  height: 6px;
+  background: var(--bg-primary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.otc-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #f59e0b, #22c55e);
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+.otc-progress-dist {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  text-align: right;
+  margin-top: 3px;
+}
+
+.otc-ticket-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 0.75rem;
+}
+.otc-ticket { color: var(--text-muted); }
+.otc-setup {
+  color: var(--text-muted);
+  background: var(--bg-input);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.otc-close-btn {
+  width: 100%;
+  padding: 10px;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.otc-close-btn:hover { background: rgba(239, 68, 68, 0.3); }
+
+/* Legacy compat */
 .trade-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .trade-symbol { font-weight: 700; font-size: 1.2rem; }
 .trade-dir.BUY  { color: var(--win);  font-size: 1.1rem; font-weight: 700; }

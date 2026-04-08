@@ -170,11 +170,14 @@
 
           <!-- Open Trades -->
           <div class="card">
-            <div class="card-header">
-              <h3>📈 Open Trades</h3>
-              <div id="open-trades-count" class="badge">0</div>
+            <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+              <div style="display:flex;align-items:center;gap:10px">
+                <h3>📈 Open Trades</h3>
+                <div id="open-trades-count" class="badge">0</div>
+              </div>
+              <div id="open-trades-total-pnl" style="font-size:1.1rem;font-weight:700"></div>
             </div>
-            <div id="open-trades-list">
+            <div id="open-trades-list" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px">
               <div class="empty-state">No open trades</div>
             </div>
           </div>
