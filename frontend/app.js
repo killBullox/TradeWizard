@@ -143,8 +143,14 @@ function handleMessage(msg) {
 
     case 'meeting_completed':
     case 'meeting_summary':
-      addActivity(`✅ Meeting completed: ${msg.improvements?.length || 0} improvements proposed`, 'success');
-      closeMeetingChat();
+      if (msg.error) {
+        addActivity(`🚨 Meeting error: ${msg.conclusions?.[0] || 'Unknown error'}`, 'error');
+        addMeetingMessage('SYS', `🚨 Errore: ${msg.conclusions?.[0] || 'Meeting terminato con errore'}. Puoi chiudere manualmente.`, 'thinking');
+      } else {
+        addActivity(`✅ Meeting completed: ${msg.improvements?.length || 0} improvements proposed`, 'success');
+        addMeetingMessage('SYS', '✅ Meeting approvato e chiuso. Improvements applicati.', 'thinking');
+        setTimeout(() => closeMeetingChat(), 3000);
+      }
       refreshMeetings();
       break;
 

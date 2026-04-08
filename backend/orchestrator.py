@@ -792,6 +792,15 @@ class Orchestrator:
         except Exception as exc:
             logger.error("Interactive meeting failed: %s", exc, exc_info=True)
             await self.broadcast({"type": "error", "message": f"Meeting failed: {exc}"})
+            # Don't silently close — broadcast explicit meeting_completed so frontend knows
+            await self.broadcast({
+                "type": "meeting_completed",
+                "meeting_type": "EMERGENCY",
+                "conclusions": [f"Meeting terminated due to error: {exc}"],
+                "improvements": [],
+                "error": True,
+                "timestamp": datetime.utcnow().isoformat(),
+            })
         finally:
             self._active_meeting = None
 
