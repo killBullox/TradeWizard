@@ -104,10 +104,85 @@ def _start_mt5_bridge():
         logger.warning("Could not start MT5 bridge: %s", exc)
 
 
+_SETTINGS_BACKUP = os.path.join(os.path.dirname(__file__), "..", "settings_backup.json")
+
+
+async def _restore_settings_from_backup():
+    """If DB settings are missing/default, restore from backup file or .env."""
+    backup_path = _SETTINGS_BACKUP
+    backup_data = {}
+    if os.path.exists(backup_path):
+        try:
+            with open(backup_path, "r") as f:
+                backup_data = json.load(f)
+            logger.info("Settings backup found with %d keys", len(backup_data))
+        except Exception:
+            pass
+
+    async with async_session_factory() as s:
+        # Restore MT5 credentials: .env takes priority, then backup
+        env_fallbacks = {
+            "mt5_login":      os.getenv("MT5_LOGIN", ""),
+            "mt5_password":   os.getenv("MT5_PASSWORD", ""),
+            "mt5_server":     os.getenv("MT5_SERVER", ""),
+            "mt5_bridge_url": os.getenv("MT5_BRIDGE_URL", "http://localhost:5002"),
+        }
+        for key, env_val in env_fallbacks.items():
+            current = await get_config(key, s)
+            if not current or current.strip() == "":
+                # Try backup first, then env
+                restore_val = backup_data.get(key) or env_val
+                if restore_val:
+                    await set_config(key, restore_val, s)
+                    logger.info("Restored setting '%s' from %s",
+                                key, "backup" if backup_data.get(key) else ".env")
+
+        # Restore paper_mode from backup if DB has default 'true' but backup says 'false'
+        paper_val = await get_config("paper_mode", s)
+        if paper_val == "true" and backup_data.get("paper_mode") == "false":
+            await set_config("paper_mode", "false", s)
+            logger.info("Restored paper_mode=false from backup")
+
+        # Restore other important settings from backup
+        restore_keys = [
+            "risk_percent", "rr_ratio", "max_open_trades", "account_balance",
+            "max_risk_usd", "enabled_pairs", "analysis_interval", "kill_zones",
+            "ict_strategies", "min_sl_pips", "model_mode",
+            "news_block_minutes_before", "news_block_minutes_after",
+        ]
+        for key in restore_keys:
+            current = await get_config(key, s)
+            backup_val = backup_data.get(key)
+            if backup_val and current != backup_val:
+                # Only restore if the DB has the default value (meaning it was reset)
+                # We check by comparing with known defaults
+                pass  # Don't auto-overwrite — backup is there for manual recovery
+
+        await s.commit()
+
+
+async def _save_settings_backup():
+    """Save all current settings to a JSON backup file."""
+    try:
+        async with async_session_factory() as s:
+            result = await s.execute(select(SystemConfig))
+            rows = result.scalars().all()
+            data = {r.key: r.value for r in rows}
+        with open(_SETTINGS_BACKUP, "w") as f:
+            json.dump(data, f, indent=2)
+        logger.info("Settings backup saved (%d keys)", len(data))
+    except Exception as exc:
+        logger.warning("Failed to save settings backup: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global orchestrator
     await init_db()
+
+    # Restore settings from backup/.env if DB was reset
+    await _restore_settings_from_backup()
+
     # Set default MT5 bridge URL if not already configured
     async with async_session_factory() as s:
         existing = await get_config("mt5_bridge_url", s)
@@ -126,8 +201,16 @@ async def lifespan(app: FastAPI):
     orchestrator = Orchestrator(broadcast_fn=manager.broadcast)
     await orchestrator.start()
     app.state.start_time = datetime.utcnow()
+
+    # Save settings backup after successful startup
+    await _save_settings_backup()
+
     logger.info("TradeWizard system started ✅")
     yield
+
+    # Save settings backup before shutdown
+    await _save_settings_backup()
+
     if orchestrator:
         await orchestrator.stop()
     if _bridge_proc and _bridge_proc.poll() is None:
@@ -520,6 +603,8 @@ async def update_config(key: str, data: dict):
         # Keep paper_balance in sync with account_balance
         if key == "account_balance":
             await set_config("paper_balance", value, s)
+    # Auto-save settings backup on every config change
+    asyncio.create_task(_save_settings_backup())
     return {"key": key, "value": value}
 
 
