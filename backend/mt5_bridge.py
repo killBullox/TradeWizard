@@ -333,21 +333,13 @@ class MT5Bridge:
         return lots
 
     def _get_filling(self, symbol: str) -> int:
-        """Detect supported filling mode. Many brokers (Ava, XM) only support RETURN."""
+        """Detect supported filling mode. Try FOK first (works with Ava and most brokers)."""
         if not MT5_AVAILABLE:
-            return 2  # ORDER_FILLING_RETURN
-        info = mt5.symbol_info(symbol)
-        if not info:
-            return mt5.ORDER_FILLING_RETURN
-        mode = info.filling_mode
-        # Try RETURN first (most compatible, works with Ava/XM/IC Markets)
-        if mode & 4:  # SYMBOL_FILLING_RETURN = 4 (not always defined as constant)
-            return mt5.ORDER_FILLING_RETURN
-        if mode & mt5.SYMBOL_FILLING_FOK:
-            return mt5.ORDER_FILLING_FOK
-        if mode & mt5.SYMBOL_FILLING_IOC:
-            return mt5.ORDER_FILLING_IOC
-        return mt5.ORDER_FILLING_RETURN  # default fallback
+            return 0  # ORDER_FILLING_FOK
+        # FOK (0) is the most universally supported — use it as default
+        # The filling_mode bitmask from symbol_info is unreliable on some brokers
+        # (Ava reports filling_mode=1 but only FOK=0 actually works)
+        return mt5.ORDER_FILLING_FOK
 
     # ── Historical data ────────────────────────────────────────────────────────
 
