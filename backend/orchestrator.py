@@ -1025,6 +1025,13 @@ class Orchestrator:
         else:
             new_sl = round(entry - buffer, 6)
 
+        # 1. Close 1/3 of position
+        pct = 0.33
+        await self.cc.close_partial(trade.mt5_ticket or "", sym, pct)
+        await self._append_close_note(trade_id, f"Lock profit: chiuso {int(pct*100)}% della posizione")
+        await self.broadcast({"type": "partial_close", "trade_id": trade_id, "percent": pct})
+
+        # 2. Move SL to entry + 3 pips
         await self.cc.modify_sl(trade.mt5_ticket or "", new_sl, sym)
         await self._update_trade_sl(trade_id, new_sl)
         if self._paper:
@@ -1034,8 +1041,9 @@ class Orchestrator:
             "type": "sl_trailed", "trade_id": trade_id,
             "symbol": sym, "new_sl": new_sl, "reason": "Lock profit (manual)",
         })
-        logger.info("Lock profit on trade #%d: SL → %.5f", trade_id, new_sl)
-        return {"success": True, "new_sl": new_sl}
+
+        logger.info("Lock profit on trade #%d: closed 33%%, SL → %.5f", trade_id, new_sl)
+        return {"success": True, "new_sl": new_sl, "partial_close": f"{int(pct*100)}%"}
 
     async def modify_tps(self, trade_id: int, tp1=None, tp2=None, tp3=None) -> dict:
         """Update TP levels for an active trade."""
