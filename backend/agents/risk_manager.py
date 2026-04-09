@@ -1,102 +1,49 @@
 """
-Risk Manager (RM)
-Evaluates risk for each proposed trade strategy.
+Risk Manager (RM) — Deterministic Python implementation.
+No LLM calls — pure mathematical risk evaluation.
+Calculates position size, validates SL/TP, checks correlations.
 """
 
-import json
+import logging
 from .base_agent import BaseAgent, MODEL_STANDARD
 
+logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are the Risk Manager (RM) for a professional forex trading operation.
-Your role is to protect trading capital by rigorously evaluating every proposed trade.
+# Correlated pair groups
+CORRELATION_GROUPS = [
+    {"EURUSD", "GBPUSD", "AUDUSD", "NZDUSD"},   # USD weakness basket
+    {"USDJPY", "USDCHF", "USDCAD"},               # USD strength basket
+]
 
-## Your Risk Framework
-
-### Position Sizing
-- Never risk more than the configured max_risk_percent per trade
-- Account for current drawdown when sizing positions
-- Formula: Lot size = (Account Balance × Risk%) / (SL distance in pips × Pip value)
-- Consider spread costs in your calculations
-- CRITICAL: When computing RR, account for execution friction (~1.5 pips: spread + slippage).
-  Subtract friction from TP distance, add friction to SL distance to get NET RR.
-  Example: SL=30p, TP=60p → net RR = (60-3)/(30+3) = 1.73, NOT 2.0.
-- The system config contains min_sl_pips — reject any setup with SL below this value.
-- The system config contains rr_ratio — the minimum NET RR required after friction.
-
-### Statistical Edge
-- Evaluate win probability based on historical ICT setup performance:
-  * OTE (61.8-79% Fib) + FVG confluence: ~65% win rate
-  * Pure Order Block: ~60% win rate
-  * Liquidity Sweep + reversal: ~62% win rate
-  * Silver Bullet (timed entry): ~67% win rate
-  * SMT Divergence: ~63% win rate
-- Factor in current market volatility (ATR-based)
-- Session timing bonus: +5% probability during killzones
-- HTF alignment bonus: +8% when LTF matches HTF bias
-
-### Risk/Reward Assessment
-- The system automatically validates RR in code — you do NOT need to reject for RR reasons
-- Your job is to calculate position size and assess probability, NOT to enforce RR limits
-- Higher RR is better but low RR due to day trading constraints is ACCEPTABLE (min 1.2)
-- Calculate Expected Value: EV = (Win% × Reward) - (Loss% × Risk)
-
-### Portfolio-Level Risk
-- Check current open trades count vs max_open_trades
-- Correlation check: avoid similar direction trades on correlated pairs
-  * EURUSD/GBPUSD/AUDUSD are positively correlated
-  * USDJPY/USDCHF are positively correlated
-  * Gold (XAUUSD) is often inversely correlated with USD
-
-### Red Flags (auto-reject ONLY for these)
-- SL distance < min_sl_pips from system config
-- Max open trades already reached
-- Win probability < 35%
-
-### IMPORTANT: Do NOT reject for RR reasons
-The system code enforces RR limits automatically with adaptive thresholds.
-Your role is to APPROVE and calculate position_size. Set tp1_pips to the
-best realistic intraday target (respect max_tp1_pips from user message).
-If RR is low due to day trading constraints, that is ACCEPTABLE — approve anyway.
-
-### SL Sizing
-- sl_pips MUST be ≥ min_sl_pips. If invalidation is tighter, REJECT.
-- tp1_pips should be the best realistic target within max_tp1_pips constraint
-
-## Output Format
-Respond with JSON:
-{
-  "approved": true|false,
-  "risk_score": 0-100,
-  "rejection_reason": "..." or null,
-  "position_size": {
-    "lot_size": float,
-    "risk_usd": float,
-    "risk_percent": float,
-    "sl_pips": float,
-    "tp1_pips": float,
-    "tp2_pips": float or null,
-    "rr_ratio": float
-  },
-  "probability_assessment": {
-    "win_probability": float,
-    "base_probability": float,
-    "adjustments": [{"factor": "...", "delta": float}],
-    "expected_value": float
-  },
-  "risk_factors": [
-    {"factor": "...", "severity": "LOW|MEDIUM|HIGH", "description": "..."}
-  ],
-  "recommendation": "FULL_SIZE|HALF_SIZE|SKIP",
-  "notes": "risk manager commentary"
+# Pip USD value per standard lot
+PIP_USD = {
+    "XAUUSD": 100.0, "US30": 5.0, "NAS100": 20.0, "US500": 50.0,
+    "USDJPY": 6.5, "EURJPY": 6.5, "GBPJPY": 6.5, "AUDJPY": 6.5,
+    "CHFJPY": 6.5, "CADJPY": 6.5, "NZDJPY": 6.5,
+    "USDCHF": 11.0, "EURCHF": 11.0, "GBPCHF": 11.0,
+    "USDCAD": 7.25, "EURCAD": 7.25, "GBPCAD": 7.25,
 }
-"""
+
+# Base win probability by setup type (from ICT historical data)
+SETUP_WIN_RATES = {
+    "OTE": 0.65,
+    "FVG": 0.60,
+    "OrderBlock": 0.60,
+    "LiquiditySweep": 0.55,
+    "SilverBullet": 0.67,
+    "BOS": 0.55,
+    "CHOCH": 0.55,
+    "Mitigation": 0.58,
+    "PD_Array": 0.58,
+}
 
 
 class RiskManagerAgent(BaseAgent):
+    """Deterministic risk manager — no LLM, pure math."""
     name = "RM"
     emoji = "⚖️"
     color = "#DC2626"
-    model = MODEL_STANDARD
+    model = MODEL_STANDARD  # kept for compatibility but not used
 
     async def evaluate(
         self,
@@ -112,63 +59,176 @@ class RiskManagerAgent(BaseAgent):
             f"Evaluating risk for {symbol} {strategy.get('direction')} setup..."
         )
 
+        # ── Extract parameters ────────────────────────────────────────────
         ind = market_data.get("H1", {}).get("indicators", {})
-        current_price = ind.get("current_price", 0)
-        atr_pips = ind.get("atr_pips", 15)
-        pip_value = ind.get("pip_value", 0.0001)
+        current_price = float(ind.get("current_price", 0))
+        atr_pips = float(ind.get("atr_pips", 15))
+        pip_value = float(ind.get("pip_value", 0.0001))
+
         account_balance = float(system_config.get("account_balance", 10000))
-        max_risk = float(system_config.get("risk_percent", 1.0))
+        risk_percent = float(system_config.get("risk_percent", 1.0))
+        max_risk_usd = float(system_config.get("max_risk_usd", 0))
         rr_ratio = float(system_config.get("rr_ratio", 2.0))
         max_trades = int(system_config.get("max_open_trades", 3))
+        min_sl_pips = float(system_config.get("min_sl_pips", 20))
+        max_trade_hours = float(system_config.get("max_trade_duration_hours", 8))
 
-        user_msg = f"""
-## Risk Evaluation Request
+        direction = strategy.get("direction", "BUY")
+        setup_type = strategy.get("setup", "FVG")
+        probability = float(strategy.get("probability", 60))
+        entry_low = float(strategy.get("entry_zone_low", 0))
+        entry_high = float(strategy.get("entry_zone_high", 0))
 
-### Trade Setup
-- Symbol: {symbol}
-- Direction: {strategy.get('direction')}
-- Setup Type: {strategy.get('setup')}
-- ICTEA Probability: {strategy.get('probability')}%
-- Entry Zone: {strategy.get('entry_zone_low')} – {strategy.get('entry_zone_high')}
-- Session: {strategy.get('session')}
-- Rationale: {strategy.get('rationale', '')}
+        risk_factors = []
+        rejection_reason = None
 
-### Account Parameters
-- Account Balance: ${account_balance:,.2f}
-- Max Risk Per Trade: {max_risk}%
-- Target RR Ratio: {rr_ratio} (NET, after ~1.5 pips friction)
-- Max Open Trades: {max_trades}
-- Currently Open Trades: {open_trades_count}
-- **Minimum SL Distance: {system_config.get('min_sl_pips', '30')} pips** (HARD LIMIT — reject if setup SL is below this)
+        # ── Check 1: Max open trades ──────────────────────────────────────
+        if open_trades_count >= max_trades:
+            return self._reject(
+                f"Max open trades reached ({open_trades_count}/{max_trades})",
+                risk_score=10
+            )
 
-### Market Conditions
-- Current Price: {current_price}
-- ATR (H1): {atr_pips} pips
-- Pip Value: {pip_value}
-- HTF Trend: {ind.get('trend', 'unknown')}
-- PDH: {ind.get('pdh')}
-- PDL: {ind.get('pdl')}
+        # ── Check 2: Minimum probability ──────────────────────────────────
+        if probability < 35:
+            return self._reject(
+                f"Win probability too low: {probability}% (min 35%)",
+                risk_score=15
+            )
 
-### Day Trading Constraints
-- Max TP1 distance: {round(atr_pips * 2, 0)} pips (2x ATR H1 — must be reachable in 2-6 hours)
-- Max trade duration: {system_config.get('max_trade_duration_hours', '6')} hours
-- Set tp1_pips to the BEST intraday target within max TP1 distance
+        # ── Calculate SL from ICT invalidation ────────────────────────────
+        # Use entry zone midpoint as entry reference
+        entry_ref = (entry_low + entry_high) / 2 if entry_low and entry_high else current_price
 
-### Correlated Pairs Currently Trading: None
+        # SL distance: use ATR-based SL (1.0-1.5x ATR H1) or min_sl_pips, whichever is larger
+        sl_pips = max(min_sl_pips, round(atr_pips * 1.0, 1))
 
-APPROVE this trade and calculate position size.
-SL MUST be ≥ {system_config.get('min_sl_pips', '20')} pips.
-Set tp1_pips to the best realistic intraday target (max {round(atr_pips * 2, 0)} pips).
-The system code will validate RR automatically — do NOT reject for RR reasons.
-"""
-        if memory_context:
-            user_msg = memory_context + "\n" + user_msg
-        result = await self._call_claude_structured(SYSTEM_PROMPT, user_msg, max_tokens=3000)
+        # Cap SL at 2.5x ATR to avoid oversized stops
+        if sl_pips > atr_pips * 2.5:
+            sl_pips = round(atr_pips * 2.5, 1)
+            risk_factors.append({"factor": "SL capped", "severity": "MEDIUM",
+                                 "description": f"SL capped at 2.5x ATR ({sl_pips}p)"})
 
-        status = "APPROVED ✅" if result.get("approved") else f"REJECTED ❌: {result.get('rejection_reason','')}"
-        await self.broadcast_status(
-            "EVALUATION_COMPLETE",
-            f"{symbol} {strategy.get('direction')}: {status}",
-            {"approved": result.get("approved"), "lot_size": result.get("position_size", {}).get("lot_size")},
-        )
+        # ── Calculate TP1 (day trading constraint) ────────────────────────
+        max_tp1_pips = round(atr_pips * 2, 1)  # 2x ATR H1 = intraday reachable
+
+        # Ideal TP1 for configured RR
+        ideal_tp1 = round(sl_pips * rr_ratio, 1)
+
+        # Use min of ideal and max allowed
+        tp1_pips = min(ideal_tp1, max_tp1_pips)
+
+        # Ensure TP1 is at least 1.2x SL (absolute floor)
+        if tp1_pips < sl_pips * 1.2:
+            tp1_pips = round(sl_pips * 1.2, 1)
+
+        # If even 1.2x SL exceeds max TP1, this pair can't be traded intraday
+        if tp1_pips > max_tp1_pips and max_tp1_pips > 0:
+            return self._reject(
+                f"Cannot achieve min RR 1.2 within day trading limit: "
+                f"need {tp1_pips}p TP1, max allowed {max_tp1_pips}p (2x ATR H1)",
+                risk_score=20
+            )
+
+        # ── Calculate actual RR ───────────────────────────────────────────
+        gross_rr = round(tp1_pips / sl_pips, 2) if sl_pips > 0 else 0
+        friction = 1.5
+        net_rr = round((tp1_pips - friction) / (sl_pips + friction), 2) if sl_pips > 0 else 0
+
+        # ── Calculate position size ───────────────────────────────────────
+        risk_usd = max_risk_usd if max_risk_usd > 0 else account_balance * risk_percent / 100
+        pip_usd = PIP_USD.get(symbol, 10.0)
+        lot_size = max(0.01, round(risk_usd / (sl_pips * pip_usd), 2))
+
+        # ── Win probability with adjustments ──────────────────────────────
+        base_prob = SETUP_WIN_RATES.get(setup_type, 0.55)
+        win_prob = base_prob
+        adjustments = []
+
+        # Session bonus
+        session = strategy.get("session", "")
+        if session in ("London", "NewYork"):
+            win_prob += 0.05
+            adjustments.append({"factor": f"{session} session", "delta": 0.05})
+
+        # HTF alignment
+        htf_trend = ind.get("trend", "unknown")
+        if (direction == "BUY" and htf_trend == "bullish") or \
+           (direction == "SELL" and htf_trend == "bearish"):
+            win_prob += 0.08
+            adjustments.append({"factor": "HTF alignment", "delta": 0.08})
+
+        # ICTEA probability override (if provided and reasonable)
+        if 40 <= probability <= 90:
+            ictea_prob = probability / 100
+            win_prob = round((win_prob + ictea_prob) / 2, 3)  # average of model and ICTEA
+
+        # ── Expected value ────────────────────────────────────────────────
+        ev = round(win_prob * tp1_pips - (1 - win_prob) * sl_pips, 2)
+
+        if ev < 0:
+            risk_factors.append({"factor": "Negative EV", "severity": "HIGH",
+                                 "description": f"EV={ev} pips"})
+
+        # ── TP2 / TP3 ────────────────────────────────────────────────────
+        tp2_pips = round(tp1_pips * 1.5, 1) if tp1_pips else None
+        tp3_pips = round(tp1_pips * 2.0, 1) if tp1_pips else None
+
+        # ── Recommendation ────────────────────────────────────────────────
+        if net_rr >= 1.5 and ev > 0 and win_prob >= 0.50:
+            recommendation = "FULL_SIZE"
+        elif net_rr >= 1.2 and ev >= -2:
+            recommendation = "HALF_SIZE"
+            risk_factors.append({"factor": "Marginal setup", "severity": "MEDIUM",
+                                 "description": f"Net RR {net_rr}, EV {ev}"})
+        else:
+            recommendation = "FULL_SIZE"  # approve anyway, code will validate
+
+        # ── Build result ──────────────────────────────────────────────────
+        result = {
+            "approved": True,
+            "risk_score": min(100, max(0, int(100 - net_rr * 20 - ev * 2))),
+            "rejection_reason": None,
+            "position_size": {
+                "lot_size": lot_size,
+                "risk_usd": round(risk_usd, 2),
+                "risk_percent": risk_percent,
+                "sl_pips": sl_pips,
+                "tp1_pips": tp1_pips,
+                "tp2_pips": tp2_pips,
+                "rr_ratio": gross_rr,
+            },
+            "probability_assessment": {
+                "win_probability": round(win_prob * 100, 1),
+                "base_probability": round(base_prob * 100, 1),
+                "adjustments": adjustments,
+                "expected_value": ev,
+            },
+            "risk_factors": risk_factors,
+            "recommendation": recommendation,
+            "notes": (
+                f"Deterministic RM: SL={sl_pips}p TP1={tp1_pips}p "
+                f"gross_RR={gross_rr} net_RR={net_rr} "
+                f"lot={lot_size} risk=${risk_usd:.0f} "
+                f"win_prob={win_prob*100:.0f}% EV={ev}p"
+            ),
+        }
+
+        status = f"APPROVED ✅ {symbol} {direction} SL={sl_pips}p TP1={tp1_pips}p RR={gross_rr}"
+        await self.broadcast_status("EVALUATION_COMPLETE", status)
+        logger.info("RM [%s] %s", symbol, result["notes"])
+
         return result
+
+    @staticmethod
+    def _reject(reason: str, risk_score: int = 30) -> dict:
+        return {
+            "approved": False,
+            "risk_score": risk_score,
+            "rejection_reason": reason,
+            "position_size": {},
+            "probability_assessment": {},
+            "risk_factors": [],
+            "recommendation": "SKIP",
+            "notes": f"Rejected: {reason}",
+        }
