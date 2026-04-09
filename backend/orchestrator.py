@@ -1008,6 +1008,58 @@ class Orchestrator:
         await self._close_trade(trade, close_price, reason)
         return {"success": True}
 
+    async def lock_profit(self, trade_id: int) -> dict:
+        """Move SL to entry + 3 pips to lock in profit."""
+        async with async_session_factory() as s:
+            trade = await s.get(Trade, trade_id)
+            if not trade or trade.status != "ACTIVE":
+                return {"error": "Trade not found or not active"}
+
+        sym = trade.symbol or ""
+        pip = 0.01 if "JPY" in sym else (1.0 if sym in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+        entry = trade.entry_price or 0
+        buffer = 3 * pip  # 3 pips above entry for BUY, below for SELL
+
+        if trade.direction == "BUY":
+            new_sl = round(entry + buffer, 6)
+        else:
+            new_sl = round(entry - buffer, 6)
+
+        await self.cc.modify_sl(trade.mt5_ticket or "", new_sl, sym)
+        await self._update_trade_sl(trade_id, new_sl)
+        if self._paper:
+            self._paper.modify_sl(trade_id, new_sl)
+        await self._append_close_note(trade_id, f"Lock profit: SL spostato a entry+3pip ({new_sl:.5f})")
+        await self.broadcast({
+            "type": "sl_trailed", "trade_id": trade_id,
+            "symbol": sym, "new_sl": new_sl, "reason": "Lock profit (manual)",
+        })
+        logger.info("Lock profit on trade #%d: SL → %.5f", trade_id, new_sl)
+        return {"success": True, "new_sl": new_sl}
+
+    async def modify_tps(self, trade_id: int, tp1=None, tp2=None, tp3=None) -> dict:
+        """Update TP levels for an active trade."""
+        async with async_session_factory() as s:
+            trade = await s.get(Trade, trade_id)
+            if not trade or trade.status != "ACTIVE":
+                return {"error": "Trade not found or not active"}
+
+            updated = []
+            if tp1 is not None:
+                trade.take_profit_1 = float(tp1)
+                updated.append(f"TP1={tp1}")
+            if tp2 is not None:
+                trade.take_profit_2 = float(tp2)
+                updated.append(f"TP2={tp2}")
+            if tp3 is not None:
+                trade.take_profit_3 = float(tp3)
+                updated.append(f"TP3={tp3}")
+            await s.commit()
+
+        await self._append_close_note(trade_id, f"TP modificati manualmente: {', '.join(updated)}")
+        logger.info("TPs modified on trade #%d: %s", trade_id, ", ".join(updated))
+        return {"success": True, "updated": updated}
+
     @property
     def news_filter(self) -> NewsFilter | None:
         return self._news

@@ -495,9 +495,9 @@ function renderOpenTrades(trades, livePnlMap = {}) {
         </div>
         <div class="otc-detail-right">
           <div class="otc-row"><span class="otc-lbl">Stop Loss</span><span class="otc-val" style="color:#ef4444">${sl ? sl.toFixed(5) : '—'} <span style="font-size:0.7rem;opacity:0.7">(${slDist.toFixed(0)} pts)</span></span></div>
-          <div class="otc-row"><span class="otc-lbl">TP1</span><span class="otc-val" style="color:${hits>=1?'#4ade80':'#e2e8f0'}">${tp1 ? tp1.toFixed(5) : '—'}</span></div>
-          <div class="otc-row"><span class="otc-lbl">TP2</span><span class="otc-val" style="color:${hits>=2?'#4ade80':'#e2e8f0'}">${tp2 ? tp2.toFixed(5) : '—'}</span></div>
-          <div class="otc-row"><span class="otc-lbl">TP3</span><span class="otc-val" style="color:${hits>=3?'#4ade80':'#e2e8f0'}">${tp3 ? tp3.toFixed(5) : '—'}</span></div>
+          <div class="otc-row"><span class="otc-lbl">TP1</span><span class="otc-val otc-tp-editable" style="color:${hits>=1?'#4ade80':'#e2e8f0'}" onclick="editTP(${t.id},'tp1',${tp1})" title="Click per modificare">${tp1 ? tp1.toFixed(5) : '—'}</span></div>
+          <div class="otc-row"><span class="otc-lbl">TP2</span><span class="otc-val otc-tp-editable" style="color:${hits>=2?'#4ade80':'#e2e8f0'}" onclick="editTP(${t.id},'tp2',${tp2})" title="Click per modificare">${tp2 ? tp2.toFixed(5) : '—'}</span></div>
+          <div class="otc-row"><span class="otc-lbl">TP3</span><span class="otc-val otc-tp-editable" style="color:${hits>=3?'#4ade80':'#e2e8f0'}" onclick="editTP(${t.id},'tp3',${tp3})" title="Click per modificare">${tp3 ? tp3.toFixed(5) : '—'}</span></div>
         </div>
       </div>
 
@@ -517,7 +517,10 @@ function renderOpenTrades(trades, livePnlMap = {}) {
         <span class="otc-setup">${t.ict_setup||'ICT'}</span>
       </div>
 
-      <button class="otc-close-btn" onclick="closeTrade(${t.id})">Chiudi trade</button>
+      <div style="display:flex;gap:8px">
+        <button class="otc-lock-btn" onclick="lockProfit(${t.id})">🔒 Lock Profit</button>
+        <button class="otc-close-btn" onclick="closeTrade(${t.id})">Chiudi trade</button>
+      </div>
     </div>`;
   }).join('');
 }
@@ -2672,6 +2675,43 @@ function resetRejections() {
 
 window.showRejections = showRejections;
 window.resetRejections = resetRejections;
+
+// ── Lock Profit & Edit TP ────────────────────────────────────────────────────
+async function lockProfit(tradeId) {
+  if (!confirm('Spostare lo SL a entry + 3 pips per bloccare il profitto?')) return;
+  try {
+    const r = await fetchJSON(`/api/trades/${tradeId}/lock-profit`, { method: 'POST' });
+    if (r.success) {
+      addActivity(`🔒 Lock profit su trade #${tradeId}: nuovo SL ${r.new_sl}`, 'success');
+      await refreshTrades();
+    } else {
+      showToast('error', r.error || 'Errore lock profit');
+    }
+  } catch (e) { showToast('error', 'Errore: ' + e.message); }
+}
+
+function editTP(tradeId, tpField, currentVal) {
+  const newVal = prompt(`Modifica ${tpField.toUpperCase()} (attuale: ${currentVal || 'N/A'}):`, currentVal || '');
+  if (newVal === null || newVal === '') return;
+  const val = parseFloat(newVal);
+  if (isNaN(val) || val <= 0) { showToast('error', 'Valore non valido'); return; }
+  const body = {};
+  body[tpField.replace('tp', 'tp')] = val;
+  fetchJSON(`/api/trades/${tradeId}/modify-tp`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }).then(r => {
+    if (r.success) {
+      addActivity(`📝 ${tpField.toUpperCase()} modificato su trade #${tradeId}: ${val}`, 'info');
+      refreshTrades();
+    } else {
+      showToast('error', r.error || 'Errore modifica TP');
+    }
+  }).catch(e => showToast('error', 'Errore: ' + e.message));
+}
+
+window.lockProfit = lockProfit;
+window.editTP = editTP;
 
 // ── Toast Notification ────────────────────────────────────────────────────────
 function showToast(type, msg) {

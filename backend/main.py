@@ -532,6 +532,27 @@ async def close_trade(trade_id: int):
     return await orchestrator.close_trade_manually(trade_id)
 
 
+@app.post("/api/trades/{trade_id}/lock-profit")
+async def lock_profit(trade_id: int):
+    """Move SL to entry + 3 pips to lock in profit."""
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    return await orchestrator.lock_profit(trade_id)
+
+
+@app.post("/api/trades/{trade_id}/modify-tp")
+async def modify_tp(trade_id: int, data: dict):
+    """Update TP1/TP2/TP3 for an active trade."""
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    return await orchestrator.modify_tps(
+        trade_id,
+        tp1=data.get("tp1"),
+        tp2=data.get("tp2"),
+        tp3=data.get("tp3"),
+    )
+
+
 @app.get("/api/journal")
 async def get_journal(trade_id: int | None = None, limit: int = 50):
     async with async_session_factory() as s:
