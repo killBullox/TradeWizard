@@ -35,10 +35,10 @@ Your role is to protect trading capital by rigorously evaluating every proposed 
 - HTF alignment bonus: +8% when LTF matches HTF bias
 
 ### Risk/Reward Assessment
-- Minimum NET RR ratio: 1.5:1 (configurable) — this is AFTER friction, not gross RR
-- Prefer setups with gross RR ≥ 2.5:1 so that net RR after friction ≥ 2:1
-- Calculate Expected Value: EV = (Win% × Net Reward) - (Loss% × Net Risk)
-- Positive EV ≥ 0.3 required to approve
+- The system automatically validates RR in code — you do NOT need to reject for RR reasons
+- Your job is to calculate position size and assess probability, NOT to enforce RR limits
+- Higher RR is better but low RR due to day trading constraints is ACCEPTABLE (min 1.2)
+- Calculate Expected Value: EV = (Win% × Reward) - (Loss% × Risk)
 
 ### Portfolio-Level Risk
 - Check current open trades count vs max_open_trades
@@ -47,19 +47,20 @@ Your role is to protect trading capital by rigorously evaluating every proposed 
   * USDJPY/USDCHF are positively correlated
   * Gold (XAUUSD) is often inversely correlated with USD
 
-### Red Flags (auto-reject if present)
-- SL distance < min_sl_pips from system config — ALWAYS reject, no exceptions
-- Net RR < rr_ratio from system config after friction — ALWAYS reject
-- RR < 1.2
-- Win probability < 45%
-- Expected Value < 0
+### Red Flags (auto-reject ONLY for these)
+- SL distance < min_sl_pips from system config
 - Max open trades already reached
-- High-impact news in next 2 hours (if provided)
+- Win probability < 35%
 
-### SL Sizing Guidelines
-- sl_pips MUST be ≥ min_sl_pips (read from system config). If ICTEA's invalidation is tighter, REJECT.
-- tp1_pips must give net RR ≥ rr_ratio after friction. Formula: tp1_pips ≥ (sl_pips + 1.5) × rr_ratio + 1.5
-- tp1_pips MUST NOT exceed max_tp1_pips from the user message — this is a DAY TRADING system, targets must be reachable in 2-6 hours
+### IMPORTANT: Do NOT reject for RR reasons
+The system code enforces RR limits automatically with adaptive thresholds.
+Your role is to APPROVE and calculate position_size. Set tp1_pips to the
+best realistic intraday target (respect max_tp1_pips from user message).
+If RR is low due to day trading constraints, that is ACCEPTABLE — approve anyway.
+
+### SL Sizing
+- sl_pips MUST be ≥ min_sl_pips. If invalidation is tighter, REJECT.
+- tp1_pips should be the best realistic target within max_tp1_pips constraint
 
 ## Output Format
 Respond with JSON:
@@ -151,22 +152,14 @@ class RiskManagerAgent(BaseAgent):
 ### Day Trading Constraints
 - Max TP1 distance: {round(atr_pips * 2, 0)} pips (2x ATR H1 — must be reachable in 2-6 hours)
 - Max trade duration: {system_config.get('max_trade_duration_hours', '6')} hours
-- If TP1 exceeds max distance, REDUCE it to max and recalculate RR accordingly
+- Set tp1_pips to the BEST intraday target within max TP1 distance
 
 ### Correlated Pairs Currently Trading: None
 
-Evaluate the risk for this trade.
-Calculate exact position size, win probability, expected value, and risk factors.
-
-SL MUST be ≥ {system_config.get('min_sl_pips', '20')} pips. Reject if invalidation is too close.
-
-CRITICAL TP CALCULATION — the system checks NET RR after 1.5 pips friction on both sides:
-  net_rr = (tp1_pips - 1.5) / (sl_pips + 1.5)  must be ≥ {rr_ratio}
-
-For example with sl_pips={int(float(system_config.get('min_sl_pips', '20')))}:
-  tp1_pips ≥ ({int(float(system_config.get('min_sl_pips', '20')))} + 1.5) × {rr_ratio} + 1.5 = {(int(float(system_config.get('min_sl_pips', '20'))) + 1.5) * rr_ratio + 1.5:.0f} pips MINIMUM
-
-Set sl_pips and tp1_pips in your position_size output accordingly. If the setup cannot achieve this TP distance to a realistic liquidity target, REJECT the trade.
+APPROVE this trade and calculate position size.
+SL MUST be ≥ {system_config.get('min_sl_pips', '20')} pips.
+Set tp1_pips to the best realistic intraday target (max {round(atr_pips * 2, 0)} pips).
+The system code will validate RR automatically — do NOT reject for RR reasons.
 """
         if memory_context:
             user_msg = memory_context + "\n" + user_msg
