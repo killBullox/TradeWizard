@@ -410,7 +410,12 @@ function renderOpenTrades(trades, livePnlMap = {}) {
   const cntEl = document.getElementById('open-trades-count');
   if (!el) return;
   if (cntEl) cntEl.textContent = trades.length;
-  if (!trades.length) { el.innerHTML = '<div class="empty-state">No open trades</div>'; return; }
+  if (!trades.length) {
+    el.innerHTML = '<div class="empty-state">No open trades</div>';
+    const totalEl = document.getElementById('open-trades-total-pnl');
+    if (totalEl) { totalEl.textContent = ''; totalEl.className = ''; }
+    return;
+  }
 
   // Total P&L across all open trades
   const totalPnl = trades.reduce((sum, t) => sum + ((livePnlMap[t.id] || {}).pnl_usd || 0), 0);
