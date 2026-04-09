@@ -1296,15 +1296,14 @@ class Orchestrator:
             required_rr = float(config.get("rr_ratio") or 2.0)
             sign        = 1 if direction == "BUY" else -1
 
-            # TP1: enforce minimum RR
+            # TP1: use RM's tp1_pips (already ATR-calibrated) as the target
             tp1 = float(trade_params.get("take_profit_1") or 0)
-            if tp1:
+            rm_tp1_pips = float((rm_result.get("position_size") or {}).get("tp1_pips") or 0)
+            if tp1 and rm_tp1_pips > 0:
                 tp1_pips = abs(entry - tp1) / pip
-                min_tp1_pips = sl_pips * required_rr
-                if sl_pips > 0 and tp1_pips < min_tp1_pips - 0.05 * sl_pips:
-                    rm_tp1 = float((rm_result.get("position_size") or {}).get("tp1_pips") or 0)
-                    target  = rm_tp1 if rm_tp1 >= min_tp1_pips else min_tp1_pips
-                    tp1     = round(entry + sign * target * pip, 5)
+                # If TR's TP1 is too far or too close, use RM's value
+                if tp1_pips > rm_tp1_pips * 1.3 or tp1_pips < sl_pips * 1.1:
+                    tp1 = round(entry + sign * rm_tp1_pips * pip, 5)
                     trade_params = {**trade_params, "take_profit_1": tp1}
                     logger.info("RR enforced TP1 for %s %s → %.5f", symbol, direction, tp1)
 
