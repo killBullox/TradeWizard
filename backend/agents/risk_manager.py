@@ -17,7 +17,7 @@ Your role is to protect trading capital by rigorously evaluating every proposed 
 - Account for current drawdown when sizing positions
 - Formula: Lot size = (Account Balance × Risk%) / (SL distance in pips × Pip value)
 - Consider spread costs in your calculations
-- CRITICAL: When computing RR, account for execution friction (~3 pips: spread + slippage).
+- CRITICAL: When computing RR, account for execution friction (~1.5 pips: spread + slippage).
   Subtract friction from TP distance, add friction to SL distance to get NET RR.
   Example: SL=30p, TP=60p → net RR = (60-3)/(30+3) = 1.73, NOT 2.0.
 - The system config contains min_sl_pips — reject any setup with SL below this value.
@@ -58,7 +58,7 @@ Your role is to protect trading capital by rigorously evaluating every proposed 
 
 ### SL Sizing Guidelines
 - sl_pips MUST be ≥ min_sl_pips (read from system config). If ICTEA's invalidation is tighter, REJECT.
-- tp1_pips must give net RR ≥ rr_ratio after friction. Formula: tp1_pips ≥ (sl_pips + 3) × rr_ratio + 3
+- tp1_pips must give net RR ≥ rr_ratio after friction. Formula: tp1_pips ≥ (sl_pips + 1.5) × rr_ratio + 1.5
 
 ## Output Format
 Respond with JSON:
@@ -134,7 +134,7 @@ class RiskManagerAgent(BaseAgent):
 ### Account Parameters
 - Account Balance: ${account_balance:,.2f}
 - Max Risk Per Trade: {max_risk}%
-- Target RR Ratio: {rr_ratio} (NET, after ~3 pips friction)
+- Target RR Ratio: {rr_ratio} (NET, after ~1.5 pips friction)
 - Max Open Trades: {max_trades}
 - Currently Open Trades: {open_trades_count}
 - **Minimum SL Distance: {system_config.get('min_sl_pips', '30')} pips** (HARD LIMIT — reject if setup SL is below this)
@@ -154,11 +154,11 @@ Calculate exact position size, win probability, expected value, and risk factors
 
 SL MUST be ≥ {system_config.get('min_sl_pips', '30')} pips. Reject if invalidation is too close.
 
-CRITICAL TP CALCULATION — the system checks NET RR after 3 pips friction on both sides:
-  net_rr = (tp1_pips - 3) / (sl_pips + 3)  must be ≥ {rr_ratio}
+CRITICAL TP CALCULATION — the system checks NET RR after 1.5 pips friction on both sides:
+  net_rr = (tp1_pips - 1.5) / (sl_pips + 1.5)  must be ≥ {rr_ratio}
 
-For example with sl_pips={int(float(system_config.get('min_sl_pips', '30')))}:
-  tp1_pips ≥ ({int(float(system_config.get('min_sl_pips', '30')))} + 3) × {rr_ratio} + 3 = {(int(float(system_config.get('min_sl_pips', '30'))) + 3) * rr_ratio + 3:.0f} pips MINIMUM
+For example with sl_pips={int(float(system_config.get('min_sl_pips', '20')))}:
+  tp1_pips ≥ ({int(float(system_config.get('min_sl_pips', '20')))} + 1.5) × {rr_ratio} + 1.5 = {(int(float(system_config.get('min_sl_pips', '20'))) + 1.5) * rr_ratio + 1.5:.0f} pips MINIMUM
 
 Set sl_pips and tp1_pips in your position_size output accordingly. If the setup cannot achieve this TP distance to a realistic liquidity target, REJECT the trade.
 """

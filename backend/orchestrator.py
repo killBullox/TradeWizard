@@ -1264,7 +1264,7 @@ class Orchestrator:
             return f"RR {actual_rr:.2f} below required {required_rr} (SL={sl_pips:.1f}p TP={tp_pips:.1f}p)"
 
         # Net RR after friction (spread + slippage) must also meet minimum
-        friction_pips = 3.0  # ~1.5 spread + ~1.5 slippage conservative estimate
+        friction_pips = 1.5  # ~1.0 spread + ~0.5 slippage (realistic for major pairs on demo/live)
         net_tp_pips = tp_pips - friction_pips
         net_sl_pips = sl_pips + friction_pips
         net_rr = net_tp_pips / net_sl_pips if net_sl_pips > 0 else 0
