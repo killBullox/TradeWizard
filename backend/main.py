@@ -1766,6 +1766,32 @@ async def get_performance():
         v["total_pips"] = round(v["total_pips"], 1)
         v["total_pnl"]  = round(v["total_pnl"], 2)
 
+    # Max drawdown calculation — track equity curve from trade sequence
+    account_balance = 5000.0
+    try:
+        async with async_session_factory() as s:
+            bal_raw = await get_config("account_balance", s)
+            if bal_raw:
+                account_balance = float(bal_raw)
+    except Exception:
+        pass
+
+    sorted_trades = sorted(closed, key=lambda t: t.close_time or t.open_time or datetime.min)
+    equity = account_balance
+    peak = equity
+    max_dd_usd = 0.0
+    max_dd_pct = 0.0
+    for t in sorted_trades:
+        equity += (t.pnl_usd or 0)
+        if equity > peak:
+            peak = equity
+        dd = peak - equity
+        dd_pct = (dd / peak * 100) if peak > 0 else 0
+        if dd > max_dd_usd:
+            max_dd_usd = dd
+        if dd_pct > max_dd_pct:
+            max_dd_pct = dd_pct
+
     return {
         "total_trades":  total,
         "wins":          wins,
@@ -1775,6 +1801,8 @@ async def get_performance():
         "avg_rr":        avg_rr,
         "profit_factor": pf,
         "total_pnl":     round(sum(pnl_list), 2),
+        "max_drawdown_usd": round(max_dd_usd, 2),
+        "max_drawdown_pct": round(max_dd_pct, 2),
         "by_setup":      setups,
         "total_closed":  total,
     }
