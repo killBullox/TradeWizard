@@ -595,6 +595,75 @@ async def get_config_all():
         return {r.key: r.value for r in rows}
 
 
+@app.get("/api/debug")
+async def debug_info(limit: int = 20):
+    """Full diagnostic info for remote debugging — recent logs, rejections, config, trades."""
+    result = {}
+    async with async_session_factory() as s:
+        # Recent agent logs
+        logs = await s.execute(
+            select(AgentLog).order_by(desc(AgentLog.timestamp)).limit(limit)
+        )
+        result["recent_logs"] = [
+            {"time": str(l.timestamp)[:19], "agent": l.agent_name, "action": l.action,
+             "message": (l.message or "")[:300], "data_preview": (l.data or "")[:500]}
+            for l in logs.scalars().all()
+        ]
+
+        # Recent rejections
+        rejections = await s.execute(
+            select(AgentLog).where(AgentLog.action.in_(["REJECTED", "ERROR"]))
+            .order_by(desc(AgentLog.timestamp)).limit(10)
+        )
+        result["rejections"] = [
+            {"time": str(r.timestamp)[:19], "agent": r.agent_name, "action": r.action,
+             "message": (r.message or "")[:500]}
+            for r in rejections.scalars().all()
+        ]
+
+        # Active trades
+        trades = await s.execute(select(Trade).where(Trade.status == "ACTIVE"))
+        result["active_trades"] = [
+            {"id": t.id, "symbol": t.symbol, "direction": t.direction,
+             "entry": t.entry_price, "sl": t.stop_loss, "tp1": t.take_profit_1,
+             "lot": t.lot_size, "ticket": t.mt5_ticket, "is_paper": t.is_paper,
+             "open_time": str(t.open_time)[:19]}
+            for t in trades.scalars().all()
+        ]
+
+        # Key config values
+        config_keys = ["paper_mode", "enabled_pairs", "min_sl_pips", "rr_ratio",
+                       "max_open_trades", "kill_zones", "mt5_bridge_url", "model_mode",
+                       "account_balance", "max_risk_usd"]
+        config = {}
+        for key in config_keys:
+            config[key] = await get_config(key, s)
+        result["config"] = config
+
+        # Last RM evaluation detail
+        rm_log = await s.execute(
+            select(AgentLog).where(AgentLog.agent_name == "RM")
+            .order_by(desc(AgentLog.timestamp)).limit(1)
+        )
+        rm_row = rm_log.scalar_one_or_none()
+        if rm_row and rm_row.data:
+            try:
+                rm_data = json.loads(rm_row.data)
+                result["last_rm"] = {
+                    "symbol": (rm_row.message or "")[:50],
+                    "approved": rm_data.get("approved"),
+                    "rejection_reason": rm_data.get("rejection_reason", "")[:300],
+                    "recommendation": rm_data.get("recommendation"),
+                    "sl_pips": rm_data.get("position_size", {}).get("sl_pips"),
+                    "tp1_pips": rm_data.get("position_size", {}).get("tp1_pips"),
+                    "rr_ratio": rm_data.get("position_size", {}).get("rr_ratio"),
+                }
+            except Exception:
+                result["last_rm"] = {"raw": (rm_row.data or "")[:300]}
+
+    return result
+
+
 @app.put("/api/config/{key}")
 async def update_config(key: str, data: dict):
     value = str(data.get("value", ""))
