@@ -2639,7 +2639,29 @@ function showRejections() {
   const lines = _rejections.map(r =>
     `[${r.time}] ${r.symbol} — ${r.agent}: ${r.reason}`
   ).join('\n\n');
-  alert(`Trade rifiutati in questa sessione:\n\n${lines}`);
+
+  // Show in a modal with selectable/copyable text
+  const existing = document.getElementById('rejection-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'rejection-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = `
+    <div style="background:var(--bg-secondary);border:2px solid #ef4444;border-radius:12px;padding:20px;width:650px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0;color:#ef4444">🔴 Trade Rifiutati (${_rejections.length})</h3>
+        <div style="display:flex;gap:8px">
+          <button onclick="navigator.clipboard.writeText(document.getElementById('rejection-text').innerText);this.textContent='Copiato!';setTimeout(()=>this.textContent='📋 Copia',1500)" style="background:var(--bg-input);color:var(--text-primary);border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:0.8rem">📋 Copia</button>
+          <button onclick="document.getElementById('rejection-modal').remove()" style="background:none;border:none;color:var(--text-muted);font-size:1.2rem;cursor:pointer">✕</button>
+        </div>
+      </div>
+      <div id="rejection-text" style="flex:1;overflow-y:auto;user-select:text;white-space:pre-wrap;font-family:monospace;font-size:0.82rem;color:#e2e8f0;background:var(--bg-primary);padding:12px;border-radius:8px;line-height:1.6">${_rejections.map(r =>
+        `[${r.time}] ${r.symbol} — ${r.agent}\n${r.reason}`
+      ).join('\n\n---\n\n')}</div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
 }
 
 function resetRejections() {
