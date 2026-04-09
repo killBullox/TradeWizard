@@ -149,7 +149,7 @@ class RiskManagerAgent(BaseAgent):
 - PDL: {ind.get('pdl')}
 
 ### Day Trading Constraints
-- Max TP1 distance: {round(atr_pips * 5, 0)} pips (0.5× ATR daily — must be reachable in 2-6 hours)
+- Max TP1 distance: {round(atr_pips * 2, 0)} pips (2x ATR H1 — must be reachable in 2-6 hours)
 - Max trade duration: {system_config.get('max_trade_duration_hours', '6')} hours
 - If TP1 exceeds max distance, REDUCE it to max and recalculate RR accordingly
 

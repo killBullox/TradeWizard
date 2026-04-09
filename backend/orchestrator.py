@@ -1286,6 +1286,13 @@ class Orchestrator:
                     f"(gross RR={actual_rr:.2f}, friction={friction_pips}p, "
                     f"net TP={net_tp_pips:.1f}p, net SL={net_sl_pips:.1f}p)")
 
+        # Max TP1 distance for day trading (2x ATR H1)
+        if atr_pips > 0:
+            max_tp1_pips = atr_pips * 2
+            if tp_pips > max_tp1_pips:
+                return (f"TP1 too far for intraday: {tp_pips:.0f} pips "
+                        f"(max {max_tp1_pips:.0f}p = 2x ATR H1 {atr_pips:.0f}p)")
+
         # Direction logic
         if direction == "BUY":
             if sl >= entry:

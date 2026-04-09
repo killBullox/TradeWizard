@@ -145,7 +145,7 @@ class ICTAdvisorAgent(BaseAgent):
 - Required RR: {system_config.get('rr_ratio', '2.0')} (net, after ~1.5 pips friction)
 - Max open trades: {system_config.get('max_open_trades', '3')}
 - ATR H1: {ind.get('atr_pips', 'N/A')} pips — use this to calibrate TP distance
-- **Max TP1 distance: {round(float(ind.get('atr_pips', 15)) * 5, 0)} pips** (≈ 0.5× ATR daily, must be reachable in 2-6 hours)
+- **Max TP1 distance: {round(float(ind.get('atr_pips', 15)) * 2, 0)} pips** (≈ 2x ATR H1, must be reachable in 2-6 hours on H1 timeframe)
 - Max trade duration: {system_config.get('max_trade_duration_hours', '6')} hours
 
 Perform a complete ICT DAY TRADING analysis for {symbol}.
