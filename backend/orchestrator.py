@@ -318,8 +318,11 @@ class Orchestrator:
             validation = await self.at.validate_trade(trade_params, strategy, market_data, config, memory_context=memory_ctx)
             await self._log_agent("AT", "VALIDATION", f"Validated {symbol}", validation)
 
-            if not validation.get("approved"):
-                reason = validation.get("rejection_reason", "Rejected by AT")
+            # AT approval: check both "approved" and "action" fields
+            at_approved = validation.get("approved") or validation.get("action") == "APPROVE"
+            if not at_approved:
+                reason = validation.get("rejection_reason") or validation.get("reason") or f"Rejected by AT (approved={validation.get('approved')}, action={validation.get('action')})"
+                await self._log_agent("SYS", "REJECTED", f"AT rejected {symbol}: {reason}", validation)
                 await self.broadcast({"type": "trade_rejected", "symbol": symbol, "reason": reason, "agent": "AT"})
                 return
 
@@ -386,6 +389,7 @@ class Orchestrator:
 
         except Exception as e:
             logger.error(f"Error analyzing {symbol}: {e}", exc_info=True)
+            await self._log_agent("SYS", "ERROR", f"Analysis failed for {symbol}: {e}", {"traceback": str(e)})
             await self.broadcast({"type": "error", "symbol": symbol, "message": str(e)})
 
     # ------------------------------------------------------------------ #
