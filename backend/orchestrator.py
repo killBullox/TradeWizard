@@ -314,24 +314,9 @@ class Orchestrator:
                 {"lot": pos.get("lot_size"), "risk_usd": pos.get("risk_usd"),
                  "sl_pips": pos.get("sl_pips"), "risk_mode": pos.get("risk_mode")})
 
-            # 6. Trade Analyst — validate (with memory context)
-            validation = await self.at.validate_trade(trade_params, strategy, market_data, config, memory_context=memory_ctx)
-            await self._log_agent("AT", "VALIDATION", f"Validated {symbol}", validation)
-
-            # AT approval: check both "approved" and "action" fields
-            at_approved = validation.get("approved") or validation.get("action") == "APPROVE"
-            if not at_approved:
-                reason = validation.get("rejection_reason") or validation.get("reason") or f"Rejected by AT (approved={validation.get('approved')}, action={validation.get('action')})"
-                await self._log_agent("SYS", "REJECTED", f"AT rejected {symbol}: {reason}", validation)
-                await self.broadcast({"type": "trade_rejected", "symbol": symbol, "reason": reason, "agent": "AT"})
-                return
-
-            # Apply AT modifications if any
-            final_trade = validation.get("final_trade", trade_params)
-            if isinstance(final_trade, dict) and not final_trade.get("error"):
-                trade_params = {**trade_params, **final_trade}
-
-            # Hard mathematical sanity check — reject before execution if params are invalid
+            # 6. Hard mathematical sanity check — the ONLY gatekeeper after RM approval
+            # AT validation removed: was blocking valid trades despite clear "APPROVE" prompt.
+            # Sanity check covers all critical defects (SL/TP side, min SL, net RR) in code.
             rejection = self._sanity_check_trade(trade_params, market_data, config)
             if rejection:
                 await self._log_agent("SYS", "REJECTED", f"Sanity check failed: {rejection}", trade_params)
