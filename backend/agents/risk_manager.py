@@ -115,8 +115,8 @@ class RiskManagerAgent(BaseAgent):
         # Ideal TP1 for configured RR
         ideal_tp1 = round(sl_pips * rr_ratio, 1)
 
-        # Use min of ideal and max allowed
-        tp1_pips = min(ideal_tp1, max_tp1_pips)
+        # Use min of ideal and max allowed (leave 1 pip margin for sanity check)
+        tp1_pips = min(ideal_tp1, max(max_tp1_pips - 1, sl_pips * 1.2))
 
         # Ensure TP1 is at least 1.2x SL (absolute floor)
         if tp1_pips < sl_pips * 1.2:

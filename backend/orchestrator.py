@@ -302,6 +302,19 @@ class Orchestrator:
             trade_params = await self.tr.generate_trade(symbol, strategy, rm_result, market_data)
             await self._log_agent("TR", "TRADE_GENERATED", f"Generated trade for {symbol}", trade_params)
 
+            # Guard: enforce RM's SL if TR generated a tighter one
+            rm_sl_pips = rm_result.get("position_size", {}).get("sl_pips", 0)
+            if rm_sl_pips > 0:
+                entry = float(trade_params.get("entry_price", 0))
+                sl = float(trade_params.get("stop_loss", 0))
+                pip = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+                actual_sl_pips = abs(entry - sl) / pip if entry and sl else 0
+                if actual_sl_pips < rm_sl_pips * 0.8:  # TR's SL is too tight vs RM
+                    sign = -1 if trade_params.get("direction") == "BUY" else 1
+                    new_sl = round(entry + sign * rm_sl_pips * pip, 6)
+                    logger.info("SL enforced: TR gave %.1fp, RM wants %.1fp → SL %.5f", actual_sl_pips, rm_sl_pips, new_sl)
+                    trade_params["stop_loss"] = new_sl
+
             # Guard: enforce minimum RR on TP1 using RM-approved values if LLM returned bad params
             trade_params = self._enforce_rr(trade_params, rm_result, config)
 
