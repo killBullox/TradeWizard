@@ -339,7 +339,14 @@ class Orchestrator:
                 await self._log_agent("CC", "TRADE_SENT", f"Sent {symbol} to MT5", cc_result)
 
             if cc_result.get("success"):
-                await self._update_trade_ticket(trade_id, cc_result.get("ticket", "SIM"))
+                ticket = cc_result.get("ticket", "UNKNOWN")
+                await self._update_trade_ticket(trade_id, ticket)
+                logger.info("Trade #%d sent to MT5: ticket=%s", trade_id, ticket)
+            else:
+                error = cc_result.get("error", "Unknown error")
+                logger.error("Trade #%d MT5 FAILED: %s | Full result: %s", trade_id, error, cc_result)
+                await self._log_agent("CC", "MT5_FAILED", f"MT5 execution failed for {symbol}: {error}", cc_result)
+                await self._append_close_note(trade_id, f"MT5 FAILED: {error}")
 
             # 8. Journalist — document
             analysis_chain = {
