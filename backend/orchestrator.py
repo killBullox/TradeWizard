@@ -1270,28 +1270,28 @@ class Orchestrator:
         if sl_pips < min_sl_pips:
             return f"SL too tight: {sl_pips:.1f} pips (min {min_sl_pips:.1f}, cfg_min={cfg_min_sl}p, 0.5×ATR={atr_pips*0.5:.1f}p)"
 
-        # RR must meet configured minimum (default 2.0)
-        required_rr = float((config or {}).get("rr_ratio") or 2.0)
-        actual_rr   = tp_pips / sl_pips if sl_pips else 0
-        if actual_rr < required_rr - 0.001:  # small tolerance for floating-point
-            return f"RR {actual_rr:.2f} below required {required_rr} (SL={sl_pips:.1f}p TP={tp_pips:.1f}p)"
+        # Max TP1 distance for day trading (2x ATR H1)
+        max_tp1_pips = atr_pips * 2 if atr_pips > 0 else 999
+        if tp_pips > max_tp1_pips:
+            return (f"TP1 too far for intraday: {tp_pips:.0f} pips "
+                    f"(max {max_tp1_pips:.0f}p = 2x ATR H1 {atr_pips:.0f}p)")
 
-        # Net RR after friction (spread + slippage) must also meet minimum
-        friction_pips = 1.5  # ~1.0 spread + ~0.5 slippage (realistic for major pairs on demo/live)
+        # RR check — use min between configured RR and what ATR allows
+        required_rr = float((config or {}).get("rr_ratio") or 2.0)
+        friction_pips = 1.5
+        # What's the best net RR achievable within ATR limit?
+        max_net_rr = (max_tp1_pips - friction_pips) / (sl_pips + friction_pips) if sl_pips > 0 else 0
+        # Use the lower of configured RR and ATR-limited RR (min 1.2 absolute floor)
+        effective_rr = max(1.2, min(required_rr, max_net_rr))
+
+        actual_rr = tp_pips / sl_pips if sl_pips else 0
         net_tp_pips = tp_pips - friction_pips
         net_sl_pips = sl_pips + friction_pips
         net_rr = net_tp_pips / net_sl_pips if net_sl_pips > 0 else 0
-        if net_rr < required_rr - 0.001:
-            return (f"Net RR {net_rr:.2f} below required {required_rr} after friction "
+        if net_rr < effective_rr - 0.001:
+            return (f"Net RR {net_rr:.2f} below required {effective_rr:.2f} "
                     f"(gross RR={actual_rr:.2f}, friction={friction_pips}p, "
-                    f"net TP={net_tp_pips:.1f}p, net SL={net_sl_pips:.1f}p)")
-
-        # Max TP1 distance for day trading (2x ATR H1)
-        if atr_pips > 0:
-            max_tp1_pips = atr_pips * 2
-            if tp_pips > max_tp1_pips:
-                return (f"TP1 too far for intraday: {tp_pips:.0f} pips "
-                        f"(max {max_tp1_pips:.0f}p = 2x ATR H1 {atr_pips:.0f}p)")
+                    f"ATR-limited max RR={max_net_rr:.2f})")
 
         # Direction logic
         if direction == "BUY":
