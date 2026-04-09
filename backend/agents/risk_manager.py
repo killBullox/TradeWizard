@@ -59,6 +59,7 @@ Your role is to protect trading capital by rigorously evaluating every proposed 
 ### SL Sizing Guidelines
 - sl_pips MUST be ≥ min_sl_pips (read from system config). If ICTEA's invalidation is tighter, REJECT.
 - tp1_pips must give net RR ≥ rr_ratio after friction. Formula: tp1_pips ≥ (sl_pips + 1.5) × rr_ratio + 1.5
+- tp1_pips MUST NOT exceed max_tp1_pips from the user message — this is a DAY TRADING system, targets must be reachable in 2-6 hours
 
 ## Output Format
 Respond with JSON:
@@ -147,12 +148,17 @@ class RiskManagerAgent(BaseAgent):
 - PDH: {ind.get('pdh')}
 - PDL: {ind.get('pdl')}
 
+### Day Trading Constraints
+- Max TP1 distance: {round(atr_pips * 5, 0)} pips (0.5× ATR daily — must be reachable in 2-6 hours)
+- Max trade duration: {system_config.get('max_trade_duration_hours', '6')} hours
+- If TP1 exceeds max distance, REDUCE it to max and recalculate RR accordingly
+
 ### Correlated Pairs Currently Trading: None
 
 Evaluate the risk for this trade.
 Calculate exact position size, win probability, expected value, and risk factors.
 
-SL MUST be ≥ {system_config.get('min_sl_pips', '30')} pips. Reject if invalidation is too close.
+SL MUST be ≥ {system_config.get('min_sl_pips', '20')} pips. Reject if invalidation is too close.
 
 CRITICAL TP CALCULATION — the system checks NET RR after 1.5 pips friction on both sides:
   net_rr = (tp1_pips - 1.5) / (sl_pips + 1.5)  must be ≥ {rr_ratio}

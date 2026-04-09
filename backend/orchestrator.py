@@ -403,6 +403,34 @@ class Orchestrator:
                 if not current_price:
                     continue  # Skip if no price data available
 
+                # ── HARD CHECK: Max trade duration (day trading constraint) ──
+                if trade.open_time:
+                    from zoneinfo import ZoneInfo as _ZI
+                    now = datetime.now(_ZI("Europe/Rome"))
+                    open_time = trade.open_time.replace(tzinfo=_ZI("Europe/Rome")) if trade.open_time.tzinfo is None else trade.open_time
+                    hours_open = (now - open_time).total_seconds() / 3600
+                    max_hours = float(config.get("max_trade_duration_hours", "8") if hasattr(self, '_last_config') else "8")
+                    try:
+                        async with async_session_factory() as _s:
+                            _mh = await get_config("max_trade_duration_hours", _s)
+                            max_hours = float(_mh) if _mh else 8.0
+                    except Exception:
+                        max_hours = 8.0
+                    if hours_open > max_hours:
+                        logger.warning("MAX DURATION on trade #%d %s — open %.1fh (max %.0fh)",
+                                       trade.id, trade.symbol, hours_open, max_hours)
+                        await self._append_close_note(trade.id,
+                            f"Max duration reached: {hours_open:.1f}h > {max_hours:.0f}h — force close @ {current_price:.5f}")
+                        await self._close_trade(trade, current_price, f"Max duration {max_hours:.0f}h exceeded")
+                        await self._notify("notify_trade_close", {
+                            "id": trade.id, "symbol": trade.symbol, "direction": trade.direction,
+                            "entry_price": trade.entry_price, "close_price": current_price,
+                            "ict_setup": trade.ict_setup,
+                            "result": "WIN" if self._calc_trade_pnl(trade, current_price) > 0 else "LOSS",
+                        }, self._calc_trade_pnl(trade, current_price), self._calc_trade_pips(trade, current_price),
+                           f"Max duration {max_hours:.0f}h exceeded")
+                        continue
+
                 # ── HARD CHECK: Auto-close on SL hit (code-enforced, not LLM) ──
                 sl = trade.stop_loss or 0
                 if sl > 0:
