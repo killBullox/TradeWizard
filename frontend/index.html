@@ -22,6 +22,13 @@
       </div>
     </div>
     <div class="header-right">
+      <div id="rejection-indicator" style="display:none;cursor:pointer;position:relative" onclick="showRejections()" title="Trade rifiutati — clicca per dettagli">
+        <span style="display:inline-flex;align-items:center;gap:5px;background:rgba(239,68,68,0.15);color:#ef4444;padding:4px 12px;border-radius:6px;font-size:0.82rem;font-weight:700">
+          <span style="width:10px;height:10px;background:#ef4444;border-radius:50%;display:inline-block;animation:pulse-red 1.5s infinite"></span>
+          <span id="rejection-count">0</span> rifiutati
+        </span>
+        <button onclick="event.stopPropagation();resetRejections()" title="Resetta contatore" style="position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:#ef4444;color:#fff;border:none;font-size:0.6rem;cursor:pointer;line-height:1">✕</button>
+      </div>
       <button class="btn btn-primary" id="btn-analyze-all">🔍 Analyze All</button>
       <button class="btn btn-secondary" id="btn-meeting">📋 Run Meeting</button>
       <button class="btn btn-danger" id="btn-emergency-meeting" onclick="openEmergencyMeeting()" style="background:#dc2626">🚨 Emergency Meeting</button>

@@ -109,6 +109,7 @@ function handleMessage(msg) {
 
     case 'trade_rejected':
       addActivity(`❌ ${msg.symbol} rejected by ${msg.agent}: ${msg.reason}`, 'warning');
+      _incrementRejectionCounter(msg);
       break;
 
     case 'sl_trailed':
@@ -2616,6 +2617,39 @@ window.openMeetingChat  = openMeetingChat;
 window.closeMeetingChat = closeMeetingChat;
 window.sendMeetingMsg   = sendMeetingMsg;
 window.approveMeeting   = approveMeeting;
+
+// ── Rejection Indicator ──────────────────────────────────────────────────────
+let _rejections = [];
+
+function _incrementRejectionCounter(msg) {
+  _rejections.push({
+    symbol: msg.symbol,
+    agent: msg.agent,
+    reason: msg.reason,
+    time: new Date().toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'}),
+  });
+  const indicator = document.getElementById('rejection-indicator');
+  const countEl = document.getElementById('rejection-count');
+  if (indicator) indicator.style.display = 'inline-flex';
+  if (countEl) countEl.textContent = _rejections.length;
+}
+
+function showRejections() {
+  if (!_rejections.length) return;
+  const lines = _rejections.map(r =>
+    `[${r.time}] ${r.symbol} — ${r.agent}: ${r.reason}`
+  ).join('\n\n');
+  alert(`Trade rifiutati in questa sessione:\n\n${lines}`);
+}
+
+function resetRejections() {
+  _rejections = [];
+  const indicator = document.getElementById('rejection-indicator');
+  if (indicator) indicator.style.display = 'none';
+}
+
+window.showRejections = showRejections;
+window.resetRejections = resetRejections;
 
 // ── Toast Notification ────────────────────────────────────────────────────────
 function showToast(type, msg) {
