@@ -344,7 +344,7 @@ class Orchestrator:
             # 8. Journalist — document
             analysis_chain = {
                 "ictea": ict_analysis, "strategy": strategy,
-                "risk": rm_result, "validation": validation,
+                "risk": rm_result, "validation": {},
             }
             jr_entry = await self.jr.journal_trade_open(
                 {**trade_params, "id": trade_id, "ict_setup": strategy.get("setup")},
