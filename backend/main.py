@@ -206,6 +206,11 @@ async def lifespan(app: FastAPI):
         os.environ.setdefault("MT5_LOGIN",    mt5_login)
         os.environ.setdefault("MT5_PASSWORD", mt5_password)
         os.environ.setdefault("MT5_SERVER",   mt5_server)
+    # MT5 terminal path (for multi-terminal setup)
+    async with async_session_factory() as s:
+        mt5_path = await get_config("mt5_path", s) or os.getenv("MT5_PATH", "")
+        if mt5_path:
+            os.environ["MT5_PATH"] = mt5_path
     _start_mt5_bridge()
     orchestrator = Orchestrator(broadcast_fn=manager.broadcast)
     await orchestrator.start()
