@@ -163,10 +163,25 @@ class MT5Bridge:
             "type_filling": self._get_filling(symbol),
         }
 
+        logger.info("OPEN REQUEST: %s %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f filling=%s",
+                    order_type, direction, symbol, lots, price, sl, tp, request.get("type_filling"))
+        # Check MT5 connection before sending
+        acct = mt5.account_info()
+        if acct is None:
+            logger.error("MT5 not connected at order_send time! Reconnecting...")
+            self._ensure_connected()
+            acct = mt5.account_info()
+            if acct is None:
+                return {"success": False, "error": "MT5 not connected after reconnect attempt"}
+
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result else -1
-            return {"success": False, "error": f"order_send failed: {code}"}
+            err_detail = f"retcode={code}"
+            if result:
+                err_detail += f" comment='{result.comment}'"
+            logger.error("OPEN FAILED: %s | request=%s", err_detail, request)
+            return {"success": False, "error": f"order_send failed: {code}" + (f" ({result.comment})" if result and result.comment else "")}
 
         logger.info("OPEN OK  ticket=%s  %s %s %s @ %.5f",
                     result.order, order_type, direction, symbol, price)
