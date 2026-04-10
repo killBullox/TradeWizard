@@ -279,9 +279,23 @@ class MT5Bridge:
     # ── Helpers ────────────────────────────────────────────────────────────────
 
     def _close_position_by_ticket(self, ticket: int) -> dict:
+        # First try as open position
         pos = mt5.positions_get(ticket=ticket)
         if not pos:
-            return {"success": False, "error": f"Position not found: {ticket}"}
+            # Try as pending order — cancel it
+            orders = mt5.orders_get(ticket=ticket)
+            if orders:
+                request = {
+                    "action": mt5.TRADE_ACTION_REMOVE,
+                    "order":  ticket,
+                }
+                result = mt5.order_send(request)
+                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info("CANCEL PENDING OK  ticket=%s", ticket)
+                    return {"success": True, "ticket": str(ticket), "message": "Pending order cancelled"}
+                code = result.retcode if result else -1
+                return {"success": False, "error": f"Cancel pending failed: {code}"}
+            return {"success": False, "error": f"Position/order not found: {ticket}"}
 
         p      = pos[0]
         symbol = p.symbol
