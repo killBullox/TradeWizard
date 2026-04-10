@@ -476,15 +476,23 @@ function renderOpenTrades(trades, livePnlMap = {}) {
     // Format time
     const openTime = t.open_time ? new Date(t.open_time).toLocaleString('it-IT', {day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
 
+    // Detect pending (limit order not yet filled)
+    const curPrice = cp ? parseFloat(cp) : 0;
+    const isPending = entry > 0 && curPrice > 0 && (
+      (isBuy && curPrice > entry + 2 * pip) ||   // BUY LIMIT: price above entry
+      (!isBuy && curPrice < entry - 2 * pip)      // SELL LIMIT: price below entry
+    );
+
     return `
-    <div class="open-trade-card-v2">
+    <div class="open-trade-card-v2" style="${isPending ? 'border-color:#f59e0b;opacity:0.85' : ''}">
       <div class="otc-header">
         <div class="otc-header-left">
           <span class="otc-symbol">${t.symbol}</span>
           <span class="otc-dir-badge" style="background:${dirBg};color:${dirColor}">▲ ${t.direction}</span>
           <span class="otc-id">#${t.id}</span>
+          ${isPending ? '<span style="background:rgba(245,158,11,0.2);color:#f59e0b;padding:2px 8px;border-radius:4px;font-size:0.72rem;font-weight:700">PENDING</span>' : ''}
         </div>
-        <div class="otc-pnl ${pnlClass}">${pnlStr} <span style="font-size:0.7rem;opacity:0.7">live</span></div>
+        <div class="otc-pnl ${isPending ? '' : pnlClass}">${isPending ? '<span style="color:#f59e0b">In attesa</span>' : pnlStr + ' <span style="font-size:0.7rem;opacity:0.7">live</span>'}</div>
       </div>
 
       <div class="otc-price-box">
@@ -506,6 +514,10 @@ function renderOpenTrades(trades, livePnlMap = {}) {
         </div>
       </div>
 
+      ${isPending ? `
+      <div style="text-align:center;padding:8px;color:#f59e0b;font-size:0.82rem">
+        ⏳ Ordine limite in attesa — ${Math.abs((curPrice - entry) / pip).toFixed(1)} pts dall'entry
+      </div>` : `
       <div class="otc-progress">
         <div class="otc-progress-labels">
           <span>Entry ${entry ? entry.toFixed(5) : ''}</span>
@@ -515,7 +527,7 @@ function renderOpenTrades(trades, livePnlMap = {}) {
           <div class="otc-progress-fill" style="width:${progressPct.toFixed(1)}%"></div>
         </div>
         <div class="otc-progress-dist">${ptsToTp > 0 ? ptsToTp.toFixed(2) : '0.00'} pts al prossimo TP</div>
-      </div>
+      </div>`}
 
       <div class="otc-ticket-row">
         <span class="otc-ticket">Ticket ${ticket}</span>
@@ -523,8 +535,8 @@ function renderOpenTrades(trades, livePnlMap = {}) {
       </div>
 
       <div style="display:flex;gap:8px">
-        <button class="otc-lock-btn" onclick="lockProfit(${t.id})">🔒 Lock Profit</button>
-        <button class="otc-close-btn" onclick="closeTrade(${t.id})">Chiudi trade</button>
+        ${isPending ? '' : '<button class="otc-lock-btn" onclick="lockProfit(' + t.id + ')">🔒 Lock Profit</button>'}
+        <button class="otc-close-btn" onclick="closeTrade(${t.id})">${isPending ? 'Cancella ordine' : 'Chiudi trade'}</button>
       </div>
     </div>`;
   }).join('');
