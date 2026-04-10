@@ -18,11 +18,11 @@ Convert analytical recommendations into precise MT5-ready trade parameters:
 - **Take Profits**: multiple partial exit levels for trade management
 - **Order Type**: MARKET, LIMIT, or STOP order
 
-## Entry Precision Rules
-- For BUY: place limit order at the LOW of the entry zone or at FVG bottom / OB top
-- For SELL: place limit order at the HIGH of the entry zone or at FVG top / OB bottom
+## Entry Precision Rules — PREFER MARKET ORDERS
+- Use **MARKET** order if the current price is WITHIN the entry zone — enter immediately
+- Use **LIMIT** order ONLY if the optimal entry is 10+ pips away from current price
 - For breakout setups: use STOP order above/below the level
-- For immediate entries (at market): justify with strong momentum or session timing
+- Default to MARKET for intraday trading — speed of execution matters more than perfect entry
 
 ## Stop Loss Placement — CRITICAL CONSTRAINTS
 - System enforces a MINIMUM SL distance of min_sl_pips (from config, default 30 pips).

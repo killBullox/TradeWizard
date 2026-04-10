@@ -86,8 +86,30 @@ class MT5Bridge:
 
     # ── Core trade actions (mirrors MQL5 EA) ───────────────────────────────────
 
+    def _ensure_connected(self):
+        """Reconnect to MT5 if connection was lost."""
+        if not MT5_AVAILABLE:
+            return
+        # Quick check: try to get account info
+        info = mt5.account_info()
+        if info is None:
+            logger.warning("MT5 connection lost — reconnecting...")
+            mt5.shutdown()
+            kwargs = {}
+            if self.path:     kwargs["path"]     = self.path
+            if self.login:    kwargs["login"]    = self.login
+            if self.password: kwargs["password"] = self.password
+            if self.server:   kwargs["server"]   = self.server
+            if mt5.initialize(**kwargs):
+                logger.info("MT5 reconnected successfully")
+                self.connected = True
+            else:
+                logger.error("MT5 reconnect failed: %s", mt5.last_error())
+                self.connected = False
+
     def open_trade(self, signal: dict) -> dict:
         """OPEN — place market, limit, or stop order."""
+        self._ensure_connected()
         symbol     = signal.get("symbol", "")
         direction  = signal.get("direction", "BUY")
         order_type = signal.get("order_type", "MARKET")
@@ -152,6 +174,7 @@ class MT5Bridge:
 
     def modify_sl(self, signal: dict) -> dict:
         """MODIFY_SL — move the stop loss of an open position."""
+        self._ensure_connected()
         ticket = int(signal.get("ticket", 0))
         new_sl = float(signal.get("new_sl", 0))
 
@@ -181,6 +204,7 @@ class MT5Bridge:
 
     def close_partial(self, signal: dict) -> dict:
         """CLOSE_PARTIAL — close a percentage of the position volume."""
+        self._ensure_connected()
         ticket  = int(signal.get("ticket", 0))
         percent = float(signal.get("percent", 50.0))
 
@@ -225,6 +249,7 @@ class MT5Bridge:
                 "message": f"Closed {percent:.0f}%"}
 
     def close_trade(self, signal: dict) -> dict:
+        self._ensure_connected()
         """CLOSE — fully close a position."""
         ticket_str = signal.get("ticket", "")
         symbol     = signal.get("symbol", "")
