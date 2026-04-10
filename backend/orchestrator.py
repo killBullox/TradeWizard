@@ -691,15 +691,25 @@ class Orchestrator:
             pnl_usd, pnl_pips, reason,
         )
 
-        # Trigger post-trade meeting
-        asyncio.create_task(self._schedule_meeting("POST_TRADE", [trade]))
+        # Trigger post-trade meeting (debounced — waits 30s to batch multiple closes)
+        if not hasattr(self, '_pending_meeting_trades'):
+            self._pending_meeting_trades = []
+            self._meeting_debounce_task = None
+        self._pending_meeting_trades.append(trade)
+        if self._meeting_debounce_task is None or self._meeting_debounce_task.done():
+            self._meeting_debounce_task = asyncio.create_task(self._debounced_meeting())
+
+    async def _debounced_meeting(self):
+        """Wait 30s to batch multiple trade closes into one meeting."""
+        await asyncio.sleep(30)
+        trades = list(self._pending_meeting_trades)
+        self._pending_meeting_trades.clear()
+        if trades:
+            await self.run_meeting("POST_TRADE", trades)
 
     # ------------------------------------------------------------------ #
     #  Meeting & Self-Improvement
     # ------------------------------------------------------------------ #
-    async def _schedule_meeting(self, meeting_type: str, trades: list, delay: int = 5):
-        await asyncio.sleep(delay)
-        await self.run_meeting(meeting_type, trades)
 
     async def run_meeting(self, meeting_type: str = "POST_TRADE", trades: list | None = None):
         async with async_session_factory() as s:

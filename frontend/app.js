@@ -236,6 +236,18 @@ function addActivity(text, type = 'info') {
   while (feed.children.length > 100) feed.removeChild(feed.firstChild);
 }
 
+function copyActivityLog() {
+  const feed = document.getElementById('activity-feed');
+  if (!feed) return;
+  const lines = [...feed.children].map(el => el.textContent.trim()).join('\n');
+  navigator.clipboard.writeText(lines).then(() => {
+    showToast('success', 'Activity log copiato!');
+  }).catch(() => {
+    showToast('error', 'Copia fallita');
+  });
+}
+window.copyActivityLog = copyActivityLog;
+
 function addComm(agent, message, isThinking = false) {
   const feed = document.getElementById('comms-feed');
   if (!feed) return;

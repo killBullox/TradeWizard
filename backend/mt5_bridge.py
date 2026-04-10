@@ -614,8 +614,14 @@ if __name__ == "__main__":
     port     = int(os.getenv("MT5_BRIDGE_PORT", "5001"))
 
     bridge = MT5Bridge(login=login, password=password, server=server, path=path)
-    if not bridge.connect():
-        logger.error("Could not connect to MT5")
+    # Retry connection up to 5 times (MT5 may still be loading)
+    for attempt in range(5):
+        if bridge.connect():
+            break
+        logger.warning("MT5 connect attempt %d/5 failed — retrying in 5s...", attempt + 1)
+        import time; time.sleep(5)
+    else:
+        logger.error("Could not connect to MT5 after 5 attempts")
         sys.exit(1)
 
     app = _make_app(bridge)

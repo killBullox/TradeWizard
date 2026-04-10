@@ -168,7 +168,10 @@
           <div class="card">
             <div class="card-header">
               <h3>⚡ Live Activity</h3>
-              <button class="btn btn-ghost btn-sm" id="btn-clear-feed">Clear</button>
+              <div style="display:flex;gap:6px">
+                <button class="btn btn-ghost btn-sm" onclick="copyActivityLog()" title="Copia log">📋 Copy</button>
+                <button class="btn btn-ghost btn-sm" id="btn-clear-feed">Clear</button>
+              </div>
             </div>
             <div class="activity-feed" id="activity-feed">
               <div class="activity-item info">System starting up...</div>
