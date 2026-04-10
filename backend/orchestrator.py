@@ -1308,7 +1308,7 @@ class Orchestrator:
                     logger.info("RR enforced TP1 for %s %s → %.5f", symbol, direction, tp1)
 
             # TP2/TP3: must be further from entry than TP1 (in the correct direction)
-            tp1_dist = abs(tp1 - entry) / pip if tp1 else sl_pips * required_rr
+            tp1_dist = abs(tp1 - entry) / pip if tp1 else rm_tp1_pips or sl_pips * 1.5
             for key, multiplier in [("take_profit_2", 1.5), ("take_profit_3", 2.0)]:
                 tp = trade_params.get(key)
                 if not tp:
@@ -1346,7 +1346,7 @@ class Orchestrator:
         atr_pips = float((market_data.get("H1") or {}).get("indicators", {}).get("atr_pips") or 0)
         cfg_min_sl = float((config or {}).get("min_sl_pips") or 30)
         min_sl_pips = max(atr_pips * 0.5, cfg_min_sl)
-        if sl_pips < min_sl_pips:
+        if sl_pips < min_sl_pips - 0.1:  # tolerance for floating point (15.0 is ok for min 15)
             return f"SL too tight: {sl_pips:.1f} pips (min {min_sl_pips:.1f}, cfg_min={cfg_min_sl}p, 0.5×ATR={atr_pips*0.5:.1f}p)"
 
         # Max TP1 distance for day trading (2x ATR H1)
@@ -1367,7 +1367,7 @@ class Orchestrator:
         net_tp_pips = tp_pips - friction_pips
         net_sl_pips = sl_pips + friction_pips
         net_rr = net_tp_pips / net_sl_pips if net_sl_pips > 0 else 0
-        if net_rr < effective_rr - 0.001:
+        if net_rr < effective_rr * 0.95:  # 5% tolerance — avoid rejecting trades that miss by 0.02-0.06
             return (f"Net RR {net_rr:.2f} below required {effective_rr:.2f} "
                     f"(gross RR={actual_rr:.2f}, friction={friction_pips}p, "
                     f"ATR-limited max RR={max_net_rr:.2f})")
