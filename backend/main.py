@@ -36,7 +36,16 @@ from services.forex_data import fetch_ohlcv
 from services.backtester import run_backtest
 from services.analytics import compute_analytics
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+_log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+os.makedirs(_log_dir, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(os.path.join(_log_dir, "tradewizard.log"), encoding="utf-8"),
+    ],
+)
 logger = logging.getLogger(__name__)
 
 # In-memory build/update progress tracker  key = "SYMBOL_TF"
@@ -1858,9 +1867,13 @@ def _log_to_dict(l: AgentLog) -> dict:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host=os.environ.get("HOST", "0.0.0.0"),
-        port=int(os.environ.get("PORT", 8000)),
-        reload=False,
-    )
+    try:
+        uvicorn.run(
+            "main:app",
+            host=os.environ.get("HOST", "0.0.0.0"),
+            port=int(os.environ.get("PORT", 8000)),
+            reload=False,
+        )
+    except Exception as exc:
+        logger.critical("FATAL: Backend crashed: %s", exc, exc_info=True)
+        raise
