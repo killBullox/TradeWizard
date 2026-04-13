@@ -104,7 +104,9 @@ class MT5Direct:
         sl = float(signal.get("stop_loss", 0))
         tp = float(signal.get("take_profit", signal.get("take_profit_1", 0)))
         lots = float(signal.get("lot_size", 0.01))
-        comment = signal.get("comment", "TW-ICT")[:31]  # MT5 max 31 chars
+        # MT5 comment: max 31 chars, ASCII only, no special chars
+        raw_comment = signal.get("comment", "TW-ICT")[:31]
+        comment = ''.join(c for c in raw_comment if c.isalnum() or c in ' -_.')[:31] or "TW"
 
         if not MT5_AVAILABLE:
             ticket = int(datetime.now().timestamp())
