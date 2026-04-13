@@ -93,24 +93,17 @@ orchestrator: Orchestrator | None = None
 _bridge_proc = None
 
 
-def _start_mt5_bridge():
-    """Launch mt5_bridge.py as a subprocess if not already running."""
-    import subprocess
-    global _bridge_proc
-    bridge_script = os.path.join(os.path.dirname(__file__), "mt5_bridge.py")
-    if not os.path.exists(bridge_script):
-        return
-    port = os.getenv("MT5_BRIDGE_PORT", "5002")
-    env = {**os.environ, "MT5_BRIDGE_PORT": port}
+def _start_mt5_direct():
+    """Initialize direct MT5 connection (no subprocess, no HTTP bridge)."""
     try:
-        _bridge_proc = subprocess.Popen(
-            [sys.executable, bridge_script],
-            env=env,
-            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-        )
-        logger.info("MT5 bridge started (PID %s) on port %s", _bridge_proc.pid, port)
+        from services.mt5_direct import get_mt5_direct
+        mt5 = get_mt5_direct()
+        if mt5.connect():
+            logger.info("MT5 direct connection established")
+        else:
+            logger.warning("MT5 direct connection failed — will retry on first trade")
     except Exception as exc:
-        logger.warning("Could not start MT5 bridge: %s", exc)
+        logger.warning("Could not initialize MT5 direct: %s", exc)
 
 
 _SETTINGS_BACKUP = os.path.join(os.path.dirname(__file__), "..", "settings_backup.json")
@@ -211,7 +204,7 @@ async def lifespan(app: FastAPI):
         mt5_path = await get_config("mt5_path", s) or os.getenv("MT5_PATH", "")
         if mt5_path:
             os.environ["MT5_PATH"] = mt5_path
-    _start_mt5_bridge()
+    _start_mt5_direct()
     orchestrator = Orchestrator(broadcast_fn=manager.broadcast)
     await orchestrator.start()
     app.state.start_time = datetime.utcnow()
@@ -227,9 +220,13 @@ async def lifespan(app: FastAPI):
 
     if orchestrator:
         await orchestrator.stop()
-    if _bridge_proc and _bridge_proc.poll() is None:
-        _bridge_proc.terminate()
-        logger.info("MT5 bridge stopped")
+    # Disconnect MT5 direct
+    try:
+        from services.mt5_direct import get_mt5_direct
+        get_mt5_direct().disconnect()
+        logger.info("MT5 disconnected")
+    except Exception:
+        pass
     logger.info("TradeWizard system stopped")
 
 
@@ -407,15 +404,12 @@ async def health_check():
     start = getattr(app.state, "start_time", now)
     uptime = (now - start).total_seconds()
 
-    # MT5 bridge status
+    # MT5 direct status
     mt5_ok = False
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=3) as client:
-            async with async_session_factory() as s:
-                bridge_url = await get_config("mt5_bridge_url", s) or "http://localhost:5002"
-            r = await client.get(f"{bridge_url}/health")
-            mt5_ok = r.status_code == 200 and r.json().get("connected", False)
+        from services.mt5_direct import get_mt5_direct
+        h = get_mt5_direct().health()
+        mt5_ok = h.get("connected", False)
     except Exception:
         pass
 
@@ -1419,7 +1413,7 @@ async def activate_broker_account(account_id: int):
         except Exception:
             pass
     _bridge_proc = None
-    _start_mt5_bridge()
+    _start_mt5_direct()
     return {"status": "activated", "account_id": account_id}
 
 

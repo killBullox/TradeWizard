@@ -68,24 +68,17 @@ async def _send_mt5_alarm(reason: str):
 
 async def fetch_ohlcv(symbol: str, timeframe: str = "H1", limit: int = 200) -> dict:
     """
-    Fetch OHLCV data EXCLUSIVELY from MT5 bridge.
+    Fetch OHLCV data EXCLUSIVELY from MT5 (direct, no HTTP bridge).
     If MT5 is unavailable, sends WhatsApp alarm and returns empty data.
     """
-    bridge_url = await _get_bridge_url()
-
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get(
-                f"{bridge_url}/candles",
-                params={"symbol": symbol, "timeframe": timeframe, "count": limit},
-            )
-            if r.status_code != 200:
-                raise ConnectionError(f"MT5 bridge returned {r.status_code}: {r.text[:200]}")
-
-            data = r.json()
-            candles = data.get("candles", [])
-            if not candles:
-                raise ValueError(f"MT5 returned 0 candles for {symbol} {timeframe}")
+        from services.mt5_direct import get_mt5_direct
+        mt5 = get_mt5_direct()
+        if not mt5.connected:
+            mt5.connect()
+        candles = mt5.get_candles(symbol, timeframe, limit)
+        if not candles:
+            raise ValueError(f"MT5 returned 0 candles for {symbol} {timeframe}")
 
     except Exception as exc:
         logger.error("MT5 data fetch failed for %s %s: %s", symbol, timeframe, exc)
