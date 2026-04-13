@@ -2137,8 +2137,8 @@ async function boot() {
   renderPairsGrid();
   connectWS();
   await refreshAll();
-  // Periodic auto-refresh (every 30s)
-  setInterval(refreshTrades, 30000);
+  // Periodic auto-refresh (every 3s for live prices)
+  setInterval(refreshTrades, 3000);
 }
 
 boot();
