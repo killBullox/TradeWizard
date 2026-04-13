@@ -360,6 +360,15 @@ class Orchestrator:
                 logger.error("Trade #%d MT5 FAILED: %s | Full result: %s", trade_id, error, cc_result)
                 await self._log_agent("CC", "MT5_FAILED", f"MT5 execution failed for {symbol}: {error}", cc_result)
                 await self._append_close_note(trade_id, f"MT5 FAILED: {error}")
+                # Cancel the trade — don't leave ghost trades without MT5 ticket
+                async with async_session_factory() as s:
+                    t = await s.get(Trade, trade_id)
+                    if t:
+                        t.status = "CANCELLED"
+                        t.close_notes = (t.close_notes or "") + f"\n[AUTO] Cancelled: MT5 execution failed"
+                        await s.commit()
+                logger.info("Trade #%d cancelled due to MT5 failure", trade_id)
+                return
 
             # 8. Journalist — document
             analysis_chain = {
