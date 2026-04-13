@@ -282,12 +282,22 @@ class Orchestrator:
             # Take highest-probability strategy
             strategy = max(strategies, key=lambda s: s.get("probability", 0))
 
-            # 4. Hard limit check — enforced in code, not left to the LLM
+            # 4. Hard limit checks — enforced in code
             max_open = int(config.get("max_open_trades", 3))
             if open_count >= max_open:
                 await self.broadcast({"type": "trade_rejected", "symbol": symbol,
                                       "reason": f"Max open trades reached ({open_count}/{max_open})", "agent": "RM"})
                 return
+
+            # 4b. No duplicate trades on the same pair
+            async with async_session_factory() as s:
+                existing = await s.execute(
+                    select(Trade).where(Trade.status == "ACTIVE", Trade.symbol == symbol)
+                )
+                if existing.scalars().first():
+                    await self.broadcast({"type": "trade_rejected", "symbol": symbol,
+                                          "reason": f"Already have an active trade on {symbol}", "agent": "SYS"})
+                    return
 
             # 5. Risk Manager (with memory context)
             rm_result = await self.rm.evaluate(symbol, strategy, market_data, config, open_count, memory_context=memory_ctx)
