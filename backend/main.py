@@ -1329,28 +1329,21 @@ async def paper_close(trade_id: int):
 
 @app.get("/api/mt5/health")
 async def mt5_health():
-    """Check if the MT5 bridge is reachable."""
-    async with async_session_factory() as s:
-        bridge_url = await get_config("mt5_bridge_url", s) or ""
-    if not bridge_url:
-        return {"status": "not_configured"}
-    from services.mt5_data import check_bridge
-    return await check_bridge(bridge_url)
+    """Check if MT5 is connected (direct, no bridge)."""
+    try:
+        from services.mt5_direct import get_mt5_direct
+        h = get_mt5_direct().health()
+        return {"connected": h.get("connected", False), "status": h.get("status", "unknown")}
+    except Exception as exc:
+        return {"connected": False, "error": str(exc)}
 
 
 @app.get("/api/mt5/account")
 async def mt5_account():
-    """Fetch live MT5 account info from the bridge."""
-    async with async_session_factory() as s:
-        bridge_url = await get_config("mt5_bridge_url", s) or ""
-    if not bridge_url:
-        return {"error": "MT5 bridge not configured"}
-    import httpx
+    """Fetch live MT5 account info (direct)."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{bridge_url.rstrip('/')}/account")
-            r.raise_for_status()
-            return r.json()
+        from services.mt5_direct import get_mt5_direct
+        return get_mt5_direct().get_account_info()
     except Exception as e:
         return {"error": str(e)}
 
