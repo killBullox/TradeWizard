@@ -489,10 +489,12 @@ function renderOpenTrades(trades, livePnlMap = {}) {
     const openTime = t.open_time ? new Date(t.open_time).toLocaleString('it-IT', {day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
 
     // Detect pending (limit order not yet filled)
+    // If there's a live P&L from MT5, the order is already filled — not pending
     const curPrice = cp ? parseFloat(cp) : 0;
-    const isPending = entry > 0 && curPrice > 0 && (
-      (isBuy && curPrice > entry + 2 * pip) ||   // BUY LIMIT: price above entry
-      (!isBuy && curPrice < entry - 2 * pip)      // SELL LIMIT: price below entry
+    const hasPnl = pnl != null && pnl !== 0;
+    const isPending = !hasPnl && entry > 0 && curPrice > 0 && (
+      (isBuy && curPrice > entry + 5 * pip) ||   // BUY LIMIT: price well above entry
+      (!isBuy && curPrice < entry - 5 * pip)      // SELL LIMIT: price well below entry
     );
 
     return `
