@@ -123,21 +123,15 @@ class MT5Direct:
 
         is_buy = direction.upper() == "BUY"
 
-        if order_type.upper() == "MARKET":
-            tick = mt5.symbol_info_tick(symbol)
-            if not tick:
-                return {"success": False, "error": f"No tick data for {symbol}"}
-            price = tick.ask if is_buy else tick.bid
-            action = mt5.TRADE_ACTION_DEAL
-            otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-        elif order_type.upper() == "LIMIT":
-            price = entry
-            action = mt5.TRADE_ACTION_PENDING
-            otype = mt5.ORDER_TYPE_BUY_LIMIT if is_buy else mt5.ORDER_TYPE_SELL_LIMIT
-        else:  # STOP
-            price = entry
-            action = mt5.TRADE_ACTION_PENDING
-            otype = mt5.ORDER_TYPE_BUY_STOP if is_buy else mt5.ORDER_TYPE_SELL_STOP
+        # ALWAYS use MARKET orders for intraday trading — no pending orders
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return {"success": False, "error": f"No tick data for {symbol}"}
+        price = tick.ask if is_buy else tick.bid
+        action = mt5.TRADE_ACTION_DEAL
+        otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+        if order_type.upper() != "MARKET":
+            logger.info("Overriding %s to MARKET for %s %s", order_type, direction, symbol)
 
         request = {
             "action": action,
