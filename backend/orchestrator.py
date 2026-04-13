@@ -337,6 +337,14 @@ class Orchestrator:
                 {"lot": pos.get("lot_size"), "risk_usd": pos.get("risk_usd"),
                  "sl_pips": pos.get("sl_pips"), "risk_mode": pos.get("risk_mode")})
 
+            # 5b. Margin check — prevent 10019 "No money" errors
+            margin_ok = await self._check_margin(symbol, trade_params, rm_result, config)
+            if not margin_ok:
+                await self._log_agent("SYS", "REJECTED", f"Insufficient margin for {symbol}", trade_params)
+                await self.broadcast({"type": "trade_rejected", "symbol": symbol,
+                                      "reason": "Insufficient margin (10019 prevention)", "agent": "SYS"})
+                return
+
             # 6. Hard mathematical sanity check — the ONLY gatekeeper after RM approval
             # AT validation removed: was blocking valid trades despite clear "APPROVE" prompt.
             # Sanity check covers all critical defects (SL/TP side, min SL, net RR) in code.
@@ -362,9 +370,11 @@ class Orchestrator:
                 await self._log_agent("CC", "TRADE_SENT", f"Sent {symbol} to MT5", cc_result)
 
             if cc_result.get("success"):
-                ticket = cc_result.get("ticket", "UNKNOWN")
-                await self._update_trade_ticket(trade_id, ticket)
-                logger.info("Trade #%d sent to MT5: ticket=%s", trade_id, ticket)
+                all_tickets = cc_result.get("all_tickets", [cc_result.get("ticket", "UNKNOWN")])
+                ticket_str = ",".join(str(t) for t in all_tickets)
+                await self._update_trade_ticket(trade_id, ticket_str)
+                logger.info("Trade #%d sent to MT5: tickets=%s (%d splits)",
+                            trade_id, ticket_str, cc_result.get("splits", 1))
             else:
                 error = cc_result.get("error", "Unknown error")
                 logger.error("Trade #%d MT5 FAILED: %s | Full result: %s", trade_id, error, cc_result)
@@ -441,6 +451,14 @@ class Orchestrator:
 
                 if not current_price:
                     continue  # Skip if no price data available
+
+                # ── SPLIT TICKET SYNC: detect MT5-closed split positions ──
+                await self._sync_split_tickets(trade, current_price)
+                # Reload trade in case _sync_split_tickets changed status
+                async with async_session_factory() as _s:
+                    trade = await _s.get(Trade, trade.id)
+                    if not trade or trade.status != "ACTIVE":
+                        continue
 
                 # ── HARD CHECK: Max trade duration (day trading constraint) ──
                 if trade.open_time:
@@ -630,6 +648,62 @@ class Orchestrator:
 
             except Exception as e:
                 logger.error(f"Monitor error for trade {trade.id}: {e}")
+
+    async def _sync_split_tickets(self, trade, current_price: float):
+        """For split trades (multiple tickets), detect which MT5 positions have been
+        closed by MT5 (TP hit), update stored tickets, move SL to breakeven on survivors."""
+        ticket_str = trade.mt5_ticket or ""
+        tickets = [t.strip() for t in ticket_str.split(",") if t.strip()]
+        if len(tickets) <= 1:
+            return  # single ticket — handled by existing TP/SL logic
+
+        try:
+            from services.mt5_direct import get_mt5_direct
+            mt5 = get_mt5_direct()
+            if not mt5.connected:
+                return
+
+            open_positions = mt5.get_positions()
+            open_tickets = {str(p["ticket"]) for p in open_positions}
+
+            still_open = [t for t in tickets if t in open_tickets]
+            just_closed = [t for t in tickets if t not in open_tickets]
+
+            if not just_closed:
+                return  # all splits still open, nothing to do
+
+            tp_hits_before = trade.tp_hits or 0
+            new_tp_hits = tp_hits_before + len(just_closed)
+
+            logger.info("Split sync trade #%d: %d/%d positions closed by MT5 (tickets %s)",
+                        trade.id, len(just_closed), len(tickets), just_closed)
+
+            # Move SL to breakeven on surviving positions
+            if still_open:
+                entry = trade.entry_price or 0
+                if entry:
+                    for t in still_open:
+                        await self.cc.modify_sl(t, entry, trade.symbol)
+                    await self._update_trade_sl(trade.id, entry)
+                    await self._append_close_note(trade.id,
+                        f"Split TP hit: {len(just_closed)} posizioni chiuse da MT5, "
+                        f"SL → breakeven ({entry:.5f}) su {len(still_open)} rimanenti")
+
+                # Update stored tickets
+                async with async_session_factory() as s:
+                    t = await s.get(Trade, trade.id)
+                    if t:
+                        t.mt5_ticket = ",".join(still_open)
+                        t.tp_hits = new_tp_hits
+                        await s.commit()
+            else:
+                # All positions closed by MT5 — mark trade as closed
+                await self._append_close_note(trade.id,
+                    f"Tutte le {len(tickets)} posizioni split chiuse da MT5")
+                await self._close_trade(trade, current_price, "All split positions closed by MT5")
+
+        except Exception as exc:
+            logger.warning("Split ticket sync error for trade #%d: %s", trade.id, exc)
 
     def _calc_trade_pips(self, trade, price: float) -> float:
         pip = 0.01 if "JPY" in (trade.symbol or "") else (1.0 if trade.symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
@@ -1058,7 +1132,7 @@ class Orchestrator:
         return {"success": True}
 
     async def lock_profit(self, trade_id: int) -> dict:
-        """Move SL to entry + 3 pips to lock in profit."""
+        """Lock profit: close the TP1 position and move SL to breakeven on remaining positions."""
         async with async_session_factory() as s:
             trade = await s.get(Trade, trade_id)
             if not trade or trade.status != "ACTIVE":
@@ -1074,25 +1148,53 @@ class Orchestrator:
         else:
             new_sl = round(entry - buffer, 6)
 
-        # 1. Close 1/3 of position
-        pct = 0.33
-        await self.cc.close_partial(trade.mt5_ticket or "", sym, pct)
-        await self._append_close_note(trade_id, f"Lock profit: chiuso {int(pct*100)}% della posizione")
-        await self.broadcast({"type": "partial_close", "trade_id": trade_id, "percent": pct})
+        tickets = [t.strip() for t in (trade.mt5_ticket or "").split(",") if t.strip()]
 
-        # 2. Move SL to entry + 3 pips
-        await self.cc.modify_sl(trade.mt5_ticket or "", new_sl, sym)
-        await self._update_trade_sl(trade_id, new_sl)
+        if len(tickets) >= 2:
+            # Split mode: close first ticket (TP1 position), move SL on the rest
+            tp1_ticket = tickets[0]
+            remaining_tickets = tickets[1:]
+
+            # 1. Close the TP1 position entirely
+            await self.cc.close_trade(tp1_ticket, sym)
+            await self._append_close_note(trade_id, f"Lock profit: chiusa posizione TP1 (ticket #{tp1_ticket})")
+            await self.broadcast({"type": "partial_close", "trade_id": trade_id, "percent": 0.50})
+
+            # 2. Move SL to breakeven on remaining positions
+            for t in remaining_tickets:
+                await self.cc.modify_sl(t, new_sl, sym)
+            await self._update_trade_sl(trade_id, new_sl)
+
+            # Update stored tickets (remove the closed one)
+            await self._update_trade_ticket(trade_id, ",".join(remaining_tickets))
+            await self._consume_next_tp(trade_id)
+
+            await self._append_close_note(trade_id,
+                f"Lock profit: SL spostato a entry+3pip ({new_sl:.5f}) su {len(remaining_tickets)} posizioni rimanenti")
+            logger.info("Lock profit on trade #%d: closed TP1 ticket #%s, SL → %.5f on %s",
+                        trade_id, tp1_ticket, new_sl, remaining_tickets)
+        else:
+            # Legacy single-ticket mode: partial close + move SL
+            ticket = tickets[0] if tickets else ""
+            pct = 0.50
+            await self.cc.close_partial(ticket, sym, pct)
+            await self._append_close_note(trade_id, f"Lock profit: chiuso {int(pct*100)}% della posizione")
+            await self.broadcast({"type": "partial_close", "trade_id": trade_id, "percent": pct})
+
+            await self.cc.modify_sl(ticket, new_sl, sym)
+            await self._update_trade_sl(trade_id, new_sl)
+            logger.info("Lock profit on trade #%d (single ticket): closed %d%%, SL → %.5f",
+                        trade_id, int(pct*100), new_sl)
+
         if self._paper:
             self._paper.modify_sl(trade_id, new_sl)
-        await self._append_close_note(trade_id, f"Lock profit: SL spostato a entry+3pip ({new_sl:.5f})")
+
         await self.broadcast({
             "type": "sl_trailed", "trade_id": trade_id,
             "symbol": sym, "new_sl": new_sl, "reason": "Lock profit (manual)",
         })
 
-        logger.info("Lock profit on trade #%d: closed 33%%, SL → %.5f", trade_id, new_sl)
-        return {"success": True, "new_sl": new_sl, "partial_close": f"{int(pct*100)}%"}
+        return {"success": True, "new_sl": new_sl}
 
     async def modify_tps(self, trade_id: int, tp1=None, tp2=None, tp3=None) -> dict:
         """Update TP levels for an active trade."""
@@ -1353,6 +1455,80 @@ class Orchestrator:
         except Exception:
             pass
         return trade_params
+
+    async def _check_margin(self, symbol: str, trade_params: dict, rm_result: dict, config: dict) -> bool:
+        """Check MT5 margin before sending trade.
+        Budget per trade = margin_free / max_open_trades (so each trade gets a fair share).
+        Reduces lot size if possible, rejects if not.
+        Returns True if trade can proceed, False if rejected."""
+        try:
+            from services.mt5_direct import get_mt5_direct
+            mt5 = get_mt5_direct()
+            if not mt5.connected:
+                return True  # can't check, let MT5 reject it naturally
+
+            direction = trade_params.get("direction", "BUY")
+            lots = float(trade_params.get("lot_size", 0.01))
+            max_trades = int(config.get("max_open_trades", 3))
+
+            result = mt5.check_margin(symbol, direction, lots)
+            if result.get("simulated"):
+                return True
+
+            margin_free = result.get("margin_free", 0)
+            margin_req = result.get("margin_required", 0)
+            leverage = result.get("leverage", 0)
+
+            # Budget: each trade gets at most margin_free / max_open_trades
+            margin_budget = margin_free / max(1, max_trades)
+
+            # Check against the per-trade budget, not total margin_free
+            if margin_req <= margin_budget:
+                logger.info("Margin OK: %s needs $%.0f, budget $%.0f (free $%.0f / %d trades, leva 1:%d)",
+                            symbol, margin_req, margin_budget, margin_free, max_trades, leverage)
+                return True
+
+            # Over budget — scale down lots to fit
+            if margin_req > 0:
+                ratio = (margin_budget * 0.9) / margin_req  # 10% safety buffer
+                reduced_lots = mt5._normalize_lots(mt5._normalize_symbol(symbol) or symbol, lots * ratio)
+            else:
+                reduced_lots = 0
+
+            if reduced_lots >= 0.01:
+                logger.warning(
+                    "Margin check: %s needs $%.0f margin but budget is $%.0f "
+                    "(free $%.0f / %d trades, leva 1:%d). Reducing lots %.2f → %.2f",
+                    symbol, margin_req, margin_budget, margin_free, max_trades, leverage, lots, reduced_lots,
+                )
+                trade_params["lot_size"] = reduced_lots
+                pos = rm_result.setdefault("position_size", {})
+                pos["lot_size"] = reduced_lots
+                pos["margin_reduced"] = True
+                await self.broadcast({
+                    "type": "margin_warning", "symbol": symbol,
+                    "message": (f"Lot ridotto da {lots} a {reduced_lots} — "
+                                f"budget margine ${margin_budget:.0f} per trade "
+                                f"(${margin_free:.0f} / {max_trades} trades, leva 1:{leverage})"),
+                })
+                return True
+            else:
+                logger.error(
+                    "Margin check FAILED: %s needs $%.0f, budget $%.0f "
+                    "(free $%.0f / %d trades, leva 1:%d). Cannot afford even 0.01 lots.",
+                    symbol, margin_req, margin_budget, margin_free, max_trades, leverage,
+                )
+                await self.broadcast({
+                    "type": "trade_rejected", "symbol": symbol,
+                    "reason": (f"Margine insufficiente: serve ${margin_req:.0f}, "
+                               f"budget ${margin_budget:.0f} per trade "
+                               f"(${margin_free:.0f} / {max_trades} trades, leva 1:{leverage})"),
+                    "agent": "SYS",
+                })
+                return False
+        except Exception as exc:
+            logger.warning("Margin check error (proceeding anyway): %s", exc)
+            return True  # don't block on check errors
 
     def _sanity_check_trade(self, trade_params: dict, market_data: dict, config: dict | None = None) -> str | None:
         """Return rejection reason string if trade params are mathematically invalid, else None."""

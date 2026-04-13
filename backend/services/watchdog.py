@@ -110,20 +110,20 @@ async def check_backend() -> tuple[bool, str]:
         return False, f"Backend unreachable: {exc}"
 
 
-async def check_mt5_bridge() -> tuple[bool, str]:
-    """Check if MT5 bridge is responding and connected."""
+async def check_mt5_connection() -> tuple[bool, str]:
+    """Check if MT5 is connected via the backend health endpoint."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{MT5_BRIDGE_URL}/health")
+            r = await client.get(f"{BACKEND_URL}/api/health")
             if r.status_code == 200:
                 data = r.json()
-                connected = data.get("connected", False)
-                if connected:
-                    return True, "MT5 bridge OK (connected)"
-                return False, "MT5 bridge responding but MT5 not connected"
-            return False, f"MT5 bridge returned HTTP {r.status_code}"
+                mt5_status = data.get("mt5", {})
+                if isinstance(mt5_status, dict) and mt5_status.get("connected"):
+                    return True, "MT5 connected (direct)"
+                return False, f"MT5 not connected: {mt5_status}"
+            return False, f"Backend returned HTTP {r.status_code}"
     except Exception as exc:
-        return False, f"MT5 bridge unreachable: {exc}"
+        return False, f"Cannot check MT5: {exc}"
 
 
 def check_mt5_terminal() -> tuple[bool, str]:
@@ -143,37 +143,50 @@ def check_mt5_terminal() -> tuple[bool, str]:
 # ── Restart functions ─────────────────────────────────────────────────────────
 
 def restart_backend():
-    """Kill and restart the TradeWizard backend."""
+    """Kill only the TradeWizard backend process (not all Python) and restart via schtasks."""
     logger.info("Restarting backend...")
     try:
-        # Kill existing Python backend
-        subprocess.run(["taskkill", "/F", "/IM", "python.exe"], capture_output=True, timeout=10)
-        time.sleep(3)
-        # Start new backend in a new window
-        subprocess.Popen(
-            ["cmd", "/c", "start", "TradeWizard Backend", "/D", str(PROJECT_ROOT),
-             "cmd", "/k", "python", "backend\\main.py"],
-            cwd=str(PROJECT_ROOT),
+        # Kill ONLY python processes running TradeWizard's main.py
+        # Use full project path to avoid killing TradeMachine or other apps
+        tw_path = str(PROJECT_ROOT).replace("\\", "\\\\")
+        wmic_filter = f"commandline like '%{tw_path}%' and commandline like '%main.py%'"
+        result = subprocess.run(
+            ["wmic", "process", "where", wmic_filter,
+             "get", "processid", "/value"],
+            capture_output=True, text=True, timeout=10,
         )
-        logger.info("Backend restart command issued")
+        for line in result.stdout.strip().splitlines():
+            if line.startswith("ProcessId="):
+                pid = line.split("=")[1].strip()
+                if pid:
+                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
+                    logger.info("Killed backend PID %s", pid)
+        time.sleep(3)
+        # Restart via scheduled task (the standard way)
+        r = subprocess.run(
+            ["schtasks", "/run", "/tn", "TradeWizard"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            logger.info("Backend restart via schtasks succeeded")
+        else:
+            logger.warning("schtasks /run failed (rc=%d): %s — falling back to direct start",
+                           r.returncode, r.stderr.strip())
+            # Fallback: start directly
+            subprocess.Popen(
+                ["python", str(PROJECT_ROOT / "backend" / "main.py")],
+                cwd=str(PROJECT_ROOT),
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+            logger.info("Backend started directly (fallback)")
     except Exception as exc:
         logger.error("Backend restart failed: %s", exc)
 
 
-def restart_mt5_bridge():
-    """Kill and restart the MT5 bridge subprocess."""
-    logger.info("Restarting MT5 bridge...")
-    try:
-        # The bridge runs as a subprocess of the backend — restarting backend restarts it
-        # But we can also try starting it standalone
-        subprocess.Popen(
-            ["python", str(PROJECT_ROOT / "backend" / "mt5_bridge.py")],
-            cwd=str(PROJECT_ROOT / "backend"),
-            creationflags=subprocess.CREATE_NEW_CONSOLE,
-        )
-        logger.info("MT5 bridge restart command issued")
-    except Exception as exc:
-        logger.error("MT5 bridge restart failed: %s", exc)
+def restart_mt5_connection():
+    """Restart MT5 terminal if not running (direct connection reconnects automatically)."""
+    logger.info("MT5 disconnected — ensuring terminal is running...")
+    restart_mt5_terminal()
 
 
 def restart_mt5_terminal():
@@ -282,7 +295,7 @@ async def main():
 
     monitors = [
         ComponentMonitor("Backend", check_backend, restart_backend, is_async=True),
-        ComponentMonitor("MT5 Bridge", check_mt5_bridge, restart_mt5_bridge, is_async=True),
+        ComponentMonitor("MT5 Connection", check_mt5_connection, restart_mt5_connection, is_async=True),
         ComponentMonitor("MT5 Terminal", check_mt5_terminal, restart_mt5_terminal, is_async=False),
     ]
 

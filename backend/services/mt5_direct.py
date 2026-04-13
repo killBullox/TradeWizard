@@ -91,6 +91,84 @@ class MT5Direct:
             "currency": info.currency, "leverage": info.leverage,
         }
 
+    # ── Margin check ─────────────────────────────────────────────────────
+
+    def check_margin(self, symbol: str, direction: str, lots: float) -> dict:
+        """Check if there's enough free margin for the trade.
+        Returns {"ok": True/False, "margin_required": float, "margin_free": float,
+                 "max_lots": float} — max_lots is the largest lot size that fits."""
+        if not MT5_AVAILABLE:
+            return {"ok": True, "margin_required": 0, "margin_free": 99999, "max_lots": lots, "simulated": True}
+
+        self._ensure_connected()
+        symbol = self._normalize_symbol(symbol)
+        if not symbol:
+            return {"ok": False, "margin_required": 0, "margin_free": 0, "max_lots": 0,
+                    "error": f"Symbol not found: {symbol}"}
+
+        account = mt5.account_info()
+        if not account:
+            return {"ok": False, "margin_required": 0, "margin_free": 0, "max_lots": 0,
+                    "error": "Cannot get account info"}
+
+        margin_free = account.margin_free
+        leverage = account.leverage or 100
+        is_buy = direction.upper() == "BUY"
+        otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return {"ok": False, "margin_required": 0, "margin_free": margin_free, "max_lots": 0,
+                    "error": f"No tick data for {symbol}"}
+        price = tick.ask if is_buy else tick.bid
+
+        # Use order_check to get exact margin required
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": lots,
+            "type": otype,
+            "price": price,
+        }
+        check = mt5.order_check(request)
+        if check is None:
+            # Fallback: estimate margin from symbol info
+            sym_info = mt5.symbol_info(symbol)
+            if sym_info and sym_info.trade_contract_size > 0:
+                margin_est = (lots * sym_info.trade_contract_size * price) / leverage
+                ok = margin_free > margin_est * 1.1  # 10% safety buffer
+                max_lots = lots if ok else self._find_max_lots(symbol, margin_free, sym_info, price, leverage)
+                return {"ok": ok, "margin_required": round(margin_est, 2),
+                        "margin_free": round(margin_free, 2), "max_lots": max_lots,
+                        "leverage": leverage}
+            return {"ok": False, "margin_required": 0, "margin_free": round(margin_free, 2),
+                    "max_lots": 0, "leverage": leverage, "error": "order_check failed and no symbol info"}
+
+        margin_required = check.margin or 0
+        ok = check.retcode == mt5.TRADE_RETCODE_DONE or margin_free > margin_required * 1.1
+
+        # If not enough margin, find max affordable lot size
+        max_lots = lots
+        if not ok and margin_required > 0:
+            ratio = (margin_free * 0.9) / margin_required
+            max_lots = self._normalize_lots(symbol, lots * ratio)
+
+        return {
+            "ok": ok,
+            "margin_required": round(margin_required, 2),
+            "margin_free": round(margin_free, 2),
+            "max_lots": max_lots,
+            "leverage": leverage,
+            "retcode": check.retcode,
+            "comment": check.comment,
+        }
+
+    def _find_max_lots(self, symbol: str, margin_free: float, sym_info, price: float, leverage: int) -> float:
+        """Estimate max affordable lots from margin_free."""
+        if sym_info.trade_contract_size <= 0 or price <= 0:
+            return 0.01
+        max_lots = (margin_free * 0.9 * leverage) / (sym_info.trade_contract_size * price)
+        return self._normalize_lots(symbol, max_lots)
+
     # ── Trade execution ───────────────────────────────────────────────────
 
     def open_trade(self, signal: dict) -> dict:
