@@ -362,7 +362,7 @@ function renderTradesTable(trades) {
   const tbody = document.getElementById('trades-tbody');
   if (!tbody) return;
   const filter = document.getElementById('trades-filter')?.value || '';
-  const filtered = filter ? trades.filter(t => t.status === filter) : trades;
+  const filtered = filter ? trades.filter(t => t.status === filter) : trades.filter(t => t.status !== 'CANCELLED');
   tbody.innerHTML = filtered.map(t => {
     const entry = parseFloat(t.entry_price) || 0;
     const sl    = parseFloat(t.stop_loss)   || 0;
