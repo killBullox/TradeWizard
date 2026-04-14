@@ -6,10 +6,17 @@ No subprocess, no HTTP, no connection loss.
 
 import logging
 import os
+import threading
 from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger("mt5_direct")
+
+# Global lock: the MetaTrader5 Python library is NOT thread-safe.
+# Concurrent calls (e.g. monitor_loop checking positions while analysis_loop
+# sends orders) corrupt the IPC pipe to the terminal, causing order_send
+# to return None with error -2. This lock serializes ALL MT5 calls.
+_mt5_lock = threading.Lock()
 
 try:
     import MetaTrader5 as mt5
@@ -41,48 +48,65 @@ class MT5Direct:
         if self.password: kwargs["password"] = self.password
         if self.server:   kwargs["server"] = self.server
 
-        for attempt in range(3):
-            if mt5.initialize(**kwargs):
-                info = mt5.account_info()
-                if info:
-                    logger.info("MT5 connected — Account %s | Balance %.2f %s",
-                                info.login, info.balance, info.currency)
-                self.connected = True
-                return True
-            logger.warning("MT5 connect attempt %d/3 failed", attempt + 1)
-            import time; time.sleep(2)
+        with _mt5_lock:
+            for attempt in range(3):
+                if mt5.initialize(**kwargs):
+                    info = mt5.account_info()
+                    if info:
+                        logger.info("MT5 connected — Account %s | Balance %.2f %s",
+                                    info.login, info.balance, info.currency)
+                    self.connected = True
+                    return True
+                logger.warning("MT5 connect attempt %d/3 failed", attempt + 1)
+                import time; time.sleep(2)
 
-        logger.error("MT5 connection failed after 3 attempts: %s", mt5.last_error() if MT5_AVAILABLE else "N/A")
-        return False
+            logger.error("MT5 connection failed after 3 attempts: %s", mt5.last_error() if MT5_AVAILABLE else "N/A")
+            return False
 
     def _ensure_connected(self):
+        """Must be called INSIDE _mt5_lock."""
         if not MT5_AVAILABLE:
             return
         info = mt5.account_info()
         if info is None:
             logger.warning("MT5 disconnected — reconnecting...")
-            self.connect()
+            for attempt in range(3):
+                mt5.shutdown()
+                kwargs = {}
+                if self.path:     kwargs["path"] = self.path
+                if self.login:    kwargs["login"] = self.login
+                if self.password: kwargs["password"] = self.password
+                if self.server:   kwargs["server"] = self.server
+                if mt5.initialize(**kwargs):
+                    self.connected = True
+                    logger.info("MT5 reconnected (attempt %d)", attempt + 1)
+                    return
+                import time; time.sleep(2)
+            logger.error("MT5 reconnect failed after 3 attempts")
 
     def disconnect(self):
-        if MT5_AVAILABLE and self.connected:
-            mt5.shutdown()
-        self.connected = False
+        with _mt5_lock:
+            if MT5_AVAILABLE and self.connected:
+                mt5.shutdown()
+            self.connected = False
 
     def health(self) -> dict:
         if not MT5_AVAILABLE:
             return {"status": "ok", "mt5_available": False, "connected": True}
-        info = mt5.account_info()
-        return {
-            "status": "ok",
-            "mt5_available": True,
-            "connected": info is not None,
-        }
+        with _mt5_lock:
+            info = mt5.account_info()
+            return {
+                "status": "ok",
+                "mt5_available": True,
+                "connected": info is not None,
+            }
 
     def get_account_info(self) -> dict:
         if not MT5_AVAILABLE:
             return {"balance": 10000.0, "equity": 10000.0, "currency": "USD", "simulated": True}
-        self._ensure_connected()
-        info = mt5.account_info()
+        with _mt5_lock:
+            self._ensure_connected()
+            info = mt5.account_info()
         if not info:
             return {"error": "Not connected"}
         return {
@@ -100,6 +124,11 @@ class MT5Direct:
         if not MT5_AVAILABLE:
             return {"ok": True, "margin_required": 0, "margin_free": 99999, "max_lots": lots, "simulated": True}
 
+        with _mt5_lock:
+            return self._check_margin_locked(symbol, direction, lots)
+
+    def _check_margin_locked(self, symbol, direction, lots):
+        """Must be called inside _mt5_lock."""
         self._ensure_connected()
         symbol = self._normalize_symbol(symbol)
         if not symbol:
@@ -173,8 +202,6 @@ class MT5Direct:
 
     def open_trade(self, signal: dict) -> dict:
         """Open a trade on MT5."""
-        self._ensure_connected()
-
         symbol = signal.get("symbol", "")
         direction = signal.get("direction", "BUY")
         order_type = signal.get("order_type", "MARKET")
@@ -184,203 +211,210 @@ class MT5Direct:
         lots = float(signal.get("lot_size", 0.01))
         # MT5 comment: max 31 chars, ASCII only, no special chars
         raw_comment = signal.get("comment", "TW-ICT")[:31]
-        comment = ''.join(c for c in raw_comment if c.isalnum() or c in ' -_.')[:31] or "TW"
+        comment = ''.join(c for c in raw_comment if c.isascii() and (c.isalnum() or c in ' -_.'))[:31] or "TW"
 
         if not MT5_AVAILABLE:
             ticket = int(datetime.now().timestamp())
             logger.info("SIM OPEN %s %s %s @ %.5f lots=%.2f", order_type, direction, symbol, entry, lots)
             return {"success": True, "ticket": str(ticket), "simulated": True}
 
-        # Normalize symbol
-        symbol = self._normalize_symbol(symbol)
-        if not symbol:
-            return {"success": False, "error": f"Symbol not found: {signal.get('symbol')}"}
+        with _mt5_lock:
+            self._ensure_connected()
 
-        # Normalize lots
-        lots = self._normalize_lots(symbol, lots)
+            # Normalize symbol
+            symbol = self._normalize_symbol(symbol)
+            if not symbol:
+                return {"success": False, "error": f"Symbol not found: {signal.get('symbol')}"}
 
-        is_buy = direction.upper() == "BUY"
+            # Normalize lots
+            lots = self._normalize_lots(symbol, lots)
 
-        # ALWAYS use MARKET orders for intraday trading — no pending orders
-        tick = mt5.symbol_info_tick(symbol)
-        if not tick:
-            return {"success": False, "error": f"No tick data for {symbol}"}
-        price = tick.ask if is_buy else tick.bid
-        action = mt5.TRADE_ACTION_DEAL
-        otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-        if order_type.upper() != "MARKET":
-            logger.info("Overriding %s to MARKET for %s %s", order_type, direction, symbol)
+            is_buy = direction.upper() == "BUY"
 
-        request = {
-            "action": action,
-            "symbol": symbol,
-            "volume": lots,
-            "type": otype,
-            "price": price,
-            "sl": sl,
-            "tp": tp,
-            "deviation": 10,
-            "magic": 20250101,
-            "comment": comment,
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_FOK,
-        }
+            # ALWAYS use MARKET orders for intraday trading — no pending orders
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                return {"success": False, "error": f"No tick data for {symbol}"}
+            price = tick.ask if is_buy else tick.bid
+            action = mt5.TRADE_ACTION_DEAL
+            otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+            if order_type.upper() != "MARKET":
+                logger.info("Overriding %s to MARKET for %s %s", order_type, direction, symbol)
 
-        logger.info("MT5 OPEN: %s %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
-                     order_type, direction, symbol, lots, price, sl, tp)
+            request = {
+                "action": action,
+                "symbol": symbol,
+                "volume": lots,
+                "type": otype,
+                "price": price,
+                "sl": sl,
+                "tp": tp,
+                "deviation": 10,
+                "magic": 20250101,
+                "comment": comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": mt5.ORDER_FILLING_FOK,
+            }
 
-        result = mt5.order_send(request)
-        if result is None:
-            err = mt5.last_error()
-            logger.error("MT5 order_send returned None: %s", err)
-            # Try reconnect and retry once
-            self.connect()
+            logger.info("MT5 OPEN: %s %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
+                         order_type, direction, symbol, lots, price, sl, tp)
+
             result = mt5.order_send(request)
             if result is None:
-                return {"success": False, "error": f"order_send None after reconnect: {mt5.last_error()}"}
+                err = mt5.last_error()
+                logger.error("MT5 order_send returned None: %s", err)
+                # Full shutdown + reinitialize inside the lock
+                mt5.shutdown()
+                import time; time.sleep(1)
+                kwargs = {}
+                if self.path:     kwargs["path"] = self.path
+                if self.login:    kwargs["login"] = self.login
+                if self.password: kwargs["password"] = self.password
+                if self.server:   kwargs["server"] = self.server
+                mt5.initialize(**kwargs)
+                # Update price after reconnect
+                tick = mt5.symbol_info_tick(symbol)
+                if tick:
+                    request["price"] = tick.ask if is_buy else tick.bid
+                result = mt5.order_send(request)
+                if result is None:
+                    return {"success": False, "error": f"order_send None after reconnect: {mt5.last_error()}"}
 
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error("MT5 order failed: retcode=%d comment='%s'", result.retcode, result.comment)
-            return {"success": False, "error": f"retcode {result.retcode}: {result.comment}"}
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                logger.error("MT5 order failed: retcode=%d comment='%s'", result.retcode, result.comment)
+                return {"success": False, "error": f"retcode {result.retcode}: {result.comment}"}
 
-        logger.info("MT5 OPEN OK: ticket=%s %s %s %s @ %.5f", result.order, order_type, direction, symbol, price)
-        return {"success": True, "ticket": str(result.order), "message": "Order placed"}
+            logger.info("MT5 OPEN OK: ticket=%s %s %s %s @ %.5f", result.order, order_type, direction, symbol, price)
+            return {"success": True, "ticket": str(result.order), "message": "Order placed"}
 
     def modify_sl(self, ticket: str, new_sl: float, symbol: str = "") -> dict:
         """Modify stop loss of an open position."""
-        self._ensure_connected()
         ticket_int = int(ticket) if ticket and ticket.isdigit() else 0
         if not ticket_int:
             return {"success": False, "error": f"Invalid ticket: {ticket}"}
-
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"SL -> {new_sl}"}
 
-        pos = mt5.positions_get(ticket=ticket_int)
-        if not pos:
-            return {"success": False, "error": f"Position not found: {ticket}"}
-
-        p = pos[0]
-        request = {
-            "action": mt5.TRADE_ACTION_SLTP,
-            "position": ticket_int,
-            "sl": new_sl,
-            "tp": p.tp,
-        }
-        result = mt5.order_send(request)
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            code = result.retcode if result else -1
-            return {"success": False, "error": f"SLTP failed: {code}"}
-
-        return {"success": True, "ticket": ticket, "message": f"SL modified to {new_sl}"}
+        with _mt5_lock:
+            self._ensure_connected()
+            pos = mt5.positions_get(ticket=ticket_int)
+            if not pos:
+                return {"success": False, "error": f"Position not found: {ticket}"}
+            p = pos[0]
+            request = {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "position": ticket_int,
+                "sl": new_sl,
+                "tp": p.tp,
+            }
+            result = mt5.order_send(request)
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                code = result.retcode if result else -1
+                return {"success": False, "error": f"SLTP failed: {code}"}
+            return {"success": True, "ticket": ticket, "message": f"SL modified to {new_sl}"}
 
     def close_partial(self, ticket: str, symbol: str, percent: float) -> dict:
         """Close a percentage of the position."""
-        self._ensure_connected()
         ticket_int = int(ticket) if ticket and ticket.isdigit() else 0
         if not ticket_int:
             return {"success": False, "error": f"Invalid ticket: {ticket}"}
-
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"Closed {percent}%"}
 
-        pos = mt5.positions_get(ticket=ticket_int)
-        if not pos:
-            return {"success": False, "error": f"Position not found: {ticket}"}
-
-        p = pos[0]
-        close_vol = round(p.volume * percent, 2)
-        step = mt5.symbol_info(p.symbol).volume_step or 0.01
-        close_vol = max(step, round(round(close_vol / step) * step, 2))
-
-        is_buy = p.type == mt5.ORDER_TYPE_BUY
-        price = mt5.symbol_info_tick(p.symbol).bid if is_buy else mt5.symbol_info_tick(p.symbol).ask
-        otype = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
-
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "position": ticket_int,
-            "symbol": p.symbol,
-            "volume": close_vol,
-            "type": otype,
-            "price": price,
-            "deviation": 10,
-            "magic": 20250101,
-            "comment": "TW-PARTIAL",
-            "type_filling": mt5.ORDER_FILLING_FOK,
-        }
-        result = mt5.order_send(request)
-        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-            code = result.retcode if result else -1
-            return {"success": False, "error": f"Partial close failed: {code}"}
-
-        return {"success": True, "ticket": ticket, "closed_volume": close_vol}
+        with _mt5_lock:
+            self._ensure_connected()
+            pos = mt5.positions_get(ticket=ticket_int)
+            if not pos:
+                return {"success": False, "error": f"Position not found: {ticket}"}
+            p = pos[0]
+            close_vol = round(p.volume * percent, 2)
+            step = mt5.symbol_info(p.symbol).volume_step or 0.01
+            close_vol = max(step, round(round(close_vol / step) * step, 2))
+            is_buy = p.type == mt5.ORDER_TYPE_BUY
+            price = mt5.symbol_info_tick(p.symbol).bid if is_buy else mt5.symbol_info_tick(p.symbol).ask
+            otype = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "position": ticket_int,
+                "symbol": p.symbol,
+                "volume": close_vol,
+                "type": otype,
+                "price": price,
+                "deviation": 10,
+                "magic": 20250101,
+                "comment": "TW-PARTIAL",
+                "type_filling": mt5.ORDER_FILLING_FOK,
+            }
+            result = mt5.order_send(request)
+            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+                code = result.retcode if result else -1
+                return {"success": False, "error": f"Partial close failed: {code}"}
+            return {"success": True, "ticket": ticket, "closed_volume": close_vol}
 
     def close_trade(self, ticket: str, symbol: str = "") -> dict:
         """Fully close a position or cancel a pending order."""
-        self._ensure_connected()
         ticket_int = int(ticket) if ticket and ticket.isdigit() else 0
         if not ticket_int:
             if not symbol:
                 return {"success": False, "error": "No ticket or symbol"}
-            # Close all positions for symbol
-            return self._close_all_by_symbol(symbol)
-
+            with _mt5_lock:
+                self._ensure_connected()
+                return self._close_all_by_symbol(symbol)
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": "Closed"}
 
-        # Try as position first
-        pos = mt5.positions_get(ticket=ticket_int)
-        if pos:
-            return self._close_position(pos[0])
-
-        # Try as pending order
-        orders = mt5.orders_get(ticket=ticket_int)
-        if orders:
-            request = {"action": mt5.TRADE_ACTION_REMOVE, "order": ticket_int}
-            result = mt5.order_send(request)
-            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                return {"success": True, "ticket": ticket, "message": "Pending order cancelled"}
-            return {"success": False, "error": f"Cancel failed: {result.retcode if result else -1}"}
-
-        return {"success": False, "error": f"Position/order not found: {ticket}"}
+        with _mt5_lock:
+            self._ensure_connected()
+            pos = mt5.positions_get(ticket=ticket_int)
+            if pos:
+                return self._close_position(pos[0])
+            orders = mt5.orders_get(ticket=ticket_int)
+            if orders:
+                request = {"action": mt5.TRADE_ACTION_REMOVE, "order": ticket_int}
+                result = mt5.order_send(request)
+                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    return {"success": True, "ticket": ticket, "message": "Pending order cancelled"}
+                return {"success": False, "error": f"Cancel failed: {result.retcode if result else -1}"}
+            return {"success": False, "error": f"Position/order not found: {ticket}"}
 
     def get_positions(self) -> list:
         if not MT5_AVAILABLE:
             return []
-        self._ensure_connected()
-        positions = mt5.positions_get()
-        if not positions:
-            return []
-        return [
-            {
-                "ticket": p.ticket, "symbol": p.symbol,
-                "type": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
-                "volume": p.volume, "price_open": p.price_open,
-                "price_current": p.price_current, "sl": p.sl, "tp": p.tp,
-                "profit": p.profit, "comment": p.comment,
-            }
-            for p in positions
-        ]
+        with _mt5_lock:
+            self._ensure_connected()
+            positions = mt5.positions_get()
+            if not positions:
+                return []
+            return [
+                {
+                    "ticket": p.ticket, "symbol": p.symbol,
+                    "type": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+                    "volume": p.volume, "price_open": p.price_open,
+                    "price_current": p.price_current, "sl": p.sl, "tp": p.tp,
+                    "profit": p.profit, "comment": p.comment,
+                }
+                for p in positions
+            ]
 
     def get_candles(self, symbol: str, timeframe: str, count: int = 500) -> list:
         if not MT5_AVAILABLE:
             return []
-        self._ensure_connected()
-        symbol = self._normalize_symbol(symbol)
-        if not symbol:
-            return []
+        with _mt5_lock:
+            self._ensure_connected()
+            symbol = self._normalize_symbol(symbol)
+            if not symbol:
+                return []
 
-        tf_map = {
-            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
-            "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
-            "D1": mt5.TIMEFRAME_D1, "W1": mt5.TIMEFRAME_W1,
-        }
-        tf_id = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
-        rates = mt5.copy_rates_from_pos(symbol, tf_id, 0, min(count, 50000))
+            tf_map = {
+                "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+                "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
+                "D1": mt5.TIMEFRAME_D1, "W1": mt5.TIMEFRAME_W1,
+            }
+            tf_id = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
+            rates = mt5.copy_rates_from_pos(symbol, tf_id, 0, min(count, 50000))
+
         if rates is None or len(rates) == 0:
             return []
-
         result = []
         for r in rates:
             ts = datetime.utcfromtimestamp(int(r[0])).strftime("%Y-%m-%dT%H:%M:%S")
