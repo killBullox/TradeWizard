@@ -7,19 +7,18 @@ No subprocess, no HTTP, no connection loss.
 import logging
 import os
 import threading
+import concurrent.futures
 from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger("mt5_direct")
 
-# Global lock: the MetaTrader5 Python library is NOT thread-safe.
-# Concurrent calls (e.g. monitor_loop checking positions while analysis_loop
-# sends orders) corrupt the IPC pipe to the terminal, causing order_send
-# to return None with error -2. This lock serializes write operations
-# (order_send, connect, shutdown) to prevent IPC corruption.
-# Read operations (get_candles, get_positions, account_info) use a separate
-# lighter lock to avoid blocking the async event loop.
-_mt5_lock = threading.RLock()  # RLock allows reentrant calls (e.g. connect inside open_trade)
+# ALL MT5 calls must run on the SAME dedicated thread.
+# The MetaTrader5 library uses IPC to the terminal and is NOT safe for
+# concurrent access — even from the same thread if asyncio interleaves calls.
+# This executor ensures serialized, single-threaded access.
+_mt5_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt5")
+_mt5_lock = threading.Lock()  # extra safety within the single thread
 
 try:
     import MetaTrader5 as mt5
@@ -71,6 +70,24 @@ class MT5Direct:
         Does NOT verify account — that's _ensure_correct_account's job."""
         if not MT5_AVAILABLE or self.connected:
             return
+
+    def _fresh_connect(self):
+        """Shutdown + reinitialize MT5 for a clean IPC pipe. Called before every write operation."""
+        if not MT5_AVAILABLE:
+            return
+        mt5.shutdown()
+        kwargs = {}
+        if self.path:     kwargs["path"] = self.path
+        if self.login:    kwargs["login"] = self.login
+        if self.password: kwargs["password"] = self.password
+        if self.server:   kwargs["server"] = self.server
+        if not mt5.initialize(**kwargs):
+            logger.error("MT5 fresh_connect failed: %s", mt5.last_error())
+            return
+        info = mt5.account_info()
+        if info:
+            logger.debug("MT5 fresh connect OK — account %d", info.login)
+        self.connected = True
 
     def _ensure_correct_account(self):
         """Full check — verify connected to the RIGHT account. Used by write methods inside lock."""
@@ -145,7 +162,7 @@ class MT5Direct:
 
     def _check_margin_locked(self, symbol, direction, lots):
         """Must be called inside _mt5_lock."""
-        self._ensure_correct_account()
+        self._fresh_connect()
         symbol = self._normalize_symbol(symbol)
         if not symbol:
             return {"ok": False, "margin_required": 0, "margin_free": 0, "max_lots": 0,
@@ -235,7 +252,11 @@ class MT5Direct:
             return {"success": True, "ticket": str(ticket), "simulated": True}
 
         with _mt5_lock:
-            self._ensure_correct_account()
+            # ALWAYS do a fresh shutdown+initialize before order_send.
+            # The MT5 IPC pipe degrades over time and account_info() can
+            # succeed while order_send() returns None with error -2.
+            # A fresh init guarantees a clean pipe.
+            self._fresh_connect()
 
             # Normalize symbol
             symbol = self._normalize_symbol(symbol)
@@ -278,23 +299,15 @@ class MT5Direct:
             result = mt5.order_send(request)
             if result is None:
                 err = mt5.last_error()
-                logger.error("MT5 order_send returned None: %s", err)
-                # Full shutdown + reinitialize inside the lock
-                mt5.shutdown()
-                import time; time.sleep(1)
-                kwargs = {}
-                if self.path:     kwargs["path"] = self.path
-                if self.login:    kwargs["login"] = self.login
-                if self.password: kwargs["password"] = self.password
-                if self.server:   kwargs["server"] = self.server
-                mt5.initialize(**kwargs)
-                # Update price after reconnect
+                logger.error("MT5 order_send returned None (1st try): %s", err)
+                # Retry with fresh connect
+                self._fresh_connect()
                 tick = mt5.symbol_info_tick(symbol)
                 if tick:
                     request["price"] = tick.ask if is_buy else tick.bid
                 result = mt5.order_send(request)
                 if result is None:
-                    return {"success": False, "error": f"order_send None after reconnect: {mt5.last_error()}"}
+                    return {"success": False, "error": f"order_send None after retry: {mt5.last_error()}"}
 
             if result.retcode != mt5.TRADE_RETCODE_DONE:
                 logger.error("MT5 order failed: retcode=%d comment='%s'", result.retcode, result.comment)
@@ -312,7 +325,7 @@ class MT5Direct:
             return {"success": True, "ticket": ticket, "message": f"SL -> {new_sl}"}
 
         with _mt5_lock:
-            self._ensure_correct_account()
+            self._fresh_connect()
             pos = mt5.positions_get(ticket=ticket_int)
             if not pos:
                 return {"success": False, "error": f"Position not found: {ticket}"}
@@ -338,7 +351,7 @@ class MT5Direct:
             return {"success": True, "ticket": ticket, "message": f"Closed {percent}%"}
 
         with _mt5_lock:
-            self._ensure_correct_account()
+            self._fresh_connect()
             pos = mt5.positions_get(ticket=ticket_int)
             if not pos:
                 return {"success": False, "error": f"Position not found: {ticket}"}
@@ -374,13 +387,13 @@ class MT5Direct:
             if not symbol:
                 return {"success": False, "error": "No ticket or symbol"}
             with _mt5_lock:
-                self._ensure_correct_account()
+                self._fresh_connect()
                 return self._close_all_by_symbol(symbol)
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": "Closed"}
 
         with _mt5_lock:
-            self._ensure_correct_account()
+            self._fresh_connect()
             pos = mt5.positions_get(ticket=ticket_int)
             if pos:
                 return self._close_position(pos[0])
