@@ -276,28 +276,29 @@ def main():
         logger.error("Failed to initialize MT5 — exiting")
         sys.exit(1)
 
-    logger.info("Listening for commands on stdin...")
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            cmd = json.loads(line)
-            action = cmd.get("action", "")
-            handler = HANDLERS.get(action)
-            if handler:
-                result = handler(cmd)
-            else:
-                result = {"error": f"Unknown action: {action}"}
-        except Exception as e:
-            logger.error("Error: %s", e, exc_info=True)
-            result = {"error": str(e)}
-
-        sys.stdout.write(json.dumps(result) + "\n")
+    # Read single command from stdin, execute, output result, exit
+    line = sys.stdin.readline().strip()
+    if not line:
+        sys.stdout.write(json.dumps({"error": "No input"}) + "\n")
         sys.stdout.flush()
+        mt5.shutdown()
+        return
 
+    try:
+        cmd = json.loads(line)
+        action = cmd.get("action", "")
+        handler = HANDLERS.get(action)
+        if handler:
+            result = handler(cmd)
+        else:
+            result = {"error": f"Unknown action: {action}"}
+    except Exception as e:
+        logger.error("Error: %s", e, exc_info=True)
+        result = {"error": str(e)}
+
+    sys.stdout.write(json.dumps(result) + "\n")
+    sys.stdout.flush()
     mt5.shutdown()
-    logger.info("Worker stopped")
 
 
 if __name__ == "__main__":

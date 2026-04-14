@@ -38,53 +38,31 @@ class MT5Direct:
     # ── Worker subprocess for write operations ───────────────────────────
 
     def _ensure_worker(self):
-        """Start or restart the order worker subprocess."""
-        if self._worker and self._worker.poll() is None:
-            return  # already running
-
-        # Shutdown MT5 in parent process before spawning worker,
-        # so the worker gets a clean IPC pipe to the terminal.
-        if MT5_AVAILABLE:
-            mt5.shutdown()
-            self.connected = False
-
-        worker_script = os.path.join(os.path.dirname(__file__), "mt5_order_worker.py")
-        python = sys.executable
-        self._worker = subprocess.Popen(
-            [python, worker_script],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,  # inherit stderr for logging
-            text=True,
-            cwd=os.path.dirname(os.path.dirname(__file__)),
-        )
-        # Wait for init by sending a ping
-        result = self._send_to_worker({"action": "ping"})
-        if result and result.get("pong"):
-            logger.info("MT5 order worker started (PID %d)", self._worker.pid)
-        else:
-            logger.error("MT5 order worker failed to start: %s", result)
-
-        # Re-initialize MT5 in parent for read operations (candles, positions)
-        if MT5_AVAILABLE:
-            self._connect_impl()
-            logger.info("MT5 re-initialized in main process for read operations")
+        """No-op — kept for compatibility. Orders now use _run_order_script."""
+        pass
 
     def _send_to_worker(self, cmd: dict) -> dict:
-        """Send a command to the worker and get the response."""
+        """Launch a fresh Python process for each MT5 write operation.
+        Each process: initialize → execute → shutdown → exit.
+        This is the ONLY approach that works 100% reliably."""
         try:
-            self._ensure_worker()
-            self._worker.stdin.write(json.dumps(cmd) + "\n")
-            self._worker.stdin.flush()
-            line = self._worker.stdout.readline()
-            if not line:
-                logger.error("Worker returned empty response — restarting")
-                self._worker = None
-                return {"success": False, "error": "Worker died"}
-            return json.loads(line.strip())
+            worker_script = os.path.join(os.path.dirname(__file__), "mt5_order_worker.py")
+            proc = subprocess.run(
+                [sys.executable, worker_script],
+                input=json.dumps(cmd) + "\n",
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=os.path.dirname(os.path.dirname(__file__)),
+            )
+            if proc.stdout.strip():
+                return json.loads(proc.stdout.strip().split("\n")[-1])
+            logger.error("Worker produced no output. stderr: %s", proc.stderr[-500:] if proc.stderr else "")
+            return {"success": False, "error": "Worker produced no output"}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "Worker timed out (30s)"}
         except Exception as e:
-            logger.error("Worker communication error: %s — restarting", e)
-            self._worker = None
+            logger.error("Worker error: %s", e)
             return {"success": False, "error": str(e)}
 
     def connect(self) -> bool:
@@ -179,12 +157,10 @@ class MT5Direct:
         self.connected = False
 
     def worker_status(self) -> dict:
-        """Check if the order worker subprocess is running."""
+        """Worker is now per-request (fresh process each time). Always 'ready'."""
         if not MT5_AVAILABLE:
             return {"running": True, "simulated": True}
-        if self._worker and self._worker.poll() is None:
-            return {"running": True, "pid": self._worker.pid}
-        return {"running": False}
+        return {"running": True, "mode": "per-request"}
 
     def health(self) -> dict:
         if not MT5_AVAILABLE:
