@@ -43,6 +43,7 @@ class MT5Direct:
             return  # already running
         worker_script = os.path.join(os.path.dirname(__file__), "mt5_order_worker.py")
         python = sys.executable
+        env = os.environ.copy()
         self._worker = subprocess.Popen(
             [python, worker_script],
             stdin=subprocess.PIPE,
@@ -50,6 +51,8 @@ class MT5Direct:
             stderr=None,  # inherit stderr for logging
             text=True,
             cwd=os.path.dirname(os.path.dirname(__file__)),
+            env=env,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0,
         )
         # Wait for init by sending a ping
         result = self._send_to_worker({"action": "ping"})
