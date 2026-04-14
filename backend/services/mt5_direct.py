@@ -1,16 +1,11 @@
 """
-mt5_direct.py — MT5 interface with subprocess worker for order execution.
-
-Read operations (get_candles, get_positions, health) run in the main process.
-Write operations (open_trade, modify_sl, close, check_margin) run in a
-dedicated subprocess (mt5_order_worker.py) that keeps a clean IPC pipe.
+mt5_direct.py — Direct MT5 execution without HTTP bridge.
+Calls MetaTrader5 Python library directly from the backend process.
+No subprocess, no HTTP, no connection loss.
 """
 
 import logging
 import os
-import sys
-import json
-import subprocess
 from datetime import datetime
 from typing import Optional
 
@@ -33,39 +28,6 @@ class MT5Direct:
         self.login = int(os.getenv("MT5_LOGIN", "0"))
         self.password = os.getenv("MT5_PASSWORD", "")
         self.server = os.getenv("MT5_SERVER", "")
-        self._worker = None  # subprocess for order execution
-
-    # ── Worker subprocess for write operations ───────────────────────────
-
-    def _ensure_worker(self):
-        """No-op — kept for compatibility. Orders now use _run_order_script."""
-        pass
-
-    def _send_to_worker(self, cmd: dict) -> dict:
-        """Launch a fresh Python process for each MT5 write operation.
-        Each process: initialize → execute → shutdown → exit.
-        This is the ONLY approach that works 100% reliably."""
-        try:
-            worker_script = os.path.join(os.path.dirname(__file__), "mt5_order_worker.py")
-            proc = subprocess.run(
-                [sys.executable, worker_script],
-                input=json.dumps(cmd) + "\n",
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd=os.path.dirname(os.path.dirname(__file__)),
-            )
-
-            # Parent stays connected — worker uses its own MT5 session
-            if proc.stdout.strip():
-                return json.loads(proc.stdout.strip().split("\n")[-1])
-            logger.error("Worker produced no output. stderr: %s", proc.stderr[-500:] if proc.stderr else "")
-            return {"success": False, "error": "Worker produced no output"}
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Worker timed out (30s)"}
-        except Exception as e:
-            logger.error("Worker error: %s", e)
-            return {"success": False, "error": str(e)}
 
     def connect(self) -> bool:
         if not MT5_AVAILABLE:
@@ -96,11 +58,10 @@ class MT5Direct:
             return False
 
     def _ensure_connected(self):
-        """Reconnect if not connected (e.g. after worker shutdown the parent's session)."""
-        if not MT5_AVAILABLE:
+        """Quick check — only reconnect if MT5 is not responding at all.
+        Does NOT verify account — that's _ensure_correct_account's job."""
+        if not MT5_AVAILABLE or self.connected:
             return
-        if not self.connected:
-            self._connect_impl()
 
     def _fresh_connect(self):
         """Shutdown + reinitialize MT5 for a clean IPC pipe. Called before every write operation."""
@@ -159,12 +120,6 @@ class MT5Direct:
             mt5.shutdown()
         self.connected = False
 
-    def worker_status(self) -> dict:
-        """Worker is now per-request (fresh process each time). Always 'ready'."""
-        if not MT5_AVAILABLE:
-            return {"running": True, "simulated": True}
-        return {"running": True, "mode": "per-request"}
-
     def health(self) -> dict:
         if not MT5_AVAILABLE:
             return {"status": "ok", "mt5_available": False, "connected": True}
@@ -195,12 +150,7 @@ class MT5Direct:
     def check_margin(self, symbol: str, direction: str, lots: float) -> dict:
         if not MT5_AVAILABLE:
             return {"ok": True, "margin_required": 0, "margin_free": 99999, "max_lots": lots, "simulated": True}
-        return self._send_to_worker({
-            "action": "check_margin",
-            "symbol": symbol,
-            "direction": direction,
-            "lots": lots,
-        })
+        return self._check_margin_locked(symbol, direction, lots)
 
     def _check_margin_locked(self, symbol, direction, lots):
         """Check margin for the requested trade."""
@@ -276,26 +226,12 @@ class MT5Direct:
     # ── Trade execution ───────────────────────────────────────────────────
 
     def open_trade(self, signal: dict) -> dict:
-        """Open a trade via the dedicated worker subprocess."""
+        """Open a trade on MT5. Runs on dedicated MT5 thread."""
         if not MT5_AVAILABLE:
             ticket = int(datetime.now().timestamp())
+            logger.info("SIM OPEN %s %s @ lots=%.2f", signal.get("direction"), signal.get("symbol"), signal.get("lot_size", 0.01))
             return {"success": True, "ticket": str(ticket), "simulated": True}
-
-        result = self._send_to_worker({
-            "action": "order_send",
-            "symbol": signal.get("symbol", ""),
-            "direction": signal.get("direction", "BUY"),
-            "lot_size": float(signal.get("lot_size", 0.01)),
-            "sl": float(signal.get("stop_loss", 0)),
-            "tp": float(signal.get("take_profit", signal.get("take_profit_1", 0))),
-            "comment": signal.get("comment", "TW-ICT")[:31],
-        })
-        if result.get("success"):
-            logger.info("MT5 OPEN OK (worker): ticket=%s %s %s",
-                        result.get("ticket"), signal.get("direction"), signal.get("symbol"))
-        else:
-            logger.error("MT5 OPEN FAILED (worker): %s", result.get("error"))
-        return result
+        return self._open_trade_impl(signal)
 
     def _open_trade_impl(self, signal: dict) -> dict:
         symbol = signal.get("symbol", "")
@@ -349,9 +285,6 @@ class MT5Direct:
         logger.info("MT5 OPEN: %s %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
                      order_type, direction, symbol, lots, price, sl, tp)
 
-        # Fresh init immediately before order_send — NO other MT5 calls between
-        # fresh_connect and order_send (they corrupt the IPC pipe)
-        self._fresh_connect()
         result = mt5.order_send(request)
         if result is None:
             err = mt5.last_error()
@@ -378,7 +311,7 @@ class MT5Direct:
             return {"success": False, "error": f"Invalid ticket: {ticket}"}
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"SL -> {new_sl}"}
-        return self._send_to_worker({"action": "modify_sl", "ticket": ticket_int, "new_sl": new_sl})
+        return self._modify_sl_impl(ticket_int, new_sl)
 
     def _modify_sl_impl(self, ticket_int, new_sl):
         self._ensure_connected()
@@ -404,8 +337,7 @@ class MT5Direct:
             return {"success": False, "error": f"Invalid ticket: {ticket}"}
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"Closed {percent}%"}
-        # Close partial = close the ticket entirely (split positions handle partial via separate tickets)
-        return self._send_to_worker({"action": "close", "ticket": ticket_int})
+        return self._close_partial_impl(ticket_int, symbol, percent)
 
     def _close_partial_impl(self, ticket_int, symbol, percent):
         self._ensure_connected()
@@ -442,10 +374,10 @@ class MT5Direct:
         if not ticket_int:
             if not symbol:
                 return {"success": False, "error": "No ticket or symbol"}
-            return self._close_all_by_symbol(symbol)
+            return self._close_all_by_symbol_fresh(symbol)
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": "Closed"}
-        return self._send_to_worker({"action": "close", "ticket": ticket_int})
+        return self._close_trade_impl(ticket_int, symbol)
 
     def _close_all_by_symbol_fresh(self, symbol):
         self._ensure_connected()
