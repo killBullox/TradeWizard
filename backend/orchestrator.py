@@ -1498,10 +1498,9 @@ class Orchestrator:
             leverage = result.get("leverage", 0)
 
             # Budget: each trade gets at most margin_free / max_open_trades
-            # Use 80% of free margin as budget (leave 20% safety buffer).
-            # No division by max_trades — broker margins are already high enough
-            # to naturally limit position count.
-            margin_budget = margin_free * 0.8
+            # Budget per trade = free margin / max_open_trades
+            # This reserves equal margin for each potential trade slot.
+            margin_budget = margin_free / max(1, max_trades)
 
             # Check against the per-trade budget, not total margin_free
             if margin_req <= margin_budget:
