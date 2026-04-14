@@ -46,6 +46,10 @@ class MT5Direct:
         Each process: initialize → execute → shutdown → exit.
         This is the ONLY approach that works 100% reliably."""
         try:
+            # Shutdown MT5 in parent so subprocess gets a clean IPC pipe
+            if MT5_AVAILABLE:
+                mt5.shutdown()
+
             worker_script = os.path.join(os.path.dirname(__file__), "mt5_order_worker.py")
             proc = subprocess.run(
                 [sys.executable, worker_script],
@@ -55,6 +59,10 @@ class MT5Direct:
                 timeout=30,
                 cwd=os.path.dirname(os.path.dirname(__file__)),
             )
+
+            # Re-initialize MT5 in parent for read operations
+            if MT5_AVAILABLE:
+                self._connect_impl()
             if proc.stdout.strip():
                 return json.loads(proc.stdout.strip().split("\n")[-1])
             logger.error("Worker produced no output. stderr: %s", proc.stderr[-500:] if proc.stderr else "")
