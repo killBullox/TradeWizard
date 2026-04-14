@@ -356,7 +356,7 @@ class Orchestrator:
                  "sl_pips": pos.get("sl_pips"), "risk_mode": pos.get("risk_mode")})
 
             # 5b. Margin check — prevent 10019 "No money" errors
-            margin_ok = await self._check_margin(symbol, trade_params, rm_result, config)
+            margin_ok = await self._check_margin(symbol, trade_params, rm_result, config, open_count)
             if not margin_ok:
                 await self._log_agent("SYS", "REJECTED", f"Insufficient margin for {symbol}", trade_params)
                 await self.broadcast({"type": "trade_rejected", "symbol": symbol,
@@ -1474,9 +1474,9 @@ class Orchestrator:
             pass
         return trade_params
 
-    async def _check_margin(self, symbol: str, trade_params: dict, rm_result: dict, config: dict) -> bool:
+    async def _check_margin(self, symbol: str, trade_params: dict, rm_result: dict, config: dict, open_count: int = 0) -> bool:
         """Check MT5 margin before sending trade.
-        Budget per trade = margin_free / max_open_trades (so each trade gets a fair share).
+        Budget per trade = margin_free / remaining_slots.
         Reduces lot size if possible, rejects if not.
         Returns True if trade can proceed, False if rejected."""
         try:
@@ -1494,13 +1494,14 @@ class Orchestrator:
                 return True
 
             margin_free = result.get("margin_free", 0)
+            equity = result.get("equity", margin_free)
             margin_req = result.get("margin_required", 0)
             leverage = result.get("leverage", 0)
 
-            # Budget: each trade gets at most margin_free / max_open_trades
-            # Budget per trade = free margin / max_open_trades
-            # This reserves equal margin for each potential trade slot.
-            margin_budget = margin_free / max(1, max_trades)
+            # Budget per trade = free margin / remaining slots
+            # First trade: free/4, second: free/3, third: free/2, last: all free
+            remaining_slots = max(1, max_trades - open_count)
+            margin_budget = margin_free / remaining_slots
 
             # Check against the per-trade budget, not total margin_free
             if margin_req <= margin_budget:

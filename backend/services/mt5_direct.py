@@ -172,6 +172,7 @@ class MT5Direct:
                     "error": "Cannot get account info"}
 
         margin_free = account.margin_free
+        equity = account.equity
         leverage = account.leverage or 100
         is_buy = direction.upper() == "BUY"
         otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
@@ -199,7 +200,7 @@ class MT5Direct:
                 max_lots = lots if ok else self._find_max_lots(symbol, margin_free, sym_info, price, leverage)
                 return {"ok": ok, "margin_required": round(margin_est, 2),
                         "margin_free": round(margin_free, 2), "max_lots": max_lots,
-                        "leverage": leverage}
+                        "leverage": leverage, "equity": round(equity, 2)}
             return {"ok": False, "margin_required": 0, "margin_free": round(margin_free, 2),
                     "max_lots": 0, "leverage": leverage, "error": "order_check failed and no symbol info"}
 
