@@ -214,6 +214,24 @@ class Orchestrator:
             config     = await self._load_config(s)
             open_count = await self._count_open_trades(s)
 
+        # Override account_balance with real MT5 balance (not static config)
+        try:
+            from services.mt5_direct import get_mt5_direct
+            mt5_info = get_mt5_direct().get_account_info()
+            if not mt5_info.get("error") and not mt5_info.get("simulated"):
+                real_balance = mt5_info.get("balance", 0)
+                real_equity = mt5_info.get("equity", 0)
+                if real_balance > 0:
+                    config["account_balance"] = str(real_balance)
+                    config["_mt5_equity"] = str(real_equity)
+                    config["_mt5_margin_free"] = str(mt5_info.get("margin_free", 0))
+                    config["_mt5_leverage"] = str(mt5_info.get("leverage", 100))
+                    logger.info("MT5 live balance: $%.2f (equity $%.2f, free $%.2f, leva 1:%s)",
+                                real_balance, real_equity,
+                                mt5_info.get("margin_free", 0), mt5_info.get("leverage", 100))
+        except Exception as exc:
+            logger.warning("Could not read MT5 balance, using config value: %s", exc)
+
         pairs = json.loads(pairs_raw or '["EURUSD","GBPUSD"]')
 
         await self.broadcast({
