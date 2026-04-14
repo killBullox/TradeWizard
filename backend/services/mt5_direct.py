@@ -67,25 +67,35 @@ class MT5Direct:
             return False
 
     def _ensure_connected(self):
-        """Must be called INSIDE _mt5_lock."""
+        """Verify we are connected to the CORRECT MT5 account (not another terminal)."""
         if not MT5_AVAILABLE:
             return
         info = mt5.account_info()
-        if info is None:
-            logger.warning("MT5 disconnected — reconnecting...")
+        # Check not just connected, but connected to the RIGHT account
+        wrong_account = (info is not None and self.login and info.login != self.login)
+        if info is None or wrong_account:
+            if wrong_account:
+                logger.warning("MT5 connected to WRONG account %d (expected %d) — reconnecting to correct terminal...",
+                               info.login, self.login)
+            else:
+                logger.warning("MT5 disconnected — reconnecting...")
+            mt5.shutdown()
             for attempt in range(3):
-                mt5.shutdown()
                 kwargs = {}
                 if self.path:     kwargs["path"] = self.path
                 if self.login:    kwargs["login"] = self.login
                 if self.password: kwargs["password"] = self.password
                 if self.server:   kwargs["server"] = self.server
                 if mt5.initialize(**kwargs):
-                    self.connected = True
-                    logger.info("MT5 reconnected (attempt %d)", attempt + 1)
-                    return
+                    check = mt5.account_info()
+                    if check and (not self.login or check.login == self.login):
+                        self.connected = True
+                        logger.info("MT5 reconnected to account %d (attempt %d)", check.login, attempt + 1)
+                        return
+                    logger.warning("MT5 init OK but wrong account %d, retrying...", check.login if check else 0)
+                    mt5.shutdown()
                 import time; time.sleep(2)
-            logger.error("MT5 reconnect failed after 3 attempts")
+            logger.error("MT5 reconnect to correct account failed after 3 attempts")
 
     def disconnect(self):
         with _mt5_lock:
