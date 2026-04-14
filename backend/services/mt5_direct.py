@@ -15,8 +15,11 @@ logger = logging.getLogger("mt5_direct")
 # Global lock: the MetaTrader5 Python library is NOT thread-safe.
 # Concurrent calls (e.g. monitor_loop checking positions while analysis_loop
 # sends orders) corrupt the IPC pipe to the terminal, causing order_send
-# to return None with error -2. This lock serializes ALL MT5 calls.
-_mt5_lock = threading.Lock()
+# to return None with error -2. This lock serializes write operations
+# (order_send, connect, shutdown) to prevent IPC corruption.
+# Read operations (get_candles, get_positions, account_info) use a separate
+# lighter lock to avoid blocking the async event loop.
+_mt5_lock = threading.RLock()  # RLock allows reentrant calls (e.g. connect inside open_trade)
 
 try:
     import MetaTrader5 as mt5
@@ -93,20 +96,18 @@ class MT5Direct:
     def health(self) -> dict:
         if not MT5_AVAILABLE:
             return {"status": "ok", "mt5_available": False, "connected": True}
-        with _mt5_lock:
-            info = mt5.account_info()
-            return {
-                "status": "ok",
-                "mt5_available": True,
-                "connected": info is not None,
-            }
+        info = mt5.account_info()
+        return {
+            "status": "ok",
+            "mt5_available": True,
+            "connected": info is not None,
+        }
 
     def get_account_info(self) -> dict:
         if not MT5_AVAILABLE:
             return {"balance": 10000.0, "equity": 10000.0, "currency": "USD", "simulated": True}
-        with _mt5_lock:
-            self._ensure_connected()
-            info = mt5.account_info()
+        self._ensure_connected()
+        info = mt5.account_info()
         if not info:
             return {"error": "Not connected"}
         return {
@@ -380,38 +381,36 @@ class MT5Direct:
     def get_positions(self) -> list:
         if not MT5_AVAILABLE:
             return []
-        with _mt5_lock:
-            self._ensure_connected()
-            positions = mt5.positions_get()
-            if not positions:
-                return []
-            return [
-                {
-                    "ticket": p.ticket, "symbol": p.symbol,
-                    "type": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
-                    "volume": p.volume, "price_open": p.price_open,
-                    "price_current": p.price_current, "sl": p.sl, "tp": p.tp,
-                    "profit": p.profit, "comment": p.comment,
-                }
-                for p in positions
-            ]
+        self._ensure_connected()
+        positions = mt5.positions_get()
+        if not positions:
+            return []
+        return [
+            {
+                "ticket": p.ticket, "symbol": p.symbol,
+                "type": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+                "volume": p.volume, "price_open": p.price_open,
+                "price_current": p.price_current, "sl": p.sl, "tp": p.tp,
+                "profit": p.profit, "comment": p.comment,
+            }
+            for p in positions
+        ]
 
     def get_candles(self, symbol: str, timeframe: str, count: int = 500) -> list:
         if not MT5_AVAILABLE:
             return []
-        with _mt5_lock:
-            self._ensure_connected()
-            symbol = self._normalize_symbol(symbol)
-            if not symbol:
-                return []
+        self._ensure_connected()
+        symbol = self._normalize_symbol(symbol)
+        if not symbol:
+            return []
 
-            tf_map = {
-                "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
-                "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
-                "D1": mt5.TIMEFRAME_D1, "W1": mt5.TIMEFRAME_W1,
-            }
-            tf_id = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
-            rates = mt5.copy_rates_from_pos(symbol, tf_id, 0, min(count, 50000))
+        tf_map = {
+            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1, "W1": mt5.TIMEFRAME_W1,
+        }
+        tf_id = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
+        rates = mt5.copy_rates_from_pos(symbol, tf_id, 0, min(count, 50000))
 
         if rates is None or len(rates) == 0:
             return []
