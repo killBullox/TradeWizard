@@ -245,7 +245,9 @@ class MT5Direct:
         raw_comment = signal.get("comment", "TW-ICT")[:31]
         comment = ''.join(c for c in raw_comment if c.isascii() and (c.isalnum() or c in ' -_.'))[:31] or "TW"
 
-        self._ensure_connected()
+        # Always do fresh shutdown+init before order_send.
+        # Without this, order_send returns None even though account_info works.
+        self._fresh_connect()
 
         # Normalize symbol
         symbol = self._normalize_symbol(symbol)
