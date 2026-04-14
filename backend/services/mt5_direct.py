@@ -245,9 +245,7 @@ class MT5Direct:
         raw_comment = signal.get("comment", "TW-ICT")[:31]
         comment = ''.join(c for c in raw_comment if c.isascii() and (c.isalnum() or c in ' -_.'))[:31] or "TW"
 
-        # Always do fresh shutdown+init before order_send.
-        # Without this, order_send returns None even though account_info works.
-        self._fresh_connect()
+        self._ensure_connected()
 
         # Normalize symbol
         symbol = self._normalize_symbol(symbol)
@@ -286,6 +284,14 @@ class MT5Direct:
 
         logger.info("MT5 OPEN: %s %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
                      order_type, direction, symbol, lots, price, sl, tp)
+
+        # Fresh init immediately before order_send — any prior MT5 call
+        # (symbol_info, symbol_select, copy_rates) corrupts the IPC pipe
+        self._fresh_connect()
+        # Re-fetch price after fresh init
+        tick = mt5.symbol_info_tick(symbol)
+        if tick:
+            request["price"] = tick.ask if is_buy else tick.bid
 
         result = mt5.order_send(request)
         if result is None:
