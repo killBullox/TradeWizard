@@ -50,17 +50,16 @@ class MT5Direct:
         if self.password: kwargs["password"] = self.password
         if self.server:   kwargs["server"] = self.server
 
-        with _mt5_lock:
-            for attempt in range(3):
-                if mt5.initialize(**kwargs):
-                    info = mt5.account_info()
-                    if info:
-                        logger.info("MT5 connected — Account %s | Balance %.2f %s",
-                                    info.login, info.balance, info.currency)
-                    self.connected = True
-                    return True
-                logger.warning("MT5 connect attempt %d/3 failed", attempt + 1)
-                import time; time.sleep(2)
+        for attempt in range(3):
+            if mt5.initialize(**kwargs):
+                info = mt5.account_info()
+                if info:
+                    logger.info("MT5 connected — Account %s | Balance %.2f %s",
+                                info.login, info.balance, info.currency)
+                self.connected = True
+                return True
+            logger.warning("MT5 connect attempt %d/3 failed", attempt + 1)
+            import time; time.sleep(2)
 
             logger.error("MT5 connection failed after 3 attempts: %s", mt5.last_error() if MT5_AVAILABLE else "N/A")
             return False
@@ -120,10 +119,9 @@ class MT5Direct:
             logger.error("MT5 reconnect to correct account failed after 3 attempts")
 
     def disconnect(self):
-        with _mt5_lock:
-            if MT5_AVAILABLE and self.connected:
-                mt5.shutdown()
-            self.connected = False
+        if MT5_AVAILABLE and self.connected:
+            mt5.shutdown()
+        self.connected = False
 
     def health(self) -> dict:
         if not MT5_AVAILABLE:
