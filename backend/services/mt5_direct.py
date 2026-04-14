@@ -6,17 +6,10 @@ No subprocess, no HTTP, no connection loss.
 
 import logging
 import os
-import concurrent.futures
 from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger("mt5_direct")
-
-# Single-thread executor: the MT5 library binds its IPC pipe to the thread
-# that calls initialize(). ALL MT5 calls must happen on the same thread.
-# asyncio.to_thread uses the default executor which can dispatch to ANY thread.
-# This dedicated executor guarantees same-thread access.
-_mt5_thread = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt5")
 
 try:
     import MetaTrader5 as mt5
@@ -36,16 +29,12 @@ class MT5Direct:
         self.password = os.getenv("MT5_PASSWORD", "")
         self.server = os.getenv("MT5_SERVER", "")
 
-    def run_on_mt5_thread(self, fn, *args):
-        """Run a function on the dedicated MT5 thread. Use this for ALL MT5 calls."""
-        return _mt5_thread.submit(fn, *args).result()
-
     def connect(self) -> bool:
         if not MT5_AVAILABLE:
             logger.info("MT5 not available — simulation mode")
             self.connected = True
             return True
-        return self.run_on_mt5_thread(self._connect_impl)
+        return self._connect_impl()
 
     def _connect_impl(self) -> bool:
         kwargs = {}
@@ -134,7 +123,7 @@ class MT5Direct:
     def health(self) -> dict:
         if not MT5_AVAILABLE:
             return {"status": "ok", "mt5_available": False, "connected": True}
-        return self.run_on_mt5_thread(self._health_impl)
+        return self._health_impl()
 
     def _health_impl(self):
         info = mt5.account_info()
@@ -143,7 +132,7 @@ class MT5Direct:
     def get_account_info(self) -> dict:
         if not MT5_AVAILABLE:
             return {"balance": 10000.0, "equity": 10000.0, "currency": "USD", "simulated": True}
-        return self.run_on_mt5_thread(self._get_account_info_impl)
+        return self._get_account_info_impl()
 
     def _get_account_info_impl(self):
         self._ensure_connected()
@@ -161,7 +150,7 @@ class MT5Direct:
     def check_margin(self, symbol: str, direction: str, lots: float) -> dict:
         if not MT5_AVAILABLE:
             return {"ok": True, "margin_required": 0, "margin_free": 99999, "max_lots": lots, "simulated": True}
-        return self.run_on_mt5_thread(self._check_margin_locked, symbol, direction, lots)
+        return self._check_margin_locked(symbol, direction, lots)
 
     def _check_margin_locked(self, symbol, direction, lots):
         """Check margin for the requested trade."""
@@ -242,7 +231,7 @@ class MT5Direct:
             ticket = int(datetime.now().timestamp())
             logger.info("SIM OPEN %s %s @ lots=%.2f", signal.get("direction"), signal.get("symbol"), signal.get("lot_size", 0.01))
             return {"success": True, "ticket": str(ticket), "simulated": True}
-        return self.run_on_mt5_thread(self._open_trade_impl, signal)
+        return self._open_trade_impl(signal)
 
     def _open_trade_impl(self, signal: dict) -> dict:
         symbol = signal.get("symbol", "")
@@ -325,7 +314,7 @@ class MT5Direct:
             return {"success": False, "error": f"Invalid ticket: {ticket}"}
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"SL -> {new_sl}"}
-        return self.run_on_mt5_thread(self._modify_sl_impl, ticket_int, new_sl)
+        return self._modify_sl_impl(ticket_int, new_sl)
 
     def _modify_sl_impl(self, ticket_int, new_sl):
         self._fresh_connect()
@@ -351,7 +340,7 @@ class MT5Direct:
             return {"success": False, "error": f"Invalid ticket: {ticket}"}
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"Closed {percent}%"}
-        return self.run_on_mt5_thread(self._close_partial_impl, ticket_int, symbol, percent)
+        return self._close_partial_impl(ticket_int, symbol, percent)
 
     def _close_partial_impl(self, ticket_int, symbol, percent):
         self._fresh_connect()
@@ -388,10 +377,10 @@ class MT5Direct:
         if not ticket_int:
             if not symbol:
                 return {"success": False, "error": "No ticket or symbol"}
-            return self.run_on_mt5_thread(self._close_all_by_symbol_fresh, symbol)
+            return self._close_all_by_symbol_fresh(symbol)
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": "Closed"}
-        return self.run_on_mt5_thread(self._close_trade_impl, ticket_int, symbol)
+        return self._close_trade_impl(ticket_int, symbol)
 
     def _close_all_by_symbol_fresh(self, symbol):
         self._fresh_connect()
@@ -414,7 +403,7 @@ class MT5Direct:
     def get_positions(self) -> list:
         if not MT5_AVAILABLE:
             return []
-        return self.run_on_mt5_thread(self._get_positions_impl)
+        return self._get_positions_impl()
 
     def _get_positions_impl(self):
         self._ensure_connected()
@@ -435,7 +424,7 @@ class MT5Direct:
     def get_candles(self, symbol: str, timeframe: str, count: int = 500) -> list:
         if not MT5_AVAILABLE:
             return []
-        return self.run_on_mt5_thread(self._get_candles_impl, symbol, timeframe, count)
+        return self._get_candles_impl(symbol, timeframe, count)
 
     def _get_candles_impl(self, symbol, timeframe, count):
         self._ensure_connected()
