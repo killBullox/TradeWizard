@@ -1348,6 +1348,53 @@ async def mt5_account():
         return {"error": str(e)}
 
 
+@app.get("/api/mt5/test-order")
+async def mt5_test_order():
+    """Test MT5 order_send with 0.01 lot EURUSD (opens and immediately closes)."""
+    try:
+        import MetaTrader5 as _mt5
+        from services.mt5_direct import get_mt5_direct
+        m = get_mt5_direct()
+        # Fresh init
+        _mt5.shutdown()
+        kwargs = {}
+        if m.path: kwargs["path"] = m.path
+        if m.login: kwargs["login"] = m.login
+        if m.password: kwargs["password"] = m.password
+        if m.server: kwargs["server"] = m.server
+        init_ok = _mt5.initialize(**kwargs)
+        info = _mt5.account_info()
+        tick = _mt5.symbol_info_tick("EURUSD")
+        if not tick:
+            return {"error": "No tick", "init": init_ok, "account": info.login if info else None}
+        # order_check first
+        check = _mt5.order_check({
+            "action": _mt5.TRADE_ACTION_DEAL, "symbol": "EURUSD",
+            "volume": 0.01, "type": _mt5.ORDER_TYPE_BUY, "price": tick.ask,
+        })
+        check_result = {"retcode": check.retcode, "comment": check.comment} if check else {"error": "None", "last_error": str(_mt5.last_error())}
+        # order_send
+        r = _mt5.order_send({
+            "action": _mt5.TRADE_ACTION_DEAL, "symbol": "EURUSD",
+            "volume": 0.01, "type": _mt5.ORDER_TYPE_BUY, "price": tick.ask,
+            "deviation": 10, "magic": 99999, "comment": "TW-DIAG",
+            "type_time": _mt5.ORDER_TIME_GTC, "type_filling": _mt5.ORDER_FILLING_FOK,
+        })
+        send_result = {"retcode": r.retcode, "comment": r.comment, "ticket": r.order} if r else {"error": "None", "last_error": str(_mt5.last_error())}
+        # Close immediately if opened
+        if r and r.retcode == 10009:
+            _mt5.order_send({
+                "action": _mt5.TRADE_ACTION_DEAL, "symbol": "EURUSD",
+                "volume": 0.01, "type": _mt5.ORDER_TYPE_SELL, "price": tick.bid,
+                "position": r.order, "deviation": 10, "magic": 99999,
+                "comment": "TW-DIAG-CLOSE", "type_filling": _mt5.ORDER_FILLING_FOK,
+            })
+        return {"init": init_ok, "account": info.login if info else None,
+                "order_check": check_result, "order_send": send_result}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/broker/accounts")
 async def list_broker_accounts():
     """List all MT5 accounts."""
