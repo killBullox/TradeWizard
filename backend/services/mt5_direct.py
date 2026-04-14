@@ -150,7 +150,7 @@ class MT5Direct:
 
     def _check_margin_locked(self, symbol, direction, lots):
         """Check margin for the requested trade."""
-        self._fresh_connect()
+        self._ensure_connected()
         symbol = self._normalize_symbol(symbol)
         if not symbol:
             return {"ok": False, "margin_required": 0, "margin_free": 0, "max_lots": 0,
@@ -239,11 +239,10 @@ class MT5Direct:
             logger.info("SIM OPEN %s %s %s @ %.5f lots=%.2f", order_type, direction, symbol, entry, lots)
             return {"success": True, "ticket": str(ticket), "simulated": True}
 
-        # ALWAYS do a fresh shutdown+initialize before order_send.
-        # The MT5 IPC pipe degrades over time and account_info() can
-        # succeed while order_send() returns None with error -2.
-        # A fresh init guarantees a clean pipe.
-        self._ensure_correct_account()
+        # Fresh shutdown+init before every order_send.
+        # TradeMachine runs in a separate process and also uses the MT5 library,
+        # which corrupts the shared IPC pipe. A fresh init reclaims the pipe.
+        self._fresh_connect()
 
         # Normalize symbol
         symbol = self._normalize_symbol(symbol)
@@ -311,7 +310,7 @@ class MT5Direct:
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"SL -> {new_sl}"}
 
-        self._ensure_correct_account()
+        self._fresh_connect()
         pos = mt5.positions_get(ticket=ticket_int)
         if not pos:
             return {"success": False, "error": f"Position not found: {ticket}"}
@@ -336,7 +335,7 @@ class MT5Direct:
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"Closed {percent}%"}
 
-        self._ensure_correct_account()
+        self._fresh_connect()
         pos = mt5.positions_get(ticket=ticket_int)
         if not pos:
             return {"success": False, "error": f"Position not found: {ticket}"}
@@ -371,12 +370,12 @@ class MT5Direct:
         if not ticket_int:
             if not symbol:
                 return {"success": False, "error": "No ticket or symbol"}
-            self._ensure_correct_account()
+            self._fresh_connect()
             return self._close_all_by_symbol(symbol)
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": "Closed"}
 
-        self._ensure_correct_account()
+        self._fresh_connect()
         pos = mt5.positions_get(ticket=ticket_int)
         if pos:
             return self._close_position(pos[0])
