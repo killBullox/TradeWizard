@@ -363,6 +363,8 @@ class Orchestrator:
                                       "reason": "Insufficient margin (10019 prevention)", "agent": "SYS"})
                 return
 
+            logger.info(">>> MARGIN CHECK PASSED for %s, lot_size=%.2f — proceeding to sanity check", symbol, float(trade_params.get("lot_size", 0)))
+
             # 6. Hard mathematical sanity check — the ONLY gatekeeper after RM approval
             # AT validation removed: was blocking valid trades despite clear "APPROVE" prompt.
             # Sanity check covers all critical defects (SL/TP side, min SL, net RR) in code.
