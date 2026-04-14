@@ -67,18 +67,10 @@ class MT5Direct:
             return False
 
     def _ensure_connected(self):
-        """Quick check — just verify MT5 responds. Used by read-only methods."""
-        if not MT5_AVAILABLE:
+        """Quick check — only reconnect if MT5 is not responding at all.
+        Does NOT verify account — that's _ensure_correct_account's job."""
+        if not MT5_AVAILABLE or self.connected:
             return
-        info = mt5.account_info()
-        if info is None:
-            logger.warning("MT5 disconnected — quick reconnect...")
-            kwargs = {}
-            if self.path:     kwargs["path"] = self.path
-            if self.login:    kwargs["login"] = self.login
-            if self.password: kwargs["password"] = self.password
-            if self.server:   kwargs["server"] = self.server
-            mt5.initialize(**kwargs)
 
     def _ensure_correct_account(self):
         """Full check — verify connected to the RIGHT account. Used by write methods inside lock."""
