@@ -102,6 +102,8 @@ def _start_mt5_direct():
             logger.info("MT5 direct connection established")
         else:
             logger.warning("MT5 direct connection failed — will retry on first trade")
+        # Start the order worker subprocess immediately
+        mt5._ensure_worker()
     except Exception as exc:
         logger.warning("Could not initialize MT5 direct: %s", exc)
 
