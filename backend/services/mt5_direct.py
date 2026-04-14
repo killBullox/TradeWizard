@@ -245,10 +245,7 @@ class MT5Direct:
         raw_comment = signal.get("comment", "TW-ICT")[:31]
         comment = ''.join(c for c in raw_comment if c.isascii() and (c.isalnum() or c in ' -_.'))[:31] or "TW"
 
-        # Fresh shutdown+init before every order_send.
-        # TradeMachine runs in a separate process and also uses the MT5 library,
-        # which corrupts the shared IPC pipe. A fresh init reclaims the pipe.
-        self._fresh_connect()
+        self._ensure_connected()
 
         # Normalize symbol
         symbol = self._normalize_symbol(symbol)
@@ -317,7 +314,7 @@ class MT5Direct:
         return self._modify_sl_impl(ticket_int, new_sl)
 
     def _modify_sl_impl(self, ticket_int, new_sl):
-        self._fresh_connect()
+        self._ensure_connected()
         pos = mt5.positions_get(ticket=ticket_int)
         if not pos:
             return {"success": False, "error": f"Position not found: {ticket}"}
@@ -343,7 +340,7 @@ class MT5Direct:
         return self._close_partial_impl(ticket_int, symbol, percent)
 
     def _close_partial_impl(self, ticket_int, symbol, percent):
-        self._fresh_connect()
+        self._ensure_connected()
         pos = mt5.positions_get(ticket=ticket_int)
         if not pos:
             return {"success": False, "error": f"Position not found: {ticket}"}
@@ -383,11 +380,11 @@ class MT5Direct:
         return self._close_trade_impl(ticket_int, symbol)
 
     def _close_all_by_symbol_fresh(self, symbol):
-        self._fresh_connect()
+        self._ensure_connected()
         return self._close_all_by_symbol(symbol)
 
     def _close_trade_impl(self, ticket_int, symbol):
-        self._fresh_connect()
+        self._ensure_connected()
         pos = mt5.positions_get(ticket=ticket_int)
         if pos:
             return self._close_position(pos[0])
