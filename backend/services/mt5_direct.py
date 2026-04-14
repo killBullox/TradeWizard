@@ -6,19 +6,10 @@ No subprocess, no HTTP, no connection loss.
 
 import logging
 import os
-import threading
-import concurrent.futures
 from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger("mt5_direct")
-
-# ALL MT5 calls must run on the SAME dedicated thread.
-# The MetaTrader5 library uses IPC to the terminal and is NOT safe for
-# concurrent access — even from the same thread if asyncio interleaves calls.
-# This executor ensures serialized, single-threaded access.
-_mt5_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="mt5")
-_mt5_lock = threading.Lock()  # extra safety within the single thread
 
 try:
     import MetaTrader5 as mt5
@@ -155,11 +146,10 @@ class MT5Direct:
         if not MT5_AVAILABLE:
             return {"ok": True, "margin_required": 0, "margin_free": 99999, "max_lots": lots, "simulated": True}
 
-        with _mt5_lock:
-            return self._check_margin_locked(symbol, direction, lots)
+        return self._check_margin_locked(symbol, direction, lots)
 
     def _check_margin_locked(self, symbol, direction, lots):
-        """Must be called inside _mt5_lock."""
+        """Check margin for the requested trade."""
         self._fresh_connect()
         symbol = self._normalize_symbol(symbol)
         if not symbol:
@@ -172,7 +162,6 @@ class MT5Direct:
                     "error": "Cannot get account info"}
 
         margin_free = account.margin_free
-        equity = account.equity
         leverage = account.leverage or 100
         is_buy = direction.upper() == "BUY"
         otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
@@ -200,7 +189,7 @@ class MT5Direct:
                 max_lots = lots if ok else self._find_max_lots(symbol, margin_free, sym_info, price, leverage)
                 return {"ok": ok, "margin_required": round(margin_est, 2),
                         "margin_free": round(margin_free, 2), "max_lots": max_lots,
-                        "leverage": leverage, "equity": round(equity, 2)}
+                        "leverage": leverage}
             return {"ok": False, "margin_required": 0, "margin_free": round(margin_free, 2),
                     "max_lots": 0, "leverage": leverage, "error": "order_check failed and no symbol info"}
 
@@ -250,70 +239,69 @@ class MT5Direct:
             logger.info("SIM OPEN %s %s %s @ %.5f lots=%.2f", order_type, direction, symbol, entry, lots)
             return {"success": True, "ticket": str(ticket), "simulated": True}
 
-        with _mt5_lock:
-            # ALWAYS do a fresh shutdown+initialize before order_send.
-            # The MT5 IPC pipe degrades over time and account_info() can
-            # succeed while order_send() returns None with error -2.
-            # A fresh init guarantees a clean pipe.
-            self._ensure_correct_account()
+        # ALWAYS do a fresh shutdown+initialize before order_send.
+        # The MT5 IPC pipe degrades over time and account_info() can
+        # succeed while order_send() returns None with error -2.
+        # A fresh init guarantees a clean pipe.
+        self._ensure_correct_account()
 
-            # Normalize symbol
-            symbol = self._normalize_symbol(symbol)
-            if not symbol:
-                return {"success": False, "error": f"Symbol not found: {signal.get('symbol')}"}
+        # Normalize symbol
+        symbol = self._normalize_symbol(symbol)
+        if not symbol:
+            return {"success": False, "error": f"Symbol not found: {signal.get('symbol')}"}
 
-            # Normalize lots
-            lots = self._normalize_lots(symbol, lots)
+        # Normalize lots
+        lots = self._normalize_lots(symbol, lots)
 
-            is_buy = direction.upper() == "BUY"
+        is_buy = direction.upper() == "BUY"
 
-            # ALWAYS use MARKET orders for intraday trading — no pending orders
+        # ALWAYS use MARKET orders for intraday trading — no pending orders
+        tick = mt5.symbol_info_tick(symbol)
+        if not tick:
+            return {"success": False, "error": f"No tick data for {symbol}"}
+        price = tick.ask if is_buy else tick.bid
+        action = mt5.TRADE_ACTION_DEAL
+        otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
+        if order_type.upper() != "MARKET":
+            logger.info("Overriding %s to MARKET for %s %s", order_type, direction, symbol)
+
+        request = {
+            "action": action,
+            "symbol": symbol,
+            "volume": lots,
+            "type": otype,
+            "price": price,
+            "sl": sl,
+            "tp": tp,
+            "deviation": 10,
+            "magic": 20250101,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_FOK,
+        }
+
+        logger.info("MT5 OPEN: %s %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
+                     order_type, direction, symbol, lots, price, sl, tp)
+
+        result = mt5.order_send(request)
+        if result is None:
+            err = mt5.last_error()
+            logger.error("MT5 order_send returned None (1st try): %s", err)
+            # Retry with fresh shutdown+init (clean pipe)
+            self._fresh_connect()
             tick = mt5.symbol_info_tick(symbol)
-            if not tick:
-                return {"success": False, "error": f"No tick data for {symbol}"}
-            price = tick.ask if is_buy else tick.bid
-            action = mt5.TRADE_ACTION_DEAL
-            otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
-            if order_type.upper() != "MARKET":
-                logger.info("Overriding %s to MARKET for %s %s", order_type, direction, symbol)
-
-            request = {
-                "action": action,
-                "symbol": symbol,
-                "volume": lots,
-                "type": otype,
-                "price": price,
-                "sl": sl,
-                "tp": tp,
-                "deviation": 10,
-                "magic": 20250101,
-                "comment": comment,
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_FOK,
-            }
-
-            logger.info("MT5 OPEN: %s %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
-                         order_type, direction, symbol, lots, price, sl, tp)
-
+            if tick:
+                request["price"] = tick.ask if is_buy else tick.bid
             result = mt5.order_send(request)
             if result is None:
-                err = mt5.last_error()
-                logger.error("MT5 order_send returned None (1st try): %s", err)
-                # Retry with fresh shutdown+init (clean pipe)
-                self._fresh_connect()
-                tick = mt5.symbol_info_tick(symbol)
-                if tick:
-                    request["price"] = tick.ask if is_buy else tick.bid
-                result = mt5.order_send(request)
-                if result is None:
-                    return {"success": False, "error": f"order_send None after retry: {mt5.last_error()}"}
+                return {"success": False, "error": f"order_send None after retry: {mt5.last_error()}"}
 
-            if result.retcode != mt5.TRADE_RETCODE_DONE:
-                logger.error("MT5 order failed: retcode=%d comment='%s'", result.retcode, result.comment)
-                return {"success": False, "error": f"retcode {result.retcode}: {result.comment}"}
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error("MT5 order failed: retcode=%d comment='%s'", result.retcode, result.comment)
+            return {"success": False, "error": f"retcode {result.retcode}: {result.comment}"}
 
-            logger.info("MT5 OPEN OK: ticket=%s %s %s %s @ %.5f", result.order, order_type, direction, symbol, price)
-            return {"success": True, "ticket": str(result.order), "message": "Order placed"}
+        logger.info("MT5 OPEN OK: ticket=%s %s %s %s @ %.5f", result.order, order_type, direction, symbol, price)
+        return {"success": True, "ticket": str(result.order), "message": "Order placed"}
 
     def modify_sl(self, ticket: str, new_sl: float, symbol: str = "") -> dict:
         """Modify stop loss of an open position."""
@@ -323,23 +311,22 @@ class MT5Direct:
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"SL -> {new_sl}"}
 
-        with _mt5_lock:
-            self._ensure_correct_account()
-            pos = mt5.positions_get(ticket=ticket_int)
-            if not pos:
-                return {"success": False, "error": f"Position not found: {ticket}"}
-            p = pos[0]
-            request = {
-                "action": mt5.TRADE_ACTION_SLTP,
-                "position": ticket_int,
-                "sl": new_sl,
-                "tp": p.tp,
-            }
-            result = mt5.order_send(request)
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                code = result.retcode if result else -1
-                return {"success": False, "error": f"SLTP failed: {code}"}
-            return {"success": True, "ticket": ticket, "message": f"SL modified to {new_sl}"}
+        self._ensure_correct_account()
+        pos = mt5.positions_get(ticket=ticket_int)
+        if not pos:
+            return {"success": False, "error": f"Position not found: {ticket}"}
+        p = pos[0]
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket_int,
+            "sl": new_sl,
+            "tp": p.tp,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            code = result.retcode if result else -1
+            return {"success": False, "error": f"SLTP failed: {code}"}
+        return {"success": True, "ticket": ticket, "message": f"SL modified to {new_sl}"}
 
     def close_partial(self, ticket: str, symbol: str, percent: float) -> dict:
         """Close a percentage of the position."""
@@ -349,35 +336,34 @@ class MT5Direct:
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": f"Closed {percent}%"}
 
-        with _mt5_lock:
-            self._ensure_correct_account()
-            pos = mt5.positions_get(ticket=ticket_int)
-            if not pos:
-                return {"success": False, "error": f"Position not found: {ticket}"}
-            p = pos[0]
-            close_vol = round(p.volume * percent, 2)
-            step = mt5.symbol_info(p.symbol).volume_step or 0.01
-            close_vol = max(step, round(round(close_vol / step) * step, 2))
-            is_buy = p.type == mt5.ORDER_TYPE_BUY
-            price = mt5.symbol_info_tick(p.symbol).bid if is_buy else mt5.symbol_info_tick(p.symbol).ask
-            otype = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
-            request = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "position": ticket_int,
-                "symbol": p.symbol,
-                "volume": close_vol,
-                "type": otype,
-                "price": price,
-                "deviation": 10,
-                "magic": 20250101,
-                "comment": "TW-PARTIAL",
-                "type_filling": mt5.ORDER_FILLING_FOK,
-            }
-            result = mt5.order_send(request)
-            if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                code = result.retcode if result else -1
-                return {"success": False, "error": f"Partial close failed: {code}"}
-            return {"success": True, "ticket": ticket, "closed_volume": close_vol}
+        self._ensure_correct_account()
+        pos = mt5.positions_get(ticket=ticket_int)
+        if not pos:
+            return {"success": False, "error": f"Position not found: {ticket}"}
+        p = pos[0]
+        close_vol = round(p.volume * percent, 2)
+        step = mt5.symbol_info(p.symbol).volume_step or 0.01
+        close_vol = max(step, round(round(close_vol / step) * step, 2))
+        is_buy = p.type == mt5.ORDER_TYPE_BUY
+        price = mt5.symbol_info_tick(p.symbol).bid if is_buy else mt5.symbol_info_tick(p.symbol).ask
+        otype = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": ticket_int,
+            "symbol": p.symbol,
+            "volume": close_vol,
+            "type": otype,
+            "price": price,
+            "deviation": 10,
+            "magic": 20250101,
+            "comment": "TW-PARTIAL",
+            "type_filling": mt5.ORDER_FILLING_FOK,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            code = result.retcode if result else -1
+            return {"success": False, "error": f"Partial close failed: {code}"}
+        return {"success": True, "ticket": ticket, "closed_volume": close_vol}
 
     def close_trade(self, ticket: str, symbol: str = "") -> dict:
         """Fully close a position or cancel a pending order."""
@@ -385,25 +371,23 @@ class MT5Direct:
         if not ticket_int:
             if not symbol:
                 return {"success": False, "error": "No ticket or symbol"}
-            with _mt5_lock:
-                self._ensure_correct_account()
-                return self._close_all_by_symbol(symbol)
+            self._ensure_correct_account()
+            return self._close_all_by_symbol(symbol)
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": "Closed"}
 
-        with _mt5_lock:
-            self._ensure_correct_account()
-            pos = mt5.positions_get(ticket=ticket_int)
-            if pos:
-                return self._close_position(pos[0])
-            orders = mt5.orders_get(ticket=ticket_int)
-            if orders:
-                request = {"action": mt5.TRADE_ACTION_REMOVE, "order": ticket_int}
-                result = mt5.order_send(request)
-                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
-                    return {"success": True, "ticket": ticket, "message": "Pending order cancelled"}
-                return {"success": False, "error": f"Cancel failed: {result.retcode if result else -1}"}
-            return {"success": False, "error": f"Position/order not found: {ticket}"}
+        self._ensure_correct_account()
+        pos = mt5.positions_get(ticket=ticket_int)
+        if pos:
+            return self._close_position(pos[0])
+        orders = mt5.orders_get(ticket=ticket_int)
+        if orders:
+            request = {"action": mt5.TRADE_ACTION_REMOVE, "order": ticket_int}
+            result = mt5.order_send(request)
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                return {"success": True, "ticket": ticket, "message": "Pending order cancelled"}
+            return {"success": False, "error": f"Cancel failed: {result.retcode if result else -1}"}
+        return {"success": False, "error": f"Position/order not found: {ticket}"}
 
     def get_positions(self) -> list:
         if not MT5_AVAILABLE:
