@@ -67,18 +67,31 @@ class MT5Direct:
             return False
 
     def _ensure_connected(self):
-        """Verify we are connected to the CORRECT MT5 account (not another terminal)."""
+        """Quick check — just verify MT5 responds. Used by read-only methods."""
         if not MT5_AVAILABLE:
             return
         info = mt5.account_info()
-        # Check not just connected, but connected to the RIGHT account
+        if info is None:
+            logger.warning("MT5 disconnected — quick reconnect...")
+            kwargs = {}
+            if self.path:     kwargs["path"] = self.path
+            if self.login:    kwargs["login"] = self.login
+            if self.password: kwargs["password"] = self.password
+            if self.server:   kwargs["server"] = self.server
+            mt5.initialize(**kwargs)
+
+    def _ensure_correct_account(self):
+        """Full check — verify connected to the RIGHT account. Used by write methods inside lock."""
+        if not MT5_AVAILABLE:
+            return
+        info = mt5.account_info()
         wrong_account = (info is not None and self.login and info.login != self.login)
         if info is None or wrong_account:
             if wrong_account:
-                logger.warning("MT5 connected to WRONG account %d (expected %d) — reconnecting to correct terminal...",
+                logger.warning("MT5 connected to WRONG account %d (expected %d) — reconnecting...",
                                info.login, self.login)
             else:
-                logger.warning("MT5 disconnected — reconnecting...")
+                logger.warning("MT5 disconnected — reconnecting to correct account...")
             mt5.shutdown()
             for attempt in range(3):
                 kwargs = {}
@@ -140,7 +153,7 @@ class MT5Direct:
 
     def _check_margin_locked(self, symbol, direction, lots):
         """Must be called inside _mt5_lock."""
-        self._ensure_connected()
+        self._ensure_correct_account()
         symbol = self._normalize_symbol(symbol)
         if not symbol:
             return {"ok": False, "margin_required": 0, "margin_free": 0, "max_lots": 0,
@@ -230,7 +243,7 @@ class MT5Direct:
             return {"success": True, "ticket": str(ticket), "simulated": True}
 
         with _mt5_lock:
-            self._ensure_connected()
+            self._ensure_correct_account()
 
             # Normalize symbol
             symbol = self._normalize_symbol(symbol)
@@ -307,7 +320,7 @@ class MT5Direct:
             return {"success": True, "ticket": ticket, "message": f"SL -> {new_sl}"}
 
         with _mt5_lock:
-            self._ensure_connected()
+            self._ensure_correct_account()
             pos = mt5.positions_get(ticket=ticket_int)
             if not pos:
                 return {"success": False, "error": f"Position not found: {ticket}"}
@@ -333,7 +346,7 @@ class MT5Direct:
             return {"success": True, "ticket": ticket, "message": f"Closed {percent}%"}
 
         with _mt5_lock:
-            self._ensure_connected()
+            self._ensure_correct_account()
             pos = mt5.positions_get(ticket=ticket_int)
             if not pos:
                 return {"success": False, "error": f"Position not found: {ticket}"}
@@ -369,13 +382,13 @@ class MT5Direct:
             if not symbol:
                 return {"success": False, "error": "No ticket or symbol"}
             with _mt5_lock:
-                self._ensure_connected()
+                self._ensure_correct_account()
                 return self._close_all_by_symbol(symbol)
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": "Closed"}
 
         with _mt5_lock:
-            self._ensure_connected()
+            self._ensure_correct_account()
             pos = mt5.positions_get(ticket=ticket_int)
             if pos:
                 return self._close_position(pos[0])
