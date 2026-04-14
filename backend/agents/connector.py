@@ -7,6 +7,7 @@ each with its own TP. If lots are too small to split, fewer positions
 are opened with the farthest TP as fallback.
 """
 
+import asyncio
 import logging
 from .base_agent import BaseAgent
 
@@ -107,7 +108,7 @@ class ConnectorAgent(BaseAgent):
         first_result = None
         for i, (tp_price, lot, tp_key) in enumerate(allocated):
             tag = f"TP{i+1}"
-            result = mt5.open_trade({
+            result = await asyncio.to_thread(mt5.open_trade, {
                 "symbol": symbol,
                 "direction": trade.get("direction"),
                 "order_type": trade.get("order_type", "MARKET"),
@@ -159,11 +160,11 @@ class ConnectorAgent(BaseAgent):
         tickets = [t.strip() for t in ticket.split(",") if t.strip()]
         if len(tickets) <= 1:
             await self.broadcast_status("MODIFYING_SL", f"Trailing SL for #{ticket} to {new_sl}...")
-            return mt5.modify_sl(ticket, new_sl, symbol)
+            return await asyncio.to_thread(mt5.modify_sl, ticket, new_sl, symbol)
 
         results = []
         for t in tickets:
-            r = mt5.modify_sl(t, new_sl, symbol)
+            r = await asyncio.to_thread(mt5.modify_sl, t, new_sl, symbol)
             results.append(r)
         ok = all(r.get("success") for r in results)
         return {"success": ok, "tickets": tickets, "results": results}
@@ -171,7 +172,7 @@ class ConnectorAgent(BaseAgent):
     async def close_partial(self, ticket: str, symbol: str, percent: float) -> dict:
         await self.broadcast_status("PARTIAL_CLOSE", f"Closing {percent:.0%} of #{ticket}...")
         mt5 = self._get_mt5()
-        return mt5.close_partial(ticket, symbol, percent)
+        return await asyncio.to_thread(mt5.close_partial, ticket, symbol, percent)
 
     async def close_trade(self, ticket: str, symbol: str) -> dict:
         """Close a trade. If ticket contains multiple (comma-separated), close all."""
@@ -179,12 +180,12 @@ class ConnectorAgent(BaseAgent):
         tickets = [t.strip() for t in ticket.split(",") if t.strip()]
         if len(tickets) <= 1:
             await self.broadcast_status("CLOSING", f"Closing trade #{ticket}...")
-            return mt5.close_trade(ticket, symbol)
+            return await asyncio.to_thread(mt5.close_trade, ticket, symbol)
 
         await self.broadcast_status("CLOSING", f"Closing {len(tickets)} positions for {symbol}...")
         results = []
         for t in tickets:
-            r = mt5.close_trade(t, symbol)
+            r = await asyncio.to_thread(mt5.close_trade, t, symbol)
             results.append(r)
         ok = all(r.get("success") for r in results)
         return {"success": ok, "tickets": tickets, "results": results}
