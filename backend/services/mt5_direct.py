@@ -256,7 +256,7 @@ class MT5Direct:
             # The MT5 IPC pipe degrades over time and account_info() can
             # succeed while order_send() returns None with error -2.
             # A fresh init guarantees a clean pipe.
-            self._fresh_connect()
+            self._ensure_correct_account()
 
             # Normalize symbol
             symbol = self._normalize_symbol(symbol)
@@ -300,7 +300,7 @@ class MT5Direct:
             if result is None:
                 err = mt5.last_error()
                 logger.error("MT5 order_send returned None (1st try): %s", err)
-                # Retry with fresh connect
+                # Retry with fresh shutdown+init (clean pipe)
                 self._fresh_connect()
                 tick = mt5.symbol_info_tick(symbol)
                 if tick:
@@ -325,7 +325,7 @@ class MT5Direct:
             return {"success": True, "ticket": ticket, "message": f"SL -> {new_sl}"}
 
         with _mt5_lock:
-            self._fresh_connect()
+            self._ensure_correct_account()
             pos = mt5.positions_get(ticket=ticket_int)
             if not pos:
                 return {"success": False, "error": f"Position not found: {ticket}"}
@@ -351,7 +351,7 @@ class MT5Direct:
             return {"success": True, "ticket": ticket, "message": f"Closed {percent}%"}
 
         with _mt5_lock:
-            self._fresh_connect()
+            self._ensure_correct_account()
             pos = mt5.positions_get(ticket=ticket_int)
             if not pos:
                 return {"success": False, "error": f"Position not found: {ticket}"}
@@ -387,13 +387,13 @@ class MT5Direct:
             if not symbol:
                 return {"success": False, "error": "No ticket or symbol"}
             with _mt5_lock:
-                self._fresh_connect()
+                self._ensure_correct_account()
                 return self._close_all_by_symbol(symbol)
         if not MT5_AVAILABLE:
             return {"success": True, "ticket": ticket, "message": "Closed"}
 
         with _mt5_lock:
-            self._fresh_connect()
+            self._ensure_correct_account()
             pos = mt5.positions_get(ticket=ticket_int)
             if pos:
                 return self._close_position(pos[0])
