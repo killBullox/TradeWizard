@@ -41,9 +41,15 @@ class MT5Direct:
         """Start or restart the order worker subprocess."""
         if self._worker and self._worker.poll() is None:
             return  # already running
+
+        # Shutdown MT5 in parent process before spawning worker,
+        # so the worker gets a clean IPC pipe to the terminal.
+        if MT5_AVAILABLE:
+            mt5.shutdown()
+            self.connected = False
+
         worker_script = os.path.join(os.path.dirname(__file__), "mt5_order_worker.py")
         python = sys.executable
-        env = os.environ.copy()
         self._worker = subprocess.Popen(
             [python, worker_script],
             stdin=subprocess.PIPE,
@@ -51,8 +57,6 @@ class MT5Direct:
             stderr=None,  # inherit stderr for logging
             text=True,
             cwd=os.path.dirname(os.path.dirname(__file__)),
-            env=env,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0,
         )
         # Wait for init by sending a ping
         result = self._send_to_worker({"action": "ping"})
@@ -60,6 +64,11 @@ class MT5Direct:
             logger.info("MT5 order worker started (PID %d)", self._worker.pid)
         else:
             logger.error("MT5 order worker failed to start: %s", result)
+
+        # Re-initialize MT5 in parent for read operations (candles, positions)
+        if MT5_AVAILABLE:
+            self._connect_impl()
+            logger.info("MT5 re-initialized in main process for read operations")
 
     def _send_to_worker(self, cmd: dict) -> dict:
         """Send a command to the worker and get the response."""
