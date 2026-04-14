@@ -60,9 +60,8 @@ class MT5Direct:
                 cwd=os.path.dirname(os.path.dirname(__file__)),
             )
 
-            # Re-initialize MT5 in parent for read operations
-            if MT5_AVAILABLE:
-                self._connect_impl()
+            # Mark as disconnected — will reconnect lazily on next read
+            self.connected = False
             if proc.stdout.strip():
                 return json.loads(proc.stdout.strip().split("\n")[-1])
             logger.error("Worker produced no output. stderr: %s", proc.stderr[-500:] if proc.stderr else "")
@@ -102,10 +101,11 @@ class MT5Direct:
             return False
 
     def _ensure_connected(self):
-        """Quick check — only reconnect if MT5 is not responding at all.
-        Does NOT verify account — that's _ensure_correct_account's job."""
-        if not MT5_AVAILABLE or self.connected:
+        """Reconnect if not connected (e.g. after worker shutdown the parent's session)."""
+        if not MT5_AVAILABLE:
             return
+        if not self.connected:
+            self._connect_impl()
 
     def _fresh_connect(self):
         """Shutdown + reinitialize MT5 for a clean IPC pipe. Called before every write operation."""
