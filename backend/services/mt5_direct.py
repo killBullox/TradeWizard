@@ -285,14 +285,9 @@ class MT5Direct:
         logger.info("MT5 OPEN: %s %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
                      order_type, direction, symbol, lots, price, sl, tp)
 
-        # Fresh init immediately before order_send — any prior MT5 call
-        # (symbol_info, symbol_select, copy_rates) corrupts the IPC pipe
+        # Fresh init immediately before order_send — NO other MT5 calls between
+        # fresh_connect and order_send (they corrupt the IPC pipe)
         self._fresh_connect()
-        # Re-fetch price after fresh init
-        tick = mt5.symbol_info_tick(symbol)
-        if tick:
-            request["price"] = tick.ask if is_buy else tick.bid
-
         result = mt5.order_send(request)
         if result is None:
             err = mt5.last_error()
