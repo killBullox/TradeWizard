@@ -215,6 +215,23 @@ function setWsStatus(status) {
   label.textContent = status === 'connected' ? 'Connected' : status === 'connecting' ? 'Connecting…' : 'Disconnected';
 }
 
+// Worker status polling
+async function checkWorkerStatus() {
+  try {
+    const r = await fetch('/api/health');
+    const d = await r.json();
+    const dot = document.getElementById('worker-dot');
+    const label = document.getElementById('worker-label');
+    if (dot && label) {
+      const ok = d.mt5_worker;
+      dot.className = `dot ${ok ? 'connected' : 'disconnected'}`;
+      label.textContent = ok ? 'MT5 Worker' : 'Worker OFF';
+    }
+  } catch(e) {}
+}
+setInterval(checkWorkerStatus, 30000);
+setTimeout(checkWorkerStatus, 3000);
+
 function updateAgentCard(agentKey, message, state) {
   const card  = document.getElementById(`agent-${agentKey}`);
   const badge = card?.querySelector('.agent-badge');

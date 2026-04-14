@@ -406,10 +406,14 @@ async def health_check():
 
     # MT5 direct status
     mt5_ok = False
+    worker_ok = False
     try:
         from services.mt5_direct import get_mt5_direct
-        h = get_mt5_direct().health()
+        _mt5 = get_mt5_direct()
+        h = _mt5.health()
         mt5_ok = h.get("connected", False)
+        ws = _mt5.worker_status()
+        worker_ok = ws.get("running", False)
     except Exception:
         pass
 
@@ -453,6 +457,7 @@ async def health_check():
         "uptime_seconds": int(uptime),
         "backend_running": bool(orchestrator and orchestrator._running),
         "mt5_connected": mt5_ok,
+        "mt5_worker": worker_ok,
         "last_analysis": last_analysis,
         "open_trades": open_trades,
         "memory_mb": round(mem.rss / 1024 / 1024, 1),
