@@ -30,6 +30,11 @@ const FOREX_PAIRS = ['EURUSD','GBPUSD','USDJPY','XAUUSD','USDCHF','AUDUSD','GBPJ
 
 // ── WebSocket ───────────────────────────────────────────────────────
 function connectWS() {
+  // Close existing connection before opening a new one
+  if (ws) {
+    try { ws.onclose = null; ws.onerror = null; ws.close(); } catch(e) {}
+    ws = null;
+  }
   setWsStatus('connecting');
   ws = new WebSocket(WS_URL);
 
@@ -49,8 +54,10 @@ function connectWS() {
     setWsStatus('disconnected');
     if (!reconnectTimer) {
       reconnectTimer = setInterval(() => {
-        if (ws?.readyState !== WebSocket.OPEN) connectWS();
-      }, 3000);
+        if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+          connectWS();
+        }
+      }, 5000);
     }
   };
 }
