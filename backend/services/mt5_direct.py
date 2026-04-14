@@ -78,18 +78,22 @@ class MT5Direct:
         """Shutdown + reinitialize MT5 for a clean IPC pipe. Called before every write operation."""
         if not MT5_AVAILABLE:
             return
+        import threading
+        tid = threading.current_thread().name
         mt5.shutdown()
         kwargs = {}
         if self.path:     kwargs["path"] = self.path
         if self.login:    kwargs["login"] = self.login
         if self.password: kwargs["password"] = self.password
         if self.server:   kwargs["server"] = self.server
-        if not mt5.initialize(**kwargs):
-            logger.error("MT5 fresh_connect failed: %s", mt5.last_error())
+        init_ok = mt5.initialize(**kwargs)
+        if not init_ok:
+            logger.error("MT5 fresh_connect FAILED on thread %s: %s (path=%s login=%s server=%s)",
+                         tid, mt5.last_error(), self.path, self.login, self.server)
             return
         info = mt5.account_info()
-        if info:
-            logger.debug("MT5 fresh connect OK — account %d", info.login)
+        logger.info("MT5 fresh_connect OK on thread %s — account %s, init=%s",
+                     tid, info.login if info else "NONE", init_ok)
         self.connected = True
 
     def _ensure_correct_account(self):
