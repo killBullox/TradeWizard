@@ -1489,8 +1489,7 @@ class Orchestrator:
             lots = float(trade_params.get("lot_size", 0.01))
             max_trades = int(config.get("max_open_trades", 3))
 
-            import asyncio as _aio
-            result = await _aio.to_thread(mt5.check_margin, symbol, direction, lots)
+            result = mt5.check_margin(symbol, direction, lots)
             if result.get("simulated"):
                 return True
 
