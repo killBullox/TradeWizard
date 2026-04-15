@@ -292,6 +292,7 @@ class CheckMarginRequest(BaseModel):
 
 @app.post("/order_send")
 def order_send(req: OrderRequest):
+    _ensure_init()
     if not MT5_AVAILABLE:
         ticket = int(datetime.now().timestamp())
         logger.info("SIM OPEN %s %s @ lots=%.2f", req.direction, req.symbol, req.lot_size)
@@ -356,6 +357,7 @@ def order_send(req: OrderRequest):
 
 @app.post("/modify_sl")
 def modify_sl(req: ModifySLRequest):
+    _ensure_init()
     ticket_int = int(req.ticket) if req.ticket and req.ticket.isdigit() else 0
     if not ticket_int:
         return {"success": False, "error": f"Invalid ticket: {req.ticket}"}
@@ -383,6 +385,7 @@ def modify_sl(req: ModifySLRequest):
 
 @app.post("/close")
 def close(req: CloseRequest):
+    _ensure_init()
     ticket_int = int(req.ticket) if req.ticket and req.ticket.isdigit() else 0
     if not MT5_AVAILABLE:
         return {"success": True, "ticket": req.ticket, "message": "Closed"}
@@ -418,6 +421,7 @@ def close(req: CloseRequest):
 
 @app.post("/close_partial")
 def close_partial(req: ClosePartialRequest):
+    _ensure_init()
     ticket_int = int(req.ticket) if req.ticket and req.ticket.isdigit() else 0
     if not ticket_int:
         return {"success": False, "error": f"Invalid ticket: {req.ticket}"}
@@ -457,6 +461,7 @@ def close_partial(req: ClosePartialRequest):
 
 @app.post("/check_margin")
 def check_margin(req: CheckMarginRequest):
+    _ensure_init()
     if not MT5_AVAILABLE:
         return {"ok": True, "margin_required": 0, "margin_free": 99999, "max_lots": req.lots, "simulated": True}
 
