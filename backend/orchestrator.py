@@ -1508,8 +1508,8 @@ class Orchestrator:
             # If margin_req is 0, order_check failed — estimate margin from budget
             if margin_req == 0 and lots > 0:
                 # Estimate: cap lots so total margin stays within budget
-                # Use a conservative estimate of $5000/lot for forex, $50000/lot for gold
-                est_per_lot = 50000 if "XAU" in symbol or "GOLD" in symbol.upper() else 5000
+                # Ava broker real margins: ~$8500/lot forex, ~$60000/lot gold
+                est_per_lot = 60000 if "XAU" in symbol or "GOLD" in symbol.upper() else 8500
                 max_lots_est = margin_budget / est_per_lot
                 if max_lots_est < lots:
                     reduced = round(max(0.01, max_lots_est), 2)
