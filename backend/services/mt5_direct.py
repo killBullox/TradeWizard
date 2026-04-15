@@ -154,7 +154,7 @@ class MT5Direct:
 
     def _check_margin_locked(self, symbol, direction, lots):
         """Check margin for the requested trade."""
-        self._ensure_connected()
+        self._fresh_connect()
         symbol = self._normalize_symbol(symbol)
         if not symbol:
             return {"ok": False, "margin_required": 0, "margin_free": 0, "max_lots": 0,
