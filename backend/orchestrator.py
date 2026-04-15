@@ -1529,7 +1529,7 @@ class Orchestrator:
             # Over budget — scale down lots to fit
             if margin_req > 0:
                 ratio = (margin_budget * 0.9) / margin_req  # 10% safety buffer
-                reduced_lots = mt5._normalize_lots(mt5._normalize_symbol(symbol) or symbol, lots * ratio)
+                reduced_lots = round(max(0.01, lots * ratio), 2)
             else:
                 reduced_lots = 0
 
