@@ -298,8 +298,6 @@ def order_send(req: OrderRequest):
         logger.info("SIM OPEN %s %s @ lots=%.2f", req.direction, req.symbol, req.lot_size)
         return {"success": True, "ticket": str(ticket), "simulated": True}
 
-    _fresh_connect()
-
     symbol = _normalize_symbol(req.symbol)
     if not symbol:
         return {"success": False, "error": f"Symbol not found: {req.symbol}"}
@@ -364,8 +362,6 @@ def modify_sl(req: ModifySLRequest):
     if not MT5_AVAILABLE:
         return {"success": True, "ticket": req.ticket, "message": f"SL -> {req.new_sl}"}
 
-    _fresh_connect()
-
     pos = mt5.positions_get(ticket=ticket_int)
     if not pos:
         return {"success": False, "error": f"Position not found: {req.ticket}"}
@@ -389,8 +385,6 @@ def close(req: CloseRequest):
     ticket_int = int(req.ticket) if req.ticket and req.ticket.isdigit() else 0
     if not MT5_AVAILABLE:
         return {"success": True, "ticket": req.ticket, "message": "Closed"}
-
-    _fresh_connect()
 
     if not ticket_int:
         if not req.symbol:
@@ -428,8 +422,6 @@ def close_partial(req: ClosePartialRequest):
     if not MT5_AVAILABLE:
         return {"success": True, "ticket": req.ticket, "message": f"Closed {req.percent*100}%"}
 
-    _fresh_connect()
-
     pos = mt5.positions_get(ticket=ticket_int)
     if not pos:
         return {"success": False, "error": f"Position not found: {req.ticket}"}
@@ -464,8 +456,6 @@ def check_margin(req: CheckMarginRequest):
     _ensure_init()
     if not MT5_AVAILABLE:
         return {"ok": True, "margin_required": 0, "margin_free": 99999, "max_lots": req.lots, "simulated": True}
-
-    _fresh_connect()
 
     symbol = _normalize_symbol(req.symbol)
     if not symbol:
