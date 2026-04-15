@@ -154,21 +154,26 @@ def _sanitize_comment(raw: str) -> str:
 app = FastAPI(title="MT5 Bridge", version="1.0.0")
 
 
+_mt5_initialized = False
+
 @app.on_event("startup")
 def startup():
-    logger.info("MT5 Bridge starting on port 5555...")
-    # Don't block startup with MT5 init — connect lazily on first request
-    # mt5.initialize() can block indefinitely with multiple terminals
-    try:
-        _connect()
-    except Exception as e:
-        logger.warning("MT5 initial connect failed (will retry on first request): %s", e)
+    logger.info("MT5 Bridge started on port 5555 — MT5 will connect on first request")
 
+
+def _ensure_init():
+    """Lazy MT5 initialization on first request."""
+    global _mt5_initialized
+    if _mt5_initialized or not MT5_AVAILABLE:
+        return
+    _connect()
+    _mt5_initialized = True
 
 @app.get("/health")
 def health():
     if not MT5_AVAILABLE:
         return {"status": "ok", "mt5_available": False, "connected": True}
+    _ensure_init()
     info = mt5.account_info()
     return {"status": "ok", "mt5_available": True, "connected": info is not None,
             "account": info.login if info else None}
