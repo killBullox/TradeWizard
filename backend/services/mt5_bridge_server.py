@@ -65,6 +65,7 @@ def _init_kwargs():
     if MT5_LOGIN:    kw["login"] = MT5_LOGIN
     if MT5_PASSWORD: kw["password"] = MT5_PASSWORD
     if MT5_SERVER:   kw["server"] = MT5_SERVER
+    kw["timeout"] = 10000  # 10 second timeout instead of default 60s
     return kw
 
 
@@ -152,7 +153,12 @@ app = FastAPI(title="MT5 Bridge", version="1.0.0")
 @app.on_event("startup")
 def startup():
     logger.info("MT5 Bridge starting on port 5555...")
-    _connect()
+    # Don't block startup with MT5 init — connect lazily on first request
+    # mt5.initialize() can block indefinitely with multiple terminals
+    try:
+        _connect()
+    except Exception as e:
+        logger.warning("MT5 initial connect failed (will retry on first request): %s", e)
 
 
 @app.get("/health")
