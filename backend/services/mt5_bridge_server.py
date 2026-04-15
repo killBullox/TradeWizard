@@ -95,17 +95,21 @@ def _connect() -> bool:
 
 
 def _fresh_connect():
-    """Shutdown + reinitialize for a clean IPC pipe. Used before write operations."""
+    """Reinitialize MT5 for write operations. No shutdown — it blocks."""
     if not MT5_AVAILABLE:
         return
-    mt5.shutdown()
+    # Just reinitialize without shutdown — shutdown blocks indefinitely
+    # when the IPC pipe is in a bad state. initialize() on an already-
+    # connected session is a no-op or reconnects cleanly.
     kw = _init_kwargs()
     ok = mt5.initialize(**kw)
     if not ok:
-        logger.error("fresh_connect FAILED: %s", mt5.last_error())
-    else:
-        info = mt5.account_info()
-        logger.info("fresh_connect OK — account %s", info.login if info else "NONE")
+        logger.error("fresh_connect FAILED: %s — trying with shutdown", mt5.last_error())
+        # Only shutdown as last resort, with a tight timeout
+        mt5.shutdown()
+        ok = mt5.initialize(**kw)
+        if not ok:
+            logger.error("fresh_connect FAILED after shutdown: %s", mt5.last_error())
 
 
 def _normalize_symbol(raw: str) -> str:

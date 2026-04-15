@@ -99,10 +99,11 @@ def _start_mt5_direct():
     import subprocess, time
     bridge_script = os.path.join(os.path.dirname(__file__), "services", "mt5_bridge_server.py")
     try:
+        _bridge_log = open(os.path.join(_log_dir, "mt5_bridge.log"), "a", encoding="utf-8")
         _bridge_proc = subprocess.Popen(
             [sys.executable, bridge_script],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=_bridge_log,
         )
         logger.info("MT5 bridge subprocess started (PID %d)", _bridge_proc.pid)
         # Wait for bridge to be ready
