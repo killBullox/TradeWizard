@@ -497,22 +497,19 @@ def check_margin(req: CheckMarginRequest):
                 "max_lots": 0, "leverage": leverage, "error": "order_check failed and no symbol info"}
 
     margin_required = check.margin or 0
-    ok = check.retcode == mt5.TRADE_RETCODE_DONE or margin_free > margin_required * 1.1
-    max_lots = req.lots
 
-    # When margin_required is 0 (e.g. retcode 10019 "No money"), estimate it
-    if margin_required == 0 and not ok:
-        # Use order_calc_margin for accurate estimate
+    # When margin_required is 0 but retcode is not DONE, estimate the real margin
+    if margin_required == 0 and check.retcode != mt5.TRADE_RETCODE_DONE:
         calc = mt5.order_calc_margin(otype, symbol, req.lots, price)
         if calc is not None and calc > 0:
             margin_required = round(calc, 2)
             logger.info("order_calc_margin for %.2f %s: $%.2f", req.lots, symbol, margin_required)
         else:
-            # Fallback: estimate from symbol info
             sym_info = mt5.symbol_info(symbol)
             if sym_info and sym_info.trade_contract_size > 0:
                 margin_required = round((req.lots * sym_info.trade_contract_size * price) / leverage, 2)
 
+    ok = check.retcode == mt5.TRADE_RETCODE_DONE or margin_free > margin_required * 1.1
     if not ok and margin_required > 0:
         ratio = (margin_free * 0.9) / margin_required
         max_lots = _normalize_lots(symbol, req.lots * ratio)
