@@ -1505,6 +1505,21 @@ class Orchestrator:
             remaining_slots = max(1, max_trades - open_count)
             margin_budget = margin_free / remaining_slots
 
+            # If margin_req is 0, order_check failed — estimate margin from budget
+            if margin_req == 0 and lots > 0:
+                # Estimate: cap lots so total margin stays within budget
+                # Use a conservative estimate of $5000/lot for forex, $50000/lot for gold
+                est_per_lot = 50000 if "XAU" in symbol or "GOLD" in symbol.upper() else 5000
+                max_lots_est = margin_budget / est_per_lot
+                if max_lots_est < lots:
+                    reduced = round(max(0.01, max_lots_est), 2)
+                    logger.warning("Margin check returned $0 for %s — estimating. Reducing lots %.2f → %.2f (budget $%.0f)",
+                                   symbol, lots, reduced, margin_budget)
+                    trade_params["lot_size"] = reduced
+                    pos = rm_result.setdefault("position_size", {})
+                    pos["lot_size"] = reduced
+                return True
+
             # Check against the per-trade budget, not total margin_free
             if margin_req <= margin_budget:
                 logger.info("Margin OK: %s needs $%.0f, budget $%.0f (free $%.0f / %d trades, leva 1:%d)",
