@@ -757,6 +757,13 @@
           <div class="card-header"><h3>⚙️ News Filter Settings</h3></div>
           <div class="news-settings-grid">
             <div class="form-group">
+              <label>News Block</label>
+              <select id="news-block-enabled" class="form-input">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+            <div class="form-group">
               <label>Block minutes BEFORE event</label>
               <input type="number" id="news-block-before" class="form-input" value="30" min="0" max="120" />
             </div>

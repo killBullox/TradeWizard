@@ -253,7 +253,8 @@ class Orchestrator:
     async def _analyze_and_trade(self, symbol: str, config: dict, open_count: int):
         try:
             # 0. News filter — block analysis if high-impact event is near
-            if self._news:
+            news_enabled = config.get("news_block_enabled", "true").lower() != "false"
+            if self._news and news_enabled:
                 blocked, event = await self._news.is_blocked(symbol)
                 if blocked and event:
                     msg = f"{event.title} [{event.currency}] @ {event.time.strftime('%H:%M')} UTC"

@@ -805,8 +805,11 @@ async def get_news(hours: int = 24, symbol: str | None = None):
     if not orchestrator or not orchestrator.news_filter:
         raise HTTPException(503, "System not ready")
     events = await orchestrator.news_filter.upcoming_events(hours_ahead=hours, symbol=symbol)
+    async with async_session_factory() as s:
+        block_enabled = await get_config("news_block_enabled", s)
     return {
         "events": [e.to_dict() for e in events],
+        "block_enabled": (block_enabled or "true").lower() != "false",
         "block_minutes_before": orchestrator.news_filter.block_minutes_before,
         "block_minutes_after":  orchestrator.news_filter.block_minutes_after,
         "count": len(events),

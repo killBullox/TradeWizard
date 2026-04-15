@@ -1025,8 +1025,10 @@ async function refreshNews() {
     newsData = data.events || [];
 
     // Sync settings inputs
+    const bEnabled = document.getElementById('news-block-enabled');
     const bBefore = document.getElementById('news-block-before');
     const bAfter  = document.getElementById('news-block-after');
+    if (bEnabled && data.block_enabled !== undefined) bEnabled.value = data.block_enabled ? "true" : "false";
     if (bBefore && data.block_minutes_before !== undefined) bBefore.value = data.block_minutes_before;
     if (bAfter  && data.block_minutes_after  !== undefined) bAfter.value  = data.block_minutes_after;
 
@@ -1105,13 +1107,15 @@ function showNewsBanner(event) {
 }
 
 async function saveNewsConfig() {
+  const enabled = document.getElementById('news-block-enabled')?.value;
   const before  = document.getElementById('news-block-before')?.value;
   const after   = document.getElementById('news-block-after')?.value;
   const medium  = document.getElementById('news-block-medium')?.value;
   await Promise.all([
-    before !== undefined ? fetchJSON('/api/config/news_block_minutes_before', { method: 'PUT', body: JSON.stringify({ value: before }) }) : null,
-    after  !== undefined ? fetchJSON('/api/config/news_block_minutes_after',  { method: 'PUT', body: JSON.stringify({ value: after  }) }) : null,
-    medium !== undefined ? fetchJSON('/api/config/news_block_medium',          { method: 'PUT', body: JSON.stringify({ value: medium }) }) : null,
+    enabled !== undefined ? fetchJSON('/api/config/news_block_enabled',         { method: 'PUT', body: JSON.stringify({ value: enabled }) }) : null,
+    before !== undefined  ? fetchJSON('/api/config/news_block_minutes_before',  { method: 'PUT', body: JSON.stringify({ value: before }) }) : null,
+    after  !== undefined  ? fetchJSON('/api/config/news_block_minutes_after',   { method: 'PUT', body: JSON.stringify({ value: after  }) }) : null,
+    medium !== undefined  ? fetchJSON('/api/config/news_block_medium',          { method: 'PUT', body: JSON.stringify({ value: medium }) }) : null,
   ].filter(Boolean));
   addActivity('📰 News filter settings saved', 'success');
 }
