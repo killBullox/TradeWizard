@@ -94,18 +94,27 @@ _bridge_proc = None
 
 
 def _start_mt5_direct():
-    """Initialize direct MT5 connection (no subprocess, no HTTP bridge)."""
+    """Start the MT5 bridge subprocess, then connect the client."""
+    global _bridge_proc
+    import subprocess, time
+    bridge_script = os.path.join(os.path.dirname(__file__), "services", "mt5_bridge_server.py")
     try:
+        _bridge_proc = subprocess.Popen(
+            [sys.executable, bridge_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        logger.info("MT5 bridge subprocess started (PID %d)", _bridge_proc.pid)
+        # Wait for bridge to be ready
+        time.sleep(3)
         from services.mt5_direct import get_mt5_direct
         mt5 = get_mt5_direct()
         if mt5.connect():
-            logger.info("MT5 direct connection established")
+            logger.info("MT5 bridge connection established")
         else:
-            logger.warning("MT5 direct connection failed — will retry on first trade")
-        # Start the order worker subprocess immediately
-        mt5._ensure_worker()
+            logger.warning("MT5 bridge not responding yet — will retry on first trade")
     except Exception as exc:
-        logger.warning("Could not initialize MT5 direct: %s", exc)
+        logger.warning("Could not start MT5 bridge: %s", exc)
 
 
 _SETTINGS_BACKUP = os.path.join(os.path.dirname(__file__), "..", "settings_backup.json")
@@ -222,13 +231,20 @@ async def lifespan(app: FastAPI):
 
     if orchestrator:
         await orchestrator.stop()
-    # Disconnect MT5 direct
+    # Stop MT5 bridge subprocess
     try:
         from services.mt5_direct import get_mt5_direct
         get_mt5_direct().disconnect()
-        logger.info("MT5 disconnected")
     except Exception:
         pass
+    if _bridge_proc and _bridge_proc.poll() is None:
+        try:
+            _bridge_proc.terminate()
+            _bridge_proc.wait(timeout=5)
+            logger.info("MT5 bridge subprocess stopped")
+        except Exception:
+            _bridge_proc.kill()
+    logger.info("MT5 disconnected")
     logger.info("TradeWizard system stopped")
 
 
@@ -406,7 +422,7 @@ async def health_check():
     start = getattr(app.state, "start_time", now)
     uptime = (now - start).total_seconds()
 
-    # MT5 direct status
+    # MT5 bridge status
     mt5_ok = False
     worker_ok = False
     try:
@@ -414,8 +430,7 @@ async def health_check():
         _mt5 = get_mt5_direct()
         h = _mt5.health()
         mt5_ok = h.get("connected", False)
-        ws = _mt5.worker_status()
-        worker_ok = ws.get("running", False)
+        worker_ok = _bridge_proc is not None and _bridge_proc.poll() is None
     except Exception:
         pass
 
@@ -1450,8 +1465,9 @@ async def activate_broker_account(account_id: int):
         await set_config("mt5_server",   target.server,       s)
         await s.commit()
     # Restart bridge with new credentials
-    os.environ["MT5_LOGIN"]  = target.login
-    os.environ["MT5_SERVER"] = target.server
+    os.environ["MT5_LOGIN"]    = target.login
+    os.environ["MT5_PASSWORD"] = target.password
+    os.environ["MT5_SERVER"]   = target.server
     global _bridge_proc
     if _bridge_proc and _bridge_proc.poll() is None:
         try:
