@@ -359,16 +359,21 @@ def order_send(req: OrderRequest):
 
     result = mt5.order_send(request)
     if result is None:
-        err = mt5.last_error()
-        logger.error("order_send returned None (1st try): %s", err)
-        _fresh_connect()
-        tick = mt5.symbol_info_tick(symbol)
-        if tick:
-            request["price"] = tick.ask if is_buy else tick.bid
-        result = mt5.order_send(request)
+        import time as _time
+        for attempt in range(3):
+            logger.warning("order_send None (attempt %d/3) — waiting 5s then retrying...", attempt + 1)
+            _time.sleep(5)
+            _fresh_connect()
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                request["price"] = tick.ask if is_buy else tick.bid
+            result = mt5.order_send(request)
+            if result is not None:
+                logger.info("Retry %d/3 succeeded", attempt + 1)
+                break
         if result is None:
             # Last resort: use a fresh subprocess for the order
-            logger.warning("Retry failed too — trying subprocess fallback")
+            logger.warning("All 3 retries failed — trying subprocess fallback")
             return _subprocess_order(req)
 
     if result.retcode != mt5.TRADE_RETCODE_DONE:
