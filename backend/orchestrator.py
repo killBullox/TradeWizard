@@ -672,7 +672,7 @@ class Orchestrator:
 
     async def _sync_split_tickets(self, trade, current_price: float):
         """For split trades (multiple tickets), detect which MT5 positions have been
-        closed by MT5 (TP hit), update stored tickets, move SL to breakeven on survivors."""
+        closed, determine if closed by TP or SL, update accordingly."""
         ticket_str = trade.mt5_ticket or ""
         tickets = [t.strip() for t in ticket_str.split(",") if t.strip()]
         if len(tickets) <= 1:
@@ -693,22 +693,60 @@ class Orchestrator:
             if not just_closed:
                 return  # all splits still open, nothing to do
 
+            # Determine close reason: TP hit or SL hit
+            # Compare current price to entry, SL, and TPs
+            entry = trade.entry_price or 0
+            sl = trade.stop_loss or 0
+            tp1 = trade.take_profit_1
+            tp2 = trade.take_profit_2
+            tp3 = trade.take_profit_3
+            is_buy = trade.direction == "BUY"
             tp_hits_before = trade.tp_hits or 0
-            new_tp_hits = tp_hits_before + len(just_closed)
 
-            logger.info("Split sync trade #%d: %d/%d positions closed by MT5 (tickets %s)",
-                        trade.id, len(just_closed), len(tickets), just_closed)
+            # Check if price reached any TP
+            tp_reached = False
+            if is_buy:
+                if (tp1 and current_price >= tp1) or (tp2 and current_price >= tp2) or (tp3 and current_price >= tp3):
+                    tp_reached = True
+                sl_hit = sl > 0 and current_price <= sl
+            else:
+                if (tp1 and current_price <= tp1) or (tp2 and current_price <= tp2) or (tp3 and current_price <= tp3):
+                    tp_reached = True
+                sl_hit = sl > 0 and current_price >= sl
 
-            # Move SL to breakeven on surviving positions
+            # Also check if close price is near entry (breakeven SL)
+            pip = 0.01 if "JPY" in (trade.symbol or "") else (1.0 if trade.symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+            near_entry = abs(current_price - entry) / pip < 5 if entry else False
+
+            if tp_reached:
+                close_reason = "TP"
+                new_tp_hits = tp_hits_before + len(just_closed)
+            elif sl_hit:
+                close_reason = "SL"
+                new_tp_hits = tp_hits_before
+            elif near_entry:
+                close_reason = "BE"  # breakeven
+                new_tp_hits = tp_hits_before
+            else:
+                close_reason = "UNKNOWN"
+                new_tp_hits = tp_hits_before
+
+            logger.info("Split sync trade #%d: %d/%d positions closed (%s) (tickets %s, price=%.5f)",
+                        trade.id, len(just_closed), len(tickets), close_reason, just_closed, current_price)
+
+            # Move SL to breakeven on surviving positions only if TP was hit
             if still_open:
-                entry = trade.entry_price or 0
-                if entry:
+                if close_reason == "TP" and entry:
                     for t in still_open:
                         await self.cc.modify_sl(t, entry, trade.symbol)
                     await self._update_trade_sl(trade.id, entry)
                     await self._append_close_note(trade.id,
-                        f"Split TP hit: {len(just_closed)} posizioni chiuse da MT5, "
+                        f"TP hit: {len(just_closed)} posizioni chiuse, "
                         f"SL → breakeven ({entry:.5f}) su {len(still_open)} rimanenti")
+                elif close_reason in ("SL", "BE"):
+                    await self._append_close_note(trade.id,
+                        f"{close_reason}: {len(just_closed)} posizioni chiuse @ {current_price:.5f}, "
+                        f"{len(still_open)} ancora aperte")
 
                 # Update stored tickets
                 async with async_session_factory() as s:
@@ -718,10 +756,20 @@ class Orchestrator:
                         t.tp_hits = new_tp_hits
                         await s.commit()
             else:
-                # All positions closed by MT5 — mark trade as closed
+                # All positions closed — determine final close price and reason
+                if close_reason == "SL" or close_reason == "BE":
+                    close_price = sl if sl_hit else entry
+                    reason = f"SL Hit" if sl_hit else "Breakeven"
+                elif close_reason == "TP":
+                    close_price = current_price
+                    reason = "All TPs reached"
+                else:
+                    close_price = current_price
+                    reason = "All split positions closed by MT5"
+
                 await self._append_close_note(trade.id,
-                    f"Tutte le {len(tickets)} posizioni split chiuse da MT5")
-                await self._close_trade(trade, current_price, "All split positions closed by MT5")
+                    f"Tutte le {len(tickets)} posizioni chiuse ({close_reason}) @ {close_price:.5f}")
+                await self._close_trade(trade, close_price, reason)
 
         except Exception as exc:
             logger.warning("Split ticket sync error for trade #%d: %s", trade.id, exc)
