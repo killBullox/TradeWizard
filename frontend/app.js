@@ -323,7 +323,7 @@ async function refreshAll() {
 async function refreshTrades() {
   try {
     const [trades, livePnl] = await Promise.all([
-      fetchJSON('/api/trades?limit=100'),
+      fetchJSON('/api/trades?limit=10000'),
       fetchJSON('/api/trades/live_pnl').catch(() => []),
     ]);
     state.trades = trades;

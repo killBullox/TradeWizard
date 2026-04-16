@@ -303,10 +303,10 @@ async def _fetch_closed_trades() -> list[dict]:
     from models.database import async_session_factory, Trade
     from sqlalchemy import select
     async with async_session_factory() as s:
+        # Include ALL closed trades (including archived) for accurate analytics
         result = await s.execute(
             select(Trade)
             .where(Trade.status == "CLOSED")
-            .where((Trade.archived == False) | (Trade.archived == None))
             .order_by(Trade.close_time)
         )
         trades = result.scalars().all()
