@@ -357,11 +357,12 @@ def order_send(req: OrderRequest):
     logger.info("MT5 OPEN: %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
                  req.direction, symbol, lots, price, req.stop_loss, req.take_profit)
 
+    attempt_num = 0
     result = mt5.order_send(request)
     if result is None:
         import time as _time
-        for attempt in range(3):
-            logger.warning("order_send None (attempt %d/3) — waiting 5s then retrying...", attempt + 1)
+        for attempt in range(1, 4):
+            logger.warning("order_send None (retry %d/3) — waiting 5s...", attempt)
             _time.sleep(5)
             _fresh_connect()
             tick = mt5.symbol_info_tick(symbol)
@@ -369,18 +370,22 @@ def order_send(req: OrderRequest):
                 request["price"] = tick.ask if is_buy else tick.bid
             result = mt5.order_send(request)
             if result is not None:
-                logger.info("Retry %d/3 succeeded", attempt + 1)
+                attempt_num = attempt
                 break
         if result is None:
-            # Last resort: use a fresh subprocess for the order
-            logger.warning("All 3 retries failed — trying subprocess fallback")
-            return _subprocess_order(req)
+            logger.warning("All 3 retries failed — subprocess fallback (attempt 4)")
+            sub_result = _subprocess_order(req)
+            if sub_result.get("success"):
+                logger.info("OPEN OK (subprocess, attempt 4): ticket=%s %s %s",
+                            sub_result.get("ticket"), req.direction, symbol)
+            return sub_result
 
     if result.retcode != mt5.TRADE_RETCODE_DONE:
         logger.error("Order failed: retcode=%d comment='%s'", result.retcode, result.comment)
         return {"success": False, "error": f"retcode {result.retcode}: {result.comment}"}
 
-    logger.info("OPEN OK: ticket=%s %s %s @ %.5f", result.order, req.direction, symbol, price)
+    logger.info("OPEN OK (attempt %d): ticket=%s %s %s @ %.5f",
+                attempt_num, result.order, req.direction, symbol, price)
     return {"success": True, "ticket": str(result.order), "message": "Order placed"}
 
 
