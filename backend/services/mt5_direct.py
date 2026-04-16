@@ -22,7 +22,8 @@ class MT5Direct:
 
     def __init__(self):
         self.connected = False
-        self._client = httpx.Client(base_url=BRIDGE_URL, timeout=15)
+        # 60s timeout: bridge retries order_send 3x with 5s delays + subprocess fallback
+        self._client = httpx.Client(base_url=BRIDGE_URL, timeout=60)
 
     def _get(self, path: str, params: dict = None):
         try:
