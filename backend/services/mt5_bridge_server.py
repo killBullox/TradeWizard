@@ -155,10 +155,28 @@ app = FastAPI(title="MT5 Bridge", version="1.0.0")
 
 
 _mt5_initialized = False
+_keepalive_thread = None
+
+def _keepalive_loop():
+    """Ping MT5 every 60s to keep the IPC pipe alive."""
+    import time, threading
+    while True:
+        time.sleep(60)
+        if _mt5_initialized and MT5_AVAILABLE:
+            try:
+                info = mt5.account_info()
+                if info is None:
+                    logger.warning("Keepalive: MT5 disconnected — reconnecting...")
+                    _connect()
+            except Exception as e:
+                logger.warning("Keepalive error: %s", e)
 
 @app.on_event("startup")
 def startup():
+    global _keepalive_thread
     logger.info("MT5 Bridge started on port 5555 — MT5 will connect on first request")
+    _keepalive_thread = __import__('threading').Thread(target=_keepalive_loop, daemon=True)
+    _keepalive_thread.start()
 
 
 def _ensure_init():
