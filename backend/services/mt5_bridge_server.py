@@ -345,14 +345,17 @@ def order_send(req: OrderRequest):
         "volume": lots,
         "type": otype,
         "price": price,
-        "sl": req.stop_loss,
-        "tp": req.take_profit,
         "deviation": 10,
         "magic": 20250101,
         "comment": comment,
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
+    # Only include SL/TP if non-zero — some brokers reject sl=0/tp=0
+    if req.stop_loss:
+        request["sl"] = req.stop_loss
+    if req.take_profit:
+        request["tp"] = req.take_profit
 
     logger.info("MT5 OPEN: %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
                  req.direction, symbol, lots, price, req.stop_loss, req.take_profit)
@@ -415,14 +418,16 @@ lots = round(round(lots/step)*step, 2)
 is_buy = '{req.direction}'.upper() == 'BUY'
 tick = mt5.symbol_info_tick(sym)
 price = tick.ask if is_buy else tick.bid
-r = mt5.order_send({{
+req_dict = {{
     'action': mt5.TRADE_ACTION_DEAL, 'symbol': sym, 'volume': lots,
     'type': mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
-    'price': price, 'sl': {req.stop_loss}, 'tp': {req.take_profit},
-    'deviation': 10, 'magic': 20250101,
+    'price': price, 'deviation': 10, 'magic': 20250101,
     'comment': '{"".join(c for c in req.comment[:31] if c.isascii() and (c.isalnum() or c in " -_."))}',
     'type_time': mt5.ORDER_TIME_GTC, 'type_filling': mt5.ORDER_FILLING_FOK,
-}})
+}}
+if {req.stop_loss}: req_dict['sl'] = {req.stop_loss}
+if {req.take_profit}: req_dict['tp'] = {req.take_profit}
+r = mt5.order_send(req_dict)
 if r and r.retcode == 10009:
     print(json.dumps({{"success":True,"ticket":str(r.order)}}))
 else:
