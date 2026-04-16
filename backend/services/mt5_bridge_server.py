@@ -95,20 +95,13 @@ def _connect() -> bool:
 
 
 def _fresh_connect():
-    """Reinitialize MT5 for write operations. No shutdown — it blocks."""
+    """Full shutdown + reinitialize for a clean IPC pipe."""
     if not MT5_AVAILABLE:
         return
-    # Just reinitialize without shutdown — shutdown blocks indefinitely
-    # when the IPC pipe is in a bad state. initialize() on an already-
-    # connected session is a no-op or reconnects cleanly.
+    mt5.shutdown()
     kw = _init_kwargs()
     ok = mt5.initialize(**kw)
     if not ok:
-        logger.error("fresh_connect FAILED: %s — trying with shutdown", mt5.last_error())
-        # Only shutdown as last resort, with a tight timeout
-        mt5.shutdown()
-        ok = mt5.initialize(**kw)
-        if not ok:
             logger.error("fresh_connect FAILED after shutdown: %s", mt5.last_error())
 
 
@@ -158,15 +151,29 @@ _mt5_initialized = False
 _keepalive_thread = None
 
 def _keepalive_loop():
-    """Ping MT5 every 60s to keep the IPC pipe alive."""
-    import time, threading
+    """Ping MT5 every 60s with order_check to keep the order pipe alive.
+    account_info() works even with a dead pipe — order_check exercises
+    the same code path as order_send."""
+    import time
     while True:
         time.sleep(60)
         if _mt5_initialized and MT5_AVAILABLE:
             try:
-                info = mt5.account_info()
-                if info is None:
-                    logger.warning("Keepalive: MT5 disconnected — reconnecting...")
+                # Use order_check (not account_info) to keep the order pipe warm
+                tick = mt5.symbol_info_tick("EURUSD")
+                if tick:
+                    check = mt5.order_check({
+                        "action": mt5.TRADE_ACTION_DEAL,
+                        "symbol": "EURUSD",
+                        "volume": 0.01,
+                        "type": mt5.ORDER_TYPE_BUY,
+                        "price": tick.ask,
+                    })
+                    if check is None:
+                        logger.warning("Keepalive: order_check returned None — reconnecting...")
+                        _connect()
+                else:
+                    logger.warning("Keepalive: no tick data — reconnecting...")
                     _connect()
             except Exception as e:
                 logger.warning("Keepalive error: %s", e)
