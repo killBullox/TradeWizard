@@ -643,7 +643,7 @@ function renderPerformance(perf) {
       <div class="stat-card win"><div class="stat-value">${perf.win_rate||0}%</div><div class="stat-label">Win Rate</div></div>
       <div class="stat-card"><div class="stat-value">${perf.wins||0}</div><div class="stat-label">Wins</div></div>
       <div class="stat-card"><div class="stat-value">${perf.losses||0}</div><div class="stat-label">Losses</div></div>
-      <div class="stat-card"><div class="stat-value">$${(perf.total_pnl||0).toFixed(2)}</div><div class="stat-label">Total P&L</div></div>
+      <div class="stat-card ${(perf.total_pnl||0) >= 0 ? 'win' : 'loss'}"><div class="stat-value" style="color:${(perf.total_pnl||0) >= 0 ? '#10b981' : '#ef4444'}">$${(perf.total_pnl||0) >= 0 ? '+' : ''}${(perf.total_pnl||0).toFixed(2)}</div><div class="stat-label">Total P&L</div></div>
       <div class="stat-card"><div class="stat-value">${perf.profit_factor||0}</div><div class="stat-label">Profit Factor</div></div>
       <div class="stat-card ${(perf.max_drawdown_pct||0) > 10 ? 'loss' : ''}"><div class="stat-value" style="color:#ef4444">-$${(perf.max_drawdown_usd||0).toFixed(2)}<br><span style="font-size:0.75rem">-${(perf.max_drawdown_pct||0).toFixed(1)}%</span></div><div class="stat-label">Max Drawdown</div></div>
       <div class="stat-card"><div class="stat-value">${perf.avg_rr||0}</div><div class="stat-label">Avg R:R</div></div>
