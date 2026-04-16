@@ -95,10 +95,9 @@ def _connect() -> bool:
 
 
 def _fresh_connect():
-    """Full shutdown + reinitialize for a clean IPC pipe."""
+    """Reinitialize MT5 without shutdown (shutdown blocks indefinitely)."""
     if not MT5_AVAILABLE:
         return
-    mt5.shutdown()
     kw = _init_kwargs()
     ok = mt5.initialize(**kw)
     if not ok:
@@ -368,7 +367,9 @@ def order_send(req: OrderRequest):
             request["price"] = tick.ask if is_buy else tick.bid
         result = mt5.order_send(request)
         if result is None:
-            return {"success": False, "error": f"order_send None after retry: {mt5.last_error()}"}
+            # Last resort: use a fresh subprocess for the order
+            logger.warning("Retry failed too — trying subprocess fallback")
+            return _subprocess_order(req)
 
     if result.retcode != mt5.TRADE_RETCODE_DONE:
         logger.error("Order failed: retcode=%d comment='%s'", result.retcode, result.comment)
@@ -376,6 +377,65 @@ def order_send(req: OrderRequest):
 
     logger.info("OPEN OK: ticket=%s %s %s @ %.5f", result.order, req.direction, symbol, price)
     return {"success": True, "ticket": str(result.order), "message": "Order placed"}
+
+
+def _subprocess_order(req) -> dict:
+    """Execute order in a fresh subprocess — guaranteed clean IPC pipe."""
+    import subprocess, json
+    script = f"""
+import MetaTrader5 as mt5, json, sys
+mt5.initialize(path=r'{MT5_PATH}', login={MT5_LOGIN}, password='{MT5_PASSWORD}', server='{MT5_SERVER}')
+sym = '{req.symbol}'
+info = mt5.symbol_info(sym)
+if not info:
+    for alias in {list(_SYMBOL_ALIASES.get(req.symbol.upper(), []))}:
+        info = mt5.symbol_info(alias)
+        if info: sym = alias; break
+    if not info:
+        for sfx in ['.z','m','+','.a']:
+            info = mt5.symbol_info(sym+sfx)
+            if info: sym = sym+sfx; break
+if not info:
+    print(json.dumps({{"success":False,"error":"Symbol not found"}}))
+    sys.exit()
+mt5.symbol_select(sym, True)
+step = info.volume_step or 0.01
+lots = max(info.volume_min, min({req.lot_size}, info.volume_max))
+lots = round(round(lots/step)*step, 2)
+is_buy = '{req.direction}'.upper() == 'BUY'
+tick = mt5.symbol_info_tick(sym)
+price = tick.ask if is_buy else tick.bid
+r = mt5.order_send({{
+    'action': mt5.TRADE_ACTION_DEAL, 'symbol': sym, 'volume': lots,
+    'type': mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
+    'price': price, 'sl': {req.stop_loss}, 'tp': {req.take_profit},
+    'deviation': 10, 'magic': 20250101,
+    'comment': '{"".join(c for c in req.comment[:31] if c.isascii() and (c.isalnum() or c in " -_."))}',
+    'type_time': mt5.ORDER_TIME_GTC, 'type_filling': mt5.ORDER_FILLING_FOK,
+}})
+if r and r.retcode == 10009:
+    print(json.dumps({{"success":True,"ticket":str(r.order)}}))
+else:
+    print(json.dumps({{"success":False,"error":f"retcode {{r.retcode if r else 'None'}}: {{r.comment if r else mt5.last_error()}}"}}))
+mt5.shutdown()
+"""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=15,
+        )
+        if proc.stdout.strip():
+            result = json.loads(proc.stdout.strip())
+            if result.get("success"):
+                logger.info("SUBPROCESS OK: ticket=%s %s %s", result.get("ticket"), req.direction, req.symbol)
+            else:
+                logger.error("SUBPROCESS FAILED: %s", result.get("error"))
+            return result
+        logger.error("Subprocess no output. stderr: %s", proc.stderr[-300:] if proc.stderr else "")
+        return {"success": False, "error": "Subprocess no output"}
+    except Exception as e:
+        logger.error("Subprocess error: %s", e)
+        return {"success": False, "error": str(e)}
 
 
 @app.post("/modify_sl")
