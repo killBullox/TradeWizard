@@ -53,7 +53,7 @@ _SYMBOL_ALIASES = {
     "XAUUSD": ["GOLD", "#GOLD", "XAUUSD", "XAUUSDm"],
     "XAGUSD": ["SILVER", "#SILVER", "XAGUSD"],
     "US30": ["US_30", "US30", "DJ30", "#DJ30"],
-    "NAS100": ["NAS100", "USTEC", "#NAS100"],
+    "NAS100": ["US_TECH100", "NAS100", "USTEC", "#NAS100"],
     "US500": ["US_500", "US500", "SP500", "#SP500"],
 }
 
