@@ -224,13 +224,14 @@
         <div class="card">
           <div class="card-header">
             <h3>All Trades</h3>
-            <div class="filter-row">
+            <div class="filter-row" style="display:flex;gap:8px;align-items:center">
               <select id="trades-filter" class="select">
                 <option value="">All</option>
                 <option value="ACTIVE">Active</option>
                 <option value="CLOSED">Closed</option>
                 <option value="CANCELLED">Cancelled</option>
               </select>
+              <button class="btn btn-ghost btn-sm" onclick="exportTradesCSV()">Export CSV</button>
             </div>
           </div>
           <div class="table-wrapper">

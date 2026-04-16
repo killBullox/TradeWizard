@@ -1013,6 +1013,33 @@ document.getElementById('btn-clear-feed')?.addEventListener('click', () => {
 });
 document.getElementById('trades-filter')?.addEventListener('change', () => renderTradesTable(state.trades));
 
+function exportTradesCSV() {
+  const trades = state.trades || [];
+  if (!trades.length) return showToast('error', 'No trades to export');
+  const filter = document.getElementById('trades-filter')?.value || '';
+  const filtered = filter ? trades.filter(t => t.status === filter) : trades.filter(t => t.status !== 'CANCELLED');
+  const headers = ['ID','Symbol','Direction','Setup','Status','Entry Time','Exit Time','Entry Price','Exit Price','SL','TP1','TP2','TP3','Lots','RR','P&L ($)','P&L (pips)','Result','Notes'];
+  const rows = filtered.map(t => [
+    t.id, t.symbol, t.direction, t.ict_setup || '', t.status,
+    t.open_time || '', t.close_time || '',
+    t.entry_price || '', t.close_price || '',
+    t.stop_loss || '', t.take_profit_1 || '', t.take_profit_2 || '', t.take_profit_3 || '',
+    t.lot_size || '', t.rr_ratio || '',
+    t.pnl_usd || '', t.pnl_pips || '', t.result || '',
+    (t.close_notes || '').replace(/[\n\r,]/g, ' '),
+  ]);
+  const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+  const blob = new Blob([csv], {type: 'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `tradewizard_trades_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('success', `Exported ${filtered.length} trades`);
+}
+window.exportTradesCSV = exportTradesCSV;
+
 window.closeSettingsModal = () => { document.getElementById('settings-modal').style.display = 'none'; };
 
 // ── News ─────────────────────────────────────────────────────────────
