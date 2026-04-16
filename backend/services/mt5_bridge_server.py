@@ -510,6 +510,7 @@ def check_margin(req: CheckMarginRequest):
                 margin_required = round((req.lots * sym_info.trade_contract_size * price) / leverage, 2)
 
     ok = check.retcode == mt5.TRADE_RETCODE_DONE or margin_free > margin_required * 1.1
+    max_lots = req.lots
     if not ok and margin_required > 0:
         ratio = (margin_free * 0.9) / margin_required
         max_lots = _normalize_lots(symbol, req.lots * ratio)
