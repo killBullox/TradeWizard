@@ -150,32 +150,21 @@ _mt5_initialized = False
 _keepalive_thread = None
 
 def _keepalive_loop():
-    """Ping MT5 every 60s with order_check to keep the order pipe alive.
-    account_info() works even with a dead pipe — order_check exercises
-    the same code path as order_send."""
+    """Safe keepalive: only account_info() — does NOT corrupt the order pipe.
+    The old keepalive used symbol_info_tick + order_check which left the pipe
+    in a state where the next order_send returned None instantly."""
     import time
     while True:
         time.sleep(60)
         if _mt5_initialized and MT5_AVAILABLE:
             try:
-                # Use order_check (not account_info) to keep the order pipe warm
-                tick = mt5.symbol_info_tick("EURUSD")
-                if tick:
-                    check = mt5.order_check({
-                        "action": mt5.TRADE_ACTION_DEAL,
-                        "symbol": "EURUSD",
-                        "volume": 0.01,
-                        "type": mt5.ORDER_TYPE_BUY,
-                        "price": tick.ask,
-                    })
-                    if check is None:
-                        logger.warning("Keepalive: order_check returned None — reconnecting...")
-                        _connect()
-                else:
-                    logger.warning("Keepalive: no tick data — reconnecting...")
+                info = mt5.account_info()
+                if info is None:
+                    logger.warning("Keepalive: account_info None — reconnecting...")
                     _connect()
             except Exception as e:
                 logger.warning("Keepalive error: %s", e)
+
 
 @app.on_event("startup")
 def startup():
@@ -322,6 +311,8 @@ def order_send(req: OrderRequest):
         logger.info("SIM OPEN %s %s @ lots=%.2f", req.direction, req.symbol, req.lot_size)
         return {"success": True, "ticket": str(ticket), "simulated": True}
 
+    # STEP 1 — all MT5 calls that can corrupt the IPC pipe BEFORE _fresh_connect.
+    # Between _fresh_connect() and order_send() we must NOT call any other MT5 function.
     symbol = _normalize_symbol(req.symbol)
     if not symbol:
         return {"success": False, "error": f"Symbol not found: {req.symbol}"}
@@ -339,19 +330,21 @@ def order_send(req: OrderRequest):
     if req.order_type.upper() != "MARKET":
         logger.info("Overriding %s to MARKET for %s %s", req.order_type, req.direction, symbol)
 
+    # deviation=50 lets the broker accept small slippage — needed because the tick
+    # captured above is a few hundred ms old by the time order_send runs, and even
+    # older on retry (we don't refresh tick on retry to keep the pipe clean).
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
         "volume": lots,
         "type": otype,
         "price": price,
-        "deviation": 10,
+        "deviation": 50,
         "magic": 20250101,
         "comment": comment,
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
-    # Only include SL/TP if non-zero — some brokers reject sl=0/tp=0
     if req.stop_loss:
         request["sl"] = req.stop_loss
     if req.take_profit:
@@ -360,28 +353,24 @@ def order_send(req: OrderRequest):
     logger.info("MT5 OPEN: %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
                  req.direction, symbol, lots, price, req.stop_loss, req.take_profit)
 
+    # STEP 2 — reset the pipe, then order_send with NO other MT5 calls in between.
+    # This is the critical invariant per the IPC-corruption finding.
+    import time as _time
     attempt_num = 0
-    result = mt5.order_send(request)
+    result = None
+    for attempt in range(4):
+        if attempt > 0:
+            logger.warning("order_send None (retry %d/3) — waiting 2s...", attempt)
+            _time.sleep(2)
+        _fresh_connect()
+        result = mt5.order_send(request)
+        if result is not None:
+            attempt_num = attempt
+            break
+
     if result is None:
-        import time as _time
-        for attempt in range(1, 4):
-            logger.warning("order_send None (retry %d/3) — waiting 5s...", attempt)
-            _time.sleep(5)
-            _fresh_connect()
-            tick = mt5.symbol_info_tick(symbol)
-            if tick:
-                request["price"] = tick.ask if is_buy else tick.bid
-            result = mt5.order_send(request)
-            if result is not None:
-                attempt_num = attempt
-                break
-        if result is None:
-            logger.warning("All 3 retries failed — subprocess fallback (attempt 4)")
-            sub_result = _subprocess_order(req)
-            if sub_result.get("success"):
-                logger.info("OPEN OK (subprocess, attempt 4): ticket=%s %s %s",
-                            sub_result.get("ticket"), req.direction, symbol)
-            return sub_result
+        logger.error("order_send returned None after 4 attempts — last_error=%s", mt5.last_error())
+        return {"success": False, "error": f"order_send None after retries: {mt5.last_error()}"}
 
     if result.retcode != mt5.TRADE_RETCODE_DONE:
         logger.error("Order failed: retcode=%d comment='%s'", result.retcode, result.comment)
@@ -390,67 +379,6 @@ def order_send(req: OrderRequest):
     logger.info("OPEN OK (attempt %d): ticket=%s %s %s @ %.5f",
                 attempt_num, result.order, req.direction, symbol, price)
     return {"success": True, "ticket": str(result.order), "message": "Order placed"}
-
-
-def _subprocess_order(req) -> dict:
-    """Execute order in a fresh subprocess — guaranteed clean IPC pipe."""
-    import subprocess, json
-    script = f"""
-import MetaTrader5 as mt5, json, sys
-mt5.initialize(path=r'{MT5_PATH}', login={MT5_LOGIN}, password='{MT5_PASSWORD}', server='{MT5_SERVER}')
-sym = '{req.symbol}'
-info = mt5.symbol_info(sym)
-if not info:
-    for alias in {list(_SYMBOL_ALIASES.get(req.symbol.upper(), []))}:
-        info = mt5.symbol_info(alias)
-        if info: sym = alias; break
-    if not info:
-        for sfx in ['.z','m','+','.a']:
-            info = mt5.symbol_info(sym+sfx)
-            if info: sym = sym+sfx; break
-if not info:
-    print(json.dumps({{"success":False,"error":"Symbol not found"}}))
-    sys.exit()
-mt5.symbol_select(sym, True)
-step = info.volume_step or 0.01
-lots = max(info.volume_min, min({req.lot_size}, info.volume_max))
-lots = round(round(lots/step)*step, 2)
-is_buy = '{req.direction}'.upper() == 'BUY'
-tick = mt5.symbol_info_tick(sym)
-price = tick.ask if is_buy else tick.bid
-req_dict = {{
-    'action': mt5.TRADE_ACTION_DEAL, 'symbol': sym, 'volume': lots,
-    'type': mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
-    'price': price, 'deviation': 10, 'magic': 20250101,
-    'comment': '{"".join(c for c in req.comment[:31] if c.isascii() and (c.isalnum() or c in " -_."))}',
-    'type_time': mt5.ORDER_TIME_GTC, 'type_filling': mt5.ORDER_FILLING_FOK,
-}}
-if {req.stop_loss}: req_dict['sl'] = {req.stop_loss}
-if {req.take_profit}: req_dict['tp'] = {req.take_profit}
-r = mt5.order_send(req_dict)
-if r and r.retcode == 10009:
-    print(json.dumps({{"success":True,"ticket":str(r.order)}}))
-else:
-    print(json.dumps({{"success":False,"error":f"retcode {{r.retcode if r else 'None'}}: {{r.comment if r else mt5.last_error()}}"}}))
-mt5.shutdown()
-"""
-    try:
-        proc = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True, text=True, timeout=15,
-        )
-        if proc.stdout.strip():
-            result = json.loads(proc.stdout.strip())
-            if result.get("success"):
-                logger.info("SUBPROCESS OK: ticket=%s %s %s", result.get("ticket"), req.direction, req.symbol)
-            else:
-                logger.error("SUBPROCESS FAILED: %s", result.get("error"))
-            return result
-        logger.error("Subprocess no output. stderr: %s", proc.stderr[-300:] if proc.stderr else "")
-        return {"success": False, "error": "Subprocess no output"}
-    except Exception as e:
-        logger.error("Subprocess error: %s", e)
-        return {"success": False, "error": str(e)}
 
 
 @app.post("/modify_sl")
@@ -470,12 +398,16 @@ def modify_sl(req: ModifySLRequest):
         "action": mt5.TRADE_ACTION_SLTP,
         "position": ticket_int,
         "sl": req.new_sl,
-        "tp": p.tp,
     }
+    if p.tp:
+        request["tp"] = p.tp
+
+    _fresh_connect()
     result = mt5.order_send(request)
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         code = result.retcode if result else -1
-        return {"success": False, "error": f"SLTP failed: {code}"}
+        err = mt5.last_error() if result is None else ""
+        return {"success": False, "error": f"SLTP failed: {code} {err}"}
     return {"success": True, "ticket": str(ticket_int), "message": f"SL modified to {req.new_sl}"}
 
 
@@ -505,6 +437,7 @@ def close(req: CloseRequest):
     orders = mt5.orders_get(ticket=ticket_int)
     if orders:
         request = {"action": mt5.TRADE_ACTION_REMOVE, "order": ticket_int}
+        _fresh_connect()
         result = mt5.order_send(request)
         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
             return {"success": True, "ticket": req.ticket, "message": "Pending order cancelled"}
@@ -530,7 +463,8 @@ def close_partial(req: ClosePartialRequest):
     step = mt5.symbol_info(p.symbol).volume_step or 0.01
     close_vol = max(step, round(round(close_vol / step) * step, 2))
     is_buy = p.type == mt5.ORDER_TYPE_BUY
-    price = mt5.symbol_info_tick(p.symbol).bid if is_buy else mt5.symbol_info_tick(p.symbol).ask
+    tick = mt5.symbol_info_tick(p.symbol)
+    price = tick.bid if is_buy else tick.ask
     otype = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
@@ -539,15 +473,18 @@ def close_partial(req: ClosePartialRequest):
         "volume": close_vol,
         "type": otype,
         "price": price,
-        "deviation": 10,
+        "deviation": 50,
         "magic": 20250101,
         "comment": "TW-PARTIAL",
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
+
+    _fresh_connect()
     result = mt5.order_send(request)
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         code = result.retcode if result else -1
-        return {"success": False, "error": f"Partial close failed: {code}"}
+        err = mt5.last_error() if result is None else ""
+        return {"success": False, "error": f"Partial close failed: {code} {err}"}
     return {"success": True, "ticket": req.ticket, "closed_volume": close_vol}
 
 
@@ -624,7 +561,8 @@ def check_margin(req: CheckMarginRequest):
 
 def _close_position(p) -> dict:
     is_buy = p.type == mt5.ORDER_TYPE_BUY
-    price = mt5.symbol_info_tick(p.symbol).bid if is_buy else mt5.symbol_info_tick(p.symbol).ask
+    tick = mt5.symbol_info_tick(p.symbol)
+    price = tick.bid if is_buy else tick.ask
     otype = mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
@@ -633,15 +571,18 @@ def _close_position(p) -> dict:
         "volume": p.volume,
         "type": otype,
         "price": price,
-        "deviation": 10,
+        "deviation": 50,
         "magic": 20250101,
         "comment": "TW-CLOSE",
         "type_filling": mt5.ORDER_FILLING_FOK,
     }
+
+    _fresh_connect()
     result = mt5.order_send(request)
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
         code = result.retcode if result else -1
-        return {"success": False, "error": f"Close failed: {code}"}
+        err = mt5.last_error() if result is None else ""
+        return {"success": False, "error": f"Close failed: {code} {err}"}
     return {"success": True, "ticket": str(p.ticket), "close_price": price, "message": "Closed"}
 
 
