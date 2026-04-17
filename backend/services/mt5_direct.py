@@ -78,7 +78,7 @@ class MT5Direct:
     # ── WRITE operations ─────────────────────────────────────────────────
 
     def open_trade(self, signal: dict) -> dict:
-        result = self._post("/order_send", {
+        payload = {
             "symbol": signal.get("symbol", ""),
             "direction": signal.get("direction", "BUY"),
             "order_type": signal.get("order_type", "MARKET"),
@@ -87,7 +87,21 @@ class MT5Direct:
             "take_profit": float(signal.get("take_profit", signal.get("take_profit_1", 0))),
             "lot_size": float(signal.get("lot_size", 0.01)),
             "comment": signal.get("comment", "TW-ICT"),
-        })
+        }
+        result = self._post("/order_send", payload)
+
+        # If the bridge is restarting after a wedge, wait for the watchdog to
+        # respawn it (main.py monitors every 3s) and retry once. This is the
+        # only known recovery path for the IPC-pipe wedge state.
+        if result and not result.get("success") and "will restart" in str(result.get("error", "")):
+            import time as _time
+            logger.warning("MT5 OPEN: bridge respawning, waiting 7s before retry...")
+            _time.sleep(7)
+            # Reconnect the client to the new bridge process
+            self.connected = False
+            self.connect()
+            result = self._post("/order_send", payload)
+
         if result and result.get("success"):
             logger.info("MT5 OPEN OK (bridge): ticket=%s %s %s",
                         result.get("ticket"), signal.get("direction"), signal.get("symbol"))
