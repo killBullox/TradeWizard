@@ -95,13 +95,22 @@ def _connect() -> bool:
 
 
 def _fresh_connect():
-    """Reinitialize MT5 without shutdown (shutdown blocks indefinitely)."""
+    """Reinitialize MT5 without shutdown (shutdown blocks indefinitely).
+    Verifies the login matches MT5_LOGIN — initialize(path=...) can silently
+    route to the wrong pipe when multiple MT5 terminals are installed
+    (documented issue, mql5 forum 351590)."""
     if not MT5_AVAILABLE:
         return
     kw = _init_kwargs()
     ok = mt5.initialize(**kw)
     if not ok:
-            logger.error("fresh_connect FAILED after shutdown: %s", mt5.last_error())
+        logger.error("fresh_connect FAILED: %s", mt5.last_error())
+        return
+    if MT5_LOGIN:
+        info = mt5.account_info()
+        if info and info.login != MT5_LOGIN:
+            logger.error("fresh_connect routed to wrong account %d (expected %d)",
+                         info.login, MT5_LOGIN)
 
 
 def _normalize_symbol(raw: str) -> str:
@@ -148,22 +157,26 @@ app = FastAPI(title="MT5 Bridge", version="1.0.0")
 
 _mt5_initialized = False
 _keepalive_thread = None
+_keepalive_symbol = "EURUSD"
 
 def _keepalive_loop():
-    """Safe keepalive: only account_info() — does NOT corrupt the order pipe.
-    The old keepalive used symbol_info_tick + order_check which left the pipe
-    in a state where the next order_send returned None instantly."""
+    """Heartbeat with symbol_info_tick every 1s — keeps the IPC pipe warm
+    so the first order_send after an idle period doesn't hit the dead-pipe
+    state (see research report; this is the most-cited fix across mql5 forum
+    and forexfactory threads).
+
+    Note: the original TW memory said symbol_info_tick corrupts the pipe —
+    that refers to calling it IMMEDIATELY before order_send in the same
+    sequence. Background heartbeat is a different pattern and is actively
+    recommended."""
     import time
     while True:
-        time.sleep(60)
+        time.sleep(1)
         if _mt5_initialized and MT5_AVAILABLE:
             try:
-                info = mt5.account_info()
-                if info is None:
-                    logger.warning("Keepalive: account_info None — reconnecting...")
-                    _connect()
+                mt5.symbol_info_tick(_keepalive_symbol)
             except Exception as e:
-                logger.warning("Keepalive error: %s", e)
+                logger.warning("Keepalive tick error: %s", e)
 
 
 @app.on_event("startup")
@@ -369,8 +382,15 @@ def order_send(req: OrderRequest):
             break
 
     if result is None:
-        logger.error("order_send returned None after 4 attempts — last_error=%s", mt5.last_error())
-        return {"success": False, "error": f"order_send None after retries: {mt5.last_error()}"}
+        # Pipe is wedged and re-initialize didn't fix it — this state can only
+        # be cleared by a fresh process (mql5 forum 351590, 439845). Commit
+        # suicide so main.py's watchdog respawns the bridge.
+        last_err = mt5.last_error()
+        logger.error("order_send returned None after 4 attempts — last_error=%s", last_err)
+        logger.error("IPC pipe is wedged — exiting so main.py watchdog can respawn the bridge")
+        import os as _os, threading as _th
+        _th.Timer(0.5, lambda: _os._exit(1)).start()
+        return {"success": False, "error": f"order_send None after retries: {last_err} (bridge will restart)"}
 
     if result.retcode != mt5.TRADE_RETCODE_DONE:
         logger.error("Order failed: retcode=%d comment='%s'", result.retcode, result.comment)

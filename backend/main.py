@@ -91,21 +91,50 @@ orchestrator: Orchestrator | None = None
 #  App Lifecycle
 # ------------------------------------------------------------------ #
 _bridge_proc = None
+_bridge_watchdog_thread = None
+_bridge_watchdog_stop = False
+
+
+def _spawn_bridge():
+    """Spawn (or respawn) the MT5 bridge subprocess."""
+    global _bridge_proc
+    import subprocess
+    bridge_script = os.path.join(os.path.dirname(__file__), "services", "mt5_bridge_server.py")
+    _bridge_log = open(os.path.join(_log_dir, "mt5_bridge.log"), "a", encoding="utf-8")
+    _bridge_proc = subprocess.Popen(
+        [sys.executable, bridge_script],
+        stdout=subprocess.DEVNULL,
+        stderr=_bridge_log,
+    )
+    logger.info("MT5 bridge subprocess started (PID %d)", _bridge_proc.pid)
+
+
+def _bridge_watchdog_loop():
+    """Respawn the bridge if it exits. The bridge commits suicide (os._exit 1)
+    when its IPC pipe is wedged beyond recovery (4 failed order_send retries)."""
+    import time
+    while not _bridge_watchdog_stop:
+        time.sleep(3)
+        if _bridge_proc is not None and _bridge_proc.poll() is not None:
+            code = _bridge_proc.returncode
+            logger.warning("MT5 bridge exited with code %s — respawning", code)
+            try:
+                _spawn_bridge()
+                time.sleep(3)
+                from services.mt5_direct import get_mt5_direct
+                mt5 = get_mt5_direct()
+                mt5.connected = False  # force reconnect on next call
+                mt5.connect()
+            except Exception as exc:
+                logger.error("Bridge respawn failed: %s", exc)
 
 
 def _start_mt5_direct():
-    """Start the MT5 bridge subprocess, then connect the client."""
-    global _bridge_proc
-    import subprocess, time
-    bridge_script = os.path.join(os.path.dirname(__file__), "services", "mt5_bridge_server.py")
+    """Start the MT5 bridge subprocess, then connect the client, then arm watchdog."""
+    global _bridge_watchdog_thread
+    import time, threading
     try:
-        _bridge_log = open(os.path.join(_log_dir, "mt5_bridge.log"), "a", encoding="utf-8")
-        _bridge_proc = subprocess.Popen(
-            [sys.executable, bridge_script],
-            stdout=subprocess.DEVNULL,
-            stderr=_bridge_log,
-        )
-        logger.info("MT5 bridge subprocess started (PID %d)", _bridge_proc.pid)
+        _spawn_bridge()
         # Wait for bridge to be ready
         time.sleep(3)
         from services.mt5_direct import get_mt5_direct
@@ -114,6 +143,9 @@ def _start_mt5_direct():
             logger.info("MT5 bridge connection established")
         else:
             logger.warning("MT5 bridge not responding yet — will retry on first trade")
+        # Arm watchdog to respawn on exit
+        _bridge_watchdog_thread = threading.Thread(target=_bridge_watchdog_loop, daemon=True)
+        _bridge_watchdog_thread.start()
     except Exception as exc:
         logger.warning("Could not start MT5 bridge: %s", exc)
 
@@ -238,6 +270,9 @@ async def lifespan(app: FastAPI):
         get_mt5_direct().disconnect()
     except Exception:
         pass
+    # Disarm watchdog before terminating the bridge so it doesn't try to respawn
+    global _bridge_watchdog_stop
+    _bridge_watchdog_stop = True
     if _bridge_proc and _bridge_proc.poll() is None:
         try:
             _bridge_proc.terminate()
