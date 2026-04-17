@@ -130,9 +130,21 @@ def _bridge_watchdog_loop():
 
 
 def _start_mt5_direct():
-    """Start the MT5 bridge subprocess, then connect the client, then arm watchdog."""
+    """Start the MT5 bridge subprocess, then connect the client, then arm watchdog.
+    In lab mode the bridge is NOT started — lab uses the production bridge on
+    port 5555 (shared, read-only) and operates in paper mode."""
     global _bridge_watchdog_thread
     import time, threading
+    import os as _os
+    if _os.getenv("SYSTEM_MODE", "production").lower() == "lab":
+        logger.info("Lab mode: skipping bridge spawn, using production bridge read-only")
+        try:
+            from services.mt5_direct import get_mt5_direct
+            mt5 = get_mt5_direct()
+            mt5.connect()
+        except Exception:
+            logger.warning("Lab: could not connect to production bridge (non-fatal)")
+        return
     try:
         _spawn_bridge()
         # Wait for bridge to be ready
@@ -311,6 +323,15 @@ if os.path.exists(frontend_dir):
             raise HTTPException(404, "Not found")
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         response.headers["Pragma"] = "no-cache"
+        return FileResponse(full)
+
+    @app.get("/compare")
+    async def compare_page(response: Response):
+        """Side-by-side dashboard comparing Production (8000) vs Lab (8001)."""
+        full = os.path.join(frontend_dir, "compare.html")
+        if not os.path.exists(full):
+            raise HTTPException(404, "compare.html missing")
+        response.headers["Cache-Control"] = "no-store"
         return FileResponse(full)
 
 
@@ -1365,6 +1386,116 @@ async def clear_strategy_memory():
         result = await s.execute(delete(StrategyMemory))
         await s.commit()
     return {"deleted": result.rowcount}
+
+
+@app.get("/api/system-mode")
+async def get_system_mode():
+    """Tells the frontend which instance it is talking to (production vs lab)."""
+    import os as _os
+    return {
+        "mode": _os.getenv("SYSTEM_MODE", "production").lower(),
+        "db_file": "tradewizard_lab.db" if _os.getenv("SYSTEM_MODE", "production").lower() == "lab" else "tradewizard.db",
+    }
+
+
+# ─── Learning Rules API ────────────────────────────────────────────────
+from models.database import LearningRule
+
+
+@app.get("/api/learning-rules")
+async def list_learning_rules(status: str | None = None):
+    """List learning rules, optionally filtered by status."""
+    import json as _json
+    async with async_session_factory() as s:
+        q = select(LearningRule)
+        if status:
+            q = q.where(LearningRule.status == status.upper())
+        rows = (await s.execute(q.order_by(LearningRule.created_at.desc()))).scalars().all()
+    result = []
+    for r in rows:
+        total_feedback = r.times_correct + r.times_wrong
+        accuracy = round(r.times_correct / total_feedback * 100, 1) if total_feedback > 0 else None
+        result.append({
+            "id":            r.id,
+            "rule_type":     r.rule_type,
+            "setup_type":    r.setup_type,
+            "symbol":        r.symbol,
+            "session":       r.session,
+            "condition":     _json.loads(r.condition or "{}"),
+            "action":        _json.loads(r.action or "{}"),
+            "confidence":    r.confidence,
+            "sample_size":   r.sample_size,
+            "source_type":   r.source_type,
+            "source_id":     r.source_id,
+            "description":   r.description,
+            "status":        r.status,
+            "times_applied": r.times_applied,
+            "times_correct": r.times_correct,
+            "times_wrong":   r.times_wrong,
+            "accuracy":      accuracy,
+            "created_at":    r.created_at.isoformat() if r.created_at else None,
+            "activated_at":  r.activated_at.isoformat() if r.activated_at else None,
+            "confirmed_at":  r.confirmed_at.isoformat() if r.confirmed_at else None,
+            "deprecated_at": r.deprecated_at.isoformat() if r.deprecated_at else None,
+        })
+    return result
+
+
+@app.get("/api/learning-rules/stats")
+async def learning_rules_stats():
+    """Summary metrics for the learning dashboard."""
+    async with async_session_factory() as s:
+        rows = (await s.execute(select(LearningRule))).scalars().all()
+
+    from collections import Counter
+    status_counts = Counter(r.status for r in rows)
+    type_counts = Counter(r.rule_type for r in rows)
+
+    active = [r for r in rows if r.status in ("ACTIVE", "CONFIRMED")]
+    total_applications = sum(r.times_applied for r in active)
+    total_correct = sum(r.times_correct for r in active)
+    total_wrong = sum(r.times_wrong for r in active)
+    total_feedback = total_correct + total_wrong
+    avg_accuracy = round(total_correct / total_feedback * 100, 1) if total_feedback > 0 else None
+
+    # Top 5 by impact
+    top_rules = sorted(active, key=lambda r: r.times_applied, reverse=True)[:5]
+    top = [{"id": r.id, "description": r.description, "times_applied": r.times_applied,
+            "accuracy": (round(r.times_correct / (r.times_correct + r.times_wrong) * 100, 1)
+                         if (r.times_correct + r.times_wrong) > 0 else None)}
+           for r in top_rules]
+
+    return {
+        "by_status": dict(status_counts),
+        "by_type":   dict(type_counts),
+        "total_applications": total_applications,
+        "avg_accuracy": avg_accuracy,
+        "top_rules":  top,
+    }
+
+
+@app.post("/api/learning-rules/{rule_id}/activate")
+async def activate_learning_rule(rule_id: int):
+    from services.learning_rules import activate_rule
+    await activate_rule(rule_id)
+    return {"id": rule_id, "status": "ACTIVE"}
+
+
+@app.post("/api/learning-rules/{rule_id}/deprecate")
+async def deprecate_learning_rule(rule_id: int, data: dict | None = None):
+    from services.learning_rules import deprecate_rule
+    reason = (data or {}).get("reason", "Manual deprecation")
+    await deprecate_rule(rule_id, reason)
+    return {"id": rule_id, "status": "DEPRECATED"}
+
+
+@app.post("/api/learning-rules")
+async def create_learning_rule(data: dict):
+    """Create a manual learning rule. Expected JSON: {rule_type, setup_type, symbol,
+    session, condition, action, confidence, description}."""
+    from services.learning_rules import ingest_proposed_rules
+    ids = await ingest_proposed_rules([data], source_type="MANUAL")
+    return {"created_ids": ids}
 
 
 @app.post("/api/paper/close/{trade_id}")

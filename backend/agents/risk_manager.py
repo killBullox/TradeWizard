@@ -140,10 +140,44 @@ class RiskManagerAgent(BaseAgent):
         pip_usd = PIP_USD.get(symbol, 10.0)
         lot_size = max(0.01, round(risk_usd / (sl_pips * pip_usd), 2))
 
-        # ── Win probability with adjustments ──────────────────────────────
-        base_prob = SETUP_WIN_RATES.get(setup_type, 0.55)
+        # Apply rule_verdict: size_factor and SL adjustments (from rule_engine)
+        rule_verdict = strategy.get("_rule_verdict") or {}
+        size_factor = float(rule_verdict.get("size_factor", 1.0))
+        if size_factor != 1.0:
+            new_lot = max(0.01, round(lot_size * size_factor, 2))
+            risk_factors.append({
+                "factor": f"Rule size adjustment x{size_factor:.2f}",
+                "severity": "LOW",
+                "description": f"lot {lot_size} → {new_lot}",
+            })
+            lot_size = new_lot
+        for adj in rule_verdict.get("adjustments", []):
+            if adj.get("type") == "ADJUST_SL":
+                min_p = float(adj.get("min_pips", 0))
+                if min_p > sl_pips:
+                    risk_factors.append({
+                        "factor": f"Rule SL enforced: min {min_p}p",
+                        "severity": "MEDIUM",
+                        "description": f"sl {sl_pips}p → {min_p}p by rule #{adj.get('rule_id')}",
+                    })
+                    sl_pips = min_p
+
+        # ── Win probability: prefer REAL data from StrategyMemory ─────────
+        # Only use real data if sample is big enough (>=10 trades) to be
+        # statistically meaningful; otherwise fall back to hard-coded.
+        from services.strategy_memory import get_win_rate
+        real = await get_win_rate(setup_type, symbol)
+        real_source = None
+        if real and real["sample_size"] >= 10:
+            base_prob = real["win_rate"] / 100
+            real_source = f"real {real['scope']} {real['wins']}W/{real['losses']}L"
+        else:
+            base_prob = SETUP_WIN_RATES.get(setup_type, 0.55)
+            real_source = f"hard-coded (sample {real['sample_size'] if real else 0}<10)"
         win_prob = base_prob
         adjustments = []
+        if real_source:
+            adjustments.append({"factor": f"base_prob source: {real_source}", "delta": 0})
 
         # Session bonus
         session = strategy.get("session", "")

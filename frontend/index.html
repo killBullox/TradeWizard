@@ -7,6 +7,64 @@
   <link rel="stylesheet" href="/static/styles.css" />
   <!-- Lightweight Charts v4 (TradingView OSS) -->
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+  <script>
+    // ── System Mode Switcher (Production / Lab) ─────────────────────
+    // Intercepts fetch() to /api/ and WebSocket() to route to the selected backend.
+    // Persisted in localStorage.
+    (function () {
+      const DEFAULT_MODE = 'production';
+      const BACKENDS = {
+        production: { http: '', ws: '' },        // same-origin (backend serves frontend)
+        lab:        { http: 'http://' + location.hostname + ':8001',
+                      ws:   'ws://'   + location.hostname + ':8001' },
+      };
+      window._TW_MODE = localStorage.getItem('tw_mode') || DEFAULT_MODE;
+      window._TW_BACKENDS = BACKENDS;
+
+      const _origFetch = window.fetch;
+      window.fetch = function (url, opts) {
+        if (typeof url === 'string' && url.startsWith('/api/')) {
+          url = (BACKENDS[window._TW_MODE]?.http || '') + url;
+        }
+        return _origFetch.call(this, url, opts);
+      };
+
+      const _OrigWS = window.WebSocket;
+      window.WebSocket = function (url, protocols) {
+        if (typeof url === 'string' && (url.startsWith('/ws') || url.startsWith('ws://') && url.includes(location.host))) {
+          const base = BACKENDS[window._TW_MODE]?.ws;
+          if (base && !url.startsWith('http') && !url.startsWith('ws')) {
+            url = base + url;
+          }
+        }
+        return protocols ? new _OrigWS(url, protocols) : new _OrigWS(url);
+      };
+      window.WebSocket.prototype = _OrigWS.prototype;
+      window.WebSocket.CLOSED = _OrigWS.CLOSED;
+      window.WebSocket.CLOSING = _OrigWS.CLOSING;
+      window.WebSocket.CONNECTING = _OrigWS.CONNECTING;
+      window.WebSocket.OPEN = _OrigWS.OPEN;
+
+      window.twSwitchMode = function (mode) {
+        if (!BACKENDS[mode]) return;
+        localStorage.setItem('tw_mode', mode);
+        location.reload();
+      };
+    })();
+  </script>
+  <style>
+    .tw-mode-switcher {
+      display: inline-flex; align-items: center; gap: 4px;
+      background: rgba(0,0,0,0.25); border-radius: 6px; padding: 3px; margin-right: 10px;
+    }
+    .tw-mode-btn {
+      padding: 4px 10px; font-size: 0.75rem; font-weight: 600;
+      border: none; background: transparent; color: #9ca3af;
+      border-radius: 4px; cursor: pointer;
+    }
+    .tw-mode-btn.active { background: #2563eb; color: #fff; }
+    .tw-mode-btn.lab.active { background: #d97706; }
+  </style>
 </head>
 <body>
   <!-- Header -->
@@ -26,6 +84,14 @@
       </div>
     </div>
     <div class="header-right">
+      <div class="tw-mode-switcher" id="tw-mode-switcher" title="Backend: Production (real MT5) or Lab (paper + learning rules)">
+        <button class="tw-mode-btn" id="tw-mode-prod" onclick="twSwitchMode('production')">⚡ Production</button>
+        <button class="tw-mode-btn lab" id="tw-mode-lab" onclick="twSwitchMode('lab')">🧪 Lab</button>
+      </div>
+      <script>
+        // Highlight the active mode
+        document.getElementById('tw-mode-' + (window._TW_MODE === 'lab' ? 'lab' : 'prod')).classList.add('active');
+      </script>
       <div id="rejection-indicator" style="display:none;cursor:pointer;position:relative" onclick="showRejections()" title="Trade rifiutati — clicca per dettagli">
         <span style="display:inline-flex;align-items:center;gap:5px;background:rgba(239,68,68,0.15);color:#ef4444;padding:4px 12px;border-radius:6px;font-size:0.82rem;font-weight:700">
           <span style="width:10px;height:10px;background:#ef4444;border-radius:50%;display:inline-block;animation:pulse-red 1.5s infinite"></span>

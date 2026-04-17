@@ -14,7 +14,13 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
-DATABASE_URL = "sqlite+aiosqlite:///./tradewizard.db"
+import os as _os
+
+# SYSTEM_MODE selects DB and behavior. Default "production" (real MT5, fase 1 only).
+# "lab" uses a separate DB, paper-mode, and activates all 4 phases.
+SYSTEM_MODE = _os.getenv("SYSTEM_MODE", "production").lower()
+_DB_NAME = "tradewizard_lab.db" if SYSTEM_MODE == "lab" else "tradewizard.db"
+DATABASE_URL = f"sqlite+aiosqlite:///./{_DB_NAME}"
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -55,6 +61,8 @@ class Trade(Base):
     close_notes = Column(Text, nullable=True)        # audit trail: why/how trade was closed
     is_paper = Column(Boolean, default=False)
     archived = Column(Boolean, default=False)
+    market_context = Column(Text, nullable=True)     # JSON: market snapshot at entry
+    rules_applied = Column(Text, nullable=True)      # JSON: learning_rules IDs that matched
     created_at = Column(DateTime, default=datetime.utcnow)
 
     logs = relationship("AgentLog", back_populates="trade")
@@ -134,6 +142,51 @@ class StrategyMemory(Base):
     lessons      = Column(Text, default="[]")           # JSON list[str]
     strategy_notes = Column(Text, default="")           # Free-form guidance from JR
     last_updated = Column(DateTime, default=datetime.utcnow)
+
+
+class LearningRule(Base):
+    """Structured trading rules extracted from meeting insights.
+    Rules go through lifecycle: CANDIDATE → ACTIVE → CONFIRMED → DEPRECATED.
+    Evaluated by the rule engine before every trade."""
+    __tablename__ = "learning_rules"
+
+    id           = Column(Integer, primary_key=True)
+
+    # Identity
+    rule_type    = Column(String(30), nullable=False)
+    # Types: FILTER, BOOST, BLOCK, ADJUST_PARAM, CONTEXT_NOTE
+
+    # Scope — NULL means "applies to all"
+    setup_type   = Column(String(50), nullable=True)
+    symbol       = Column(String(20), nullable=True)
+    session      = Column(String(20), nullable=True)
+
+    # Condition (JSON): when does the rule apply
+    condition    = Column(Text, nullable=False, default="{}")
+
+    # Action (JSON): what does the rule do
+    action       = Column(Text, nullable=False, default="{}")
+
+    # Metadata
+    confidence   = Column(Float, default=0.5)
+    sample_size  = Column(Integer, default=0)
+    source_type  = Column(String(20), nullable=False, default="MEETING")
+    # Sources: MEETING, BACKTEST, MANUAL
+    source_id    = Column(Integer, nullable=True)
+    description  = Column(Text, nullable=True)
+
+    # Lifecycle
+    status       = Column(String(20), default="CANDIDATE")
+    # Status: CANDIDATE, ACTIVE, CONFIRMED, DEPRECATED
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    activated_at = Column(DateTime, nullable=True)
+    confirmed_at = Column(DateTime, nullable=True)
+    deprecated_at = Column(DateTime, nullable=True)
+
+    # Effectiveness tracking
+    times_applied = Column(Integer, default=0)
+    times_correct = Column(Integer, default=0)
+    times_wrong   = Column(Integer, default=0)
 
 
 class BacktestRun(Base):
@@ -223,6 +276,8 @@ def _migrate_trades(conn):
         ("close_notes",         "TEXT"),
         ("is_paper",            "BOOLEAN DEFAULT 0"),
         ("archived",            "BOOLEAN DEFAULT 0"),
+        ("market_context",      "TEXT"),   # JSON: session, news distance, spread, htf_trend, etc.
+        ("rules_applied",       "TEXT"),   # JSON list[int]: learning_rules IDs that matched
     ]
     cur = conn.execute(_text("PRAGMA table_info(trades)"))
     existing = {row[1] for row in cur.fetchall()}
@@ -266,6 +321,7 @@ async def init_db():
                 saved = _json.loads(ud.value)
                 defaults = [SystemConfig(key=k, value=v) for k, v in saved.items() if k != "_user_defaults"]
             else:
+                paper_default = "true" if SYSTEM_MODE == "lab" else "true"  # both default to paper; production can be flipped
                 defaults = [
                     SystemConfig(key="risk_percent",    value="0.5",   description="Default risk per trade (%)"),
                     SystemConfig(key="rr_ratio",        value="2.0",   description="Default risk/reward ratio"),
@@ -277,7 +333,7 @@ async def init_db():
                     SystemConfig(key="kill_zones",      value='[{"start":"05:00","end":"19:00"}]', description="Kill zone windows (Rome time)"),
                     SystemConfig(key="ict_strategies",  value='["FVG","OrderBlock","Liquidity","BOS","CHOCH","Mitigation","PD_Array"]', description="ICT strategies to use"),
                     SystemConfig(key="system_performance", value='{"total_trades":0,"wins":0,"losses":0,"breakeven":0,"win_rate":0,"avg_rr":0}', description="System performance metrics"),
-                    SystemConfig(key="paper_mode",      value="true",  description="Enable paper trading mode (virtual execution)"),
+                    SystemConfig(key="paper_mode",      value=paper_default, description="Enable paper trading mode (virtual execution)"),
                     SystemConfig(key="paper_balance",   value="5000.0",description="Current paper trading account balance"),
                     SystemConfig(key="news_block_minutes_before", value="30",    description="Minutes before high-impact news to block trading"),
                     SystemConfig(key="news_block_minutes_after",  value="30",    description="Minutes after high-impact news to block trading"),

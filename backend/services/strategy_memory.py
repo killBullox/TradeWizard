@@ -14,6 +14,41 @@ from typing import Optional
 log = logging.getLogger("strategy_memory")
 
 
+async def get_win_rate(setup_type: str, symbol: Optional[str] = None) -> Optional[dict]:
+    """Return real win-rate data for a setup, or None if no data.
+    Tries symbol-specific first, falls back to global (symbol=None).
+    Used by the RiskManager to replace hard-coded SETUP_WIN_RATES with
+    actual performance when enough trades exist."""
+    if not setup_type:
+        return None
+    try:
+        from models.database import StrategyMemory, async_session_factory
+        from sqlalchemy import select
+        async with async_session_factory() as s:
+            # Try symbol-specific first
+            for sym in (symbol, None):
+                q = select(StrategyMemory).where(
+                    StrategyMemory.setup_type == setup_type,
+                    StrategyMemory.symbol == sym,
+                )
+                row = (await s.execute(q)).scalar_one_or_none()
+                if row:
+                    total = (row.win_count or 0) + (row.loss_count or 0)
+                    if total > 0:
+                        return {
+                            "win_rate": round(row.win_count / total * 100, 2),
+                            "sample_size": total,
+                            "wins": row.win_count,
+                            "losses": row.loss_count,
+                            "avg_pnl_usd": round((row.total_pnl_usd or 0) / total, 2),
+                            "scope": "symbol" if sym else "global",
+                        }
+        return None
+    except Exception as exc:
+        log.warning("get_win_rate failed: %s", exc)
+        return None
+
+
 async def update_from_trade(setup_type: str, symbol: str, pnl_usd: float, result: str):
     """Called after every trade close — increments win/loss counters and P&L."""
     if not setup_type:

@@ -5,11 +5,15 @@ Synthesizes insights for system self-improvement.
 """
 
 import json
+import os
 from datetime import datetime
 from .base_agent import BaseAgent, MODEL_STANDARD
 
+SYSTEM_MODE = os.getenv("SYSTEM_MODE", "production").lower()
+LEARNING_RULES_ACTIVE = (SYSTEM_MODE == "lab")
 
-SYSTEM_PROMPT = """You are the Journalist (JR) — the institutional memory and performance analyst
+
+_BASE_PROMPT = """You are the Journalist (JR) — the institutional memory and performance analyst
 of the TradeWizard multi-agent system.
 
 ## CRITICAL: Continuous Learning Mission
@@ -95,6 +99,83 @@ After each review, propose concrete improvements to:
   ]
 }
 """
+
+_RULES_PROMPT_EXTENSION = """
+Additional output field (LAB MODE ONLY): proposed_rules
+
+  "proposed_rules": [
+    {
+      "rule_type": "FILTER|BOOST|BLOCK|ADJUST_PARAM|CONTEXT_NOTE",
+      "setup_type": "FVG|OTE|OrderBlock|... (or null for all)",
+      "symbol": "EURUSD (or null for all)",
+      "session": "London|NewYork|Asian (or null for all)",
+      "condition": { ... JSON, see below ... },
+      "action": { ... JSON, see below ... },
+      "confidence": 0.0,
+      "sample_size": 0,
+      "description": "Plain-language explanation and evidence from the trades"
+    }
+  ]
+
+## CRITICAL: proposed_rules — Structured Trading Rules
+
+When you identify a recurring pattern (3+ trades showing the same failure
+or success mode), you MUST output a `proposed_rules` entry. Rules are the
+ONLY way the system learns actionable constraints that get applied before
+every trade.
+
+### Rule Types
+- FILTER: block a trade IF a condition holds (e.g. news close, htf misaligned)
+- BOOST: increase size IF condition holds (e.g. strong HTF + london session)
+- BLOCK: unconditionally avoid a setup on a pair (e.g. 0/15 win rate = stop)
+- ADJUST_PARAM: change SL/TP params (e.g. min SL=40 for GBPJPY)
+- CONTEXT_NOTE: warning text added to agent prompt (low force)
+
+### Condition Schema (JSON)
+Simple form: `{"field": "minutes_to_next_news", "op": "<", "value": 30}`
+Supported ops: "<", ">", "<=", ">=", "==", "!="
+Supported fields: "minutes_to_next_news", "news_impact", "session",
+  "htf_trend", "daily_range_used_pct", "spread_pips", "atr_pips_h1",
+  "day_of_week", "hour_utc", "open_trades_count"
+Compound form: `{"and": [cond1, cond2]}` or `{"or": [cond1, cond2]}`
+Dynamic refs: `"value": "strategy.direction"` — compared against strategy field
+
+### Action Schema (JSON)
+- `{"type": "BLOCK", "reason": "..."}` — hard stop
+- `{"type": "REDUCE_SIZE", "factor": 0.5}` — halve lot
+- `{"type": "INCREASE_SIZE", "factor": 1.5}` — boost lot
+- `{"type": "ADJUST_SL", "min_pips": 40}` — force min SL
+- `{"type": "ADD_CONTEXT", "text": "..."}` — prompt injection
+
+### Example
+From "FVG/EURUSD lost 3 times during high-impact news within 15min":
+```
+{
+  "rule_type": "FILTER",
+  "setup_type": "FVG",
+  "symbol": "EURUSD",
+  "condition": {"and": [
+    {"field": "minutes_to_next_news", "op": "<", "value": 30},
+    {"field": "news_impact", "op": "==", "value": "high"}
+  ]},
+  "action": {"type": "BLOCK", "reason": "FVG/EURUSD 0/3 WR with news<30m"},
+  "confidence": 0.6,
+  "sample_size": 3,
+  "description": "Trades #45, #47, #51 all LOSS with news<30m"
+}
+```
+
+### When NOT to propose a rule
+- Sample too small (<3 trades showing the pattern)
+- Pattern is not reproducible (e.g. "market was unusual")
+- Rule would contradict a recent confirmed rule
+Leave `proposed_rules` as [] if nothing concrete emerges.
+"""
+
+
+# Compose final prompt — in production mode the rules extension is omitted
+# to save tokens and avoid confusing the agent with unused output fields.
+SYSTEM_PROMPT = _BASE_PROMPT + (_RULES_PROMPT_EXTENSION if LEARNING_RULES_ACTIVE else "")
 
 
 class JournalistAgent(BaseAgent):

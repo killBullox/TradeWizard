@@ -318,7 +318,32 @@ class Orchestrator:
                                           "reason": f"Already have an active trade on {symbol}", "agent": "SYS"})
                     return
 
-            # 5. Risk Manager (with memory context)
+            # 4c. Rule Engine — evaluate learning_rules BEFORE the RM
+            from services.rule_engine import build_market_context, evaluate_trade as eval_rules
+            market_context = build_market_context(market_data, symbol, config, open_count)
+            strategy["_market_context"] = market_context
+            setup_type = strategy.get("setup", "")
+            session = market_context.get("session")
+            verdict = await eval_rules(setup_type, symbol, session, market_context, strategy)
+
+            if verdict.action == "BLOCK":
+                logger.info("Trade BLOCKED by rules: %s — %s", symbol, verdict.reasons)
+                await self._log_agent("SYS", "RULE_BLOCK",
+                                       f"Trade blocked by learning rules: {symbol}",
+                                       {"rules": verdict.rules_applied, "reasons": verdict.reasons})
+                await self.broadcast({"type": "trade_rejected", "symbol": symbol,
+                                      "reason": " | ".join(verdict.reasons), "agent": "RULE_ENGINE"})
+                return
+
+            # Inject context_notes from rules into the ICTEA memory context (already ran),
+            # but we log them so they show in trade history.
+            if verdict.context_notes:
+                logger.info("Rule context notes for %s: %s", symbol, verdict.context_notes)
+
+            # Pass rule verdict into RM so size_factor and adjustments take effect
+            strategy["_rule_verdict"] = verdict.to_dict()
+
+            # 5. Risk Manager (with memory context + rule verdict)
             rm_result = await self.rm.evaluate(symbol, strategy, market_data, config, open_count, memory_context=memory_ctx)
             await self._log_agent("RM", "EVALUATION", f"Evaluated {symbol}", rm_result)
 
@@ -835,6 +860,17 @@ class Orchestrator:
         await self._update_performance_stats(result_str, pnl_pips)
         asyncio.create_task(_mem_update_trade(trade.ict_setup or "Unknown", trade.symbol, pnl_usd, result_str))
 
+        # Rule-engine feedback: update accuracy of learning_rules that matched this trade
+        try:
+            rules_applied_json = trade_obj.rules_applied if trade_obj else None
+            if rules_applied_json:
+                rule_ids = json.loads(rules_applied_json)
+                if rule_ids:
+                    from services.rule_engine import validate_after_trade
+                    asyncio.create_task(validate_after_trade(trade.id, rule_ids, result_str))
+        except Exception as exc:
+            logger.warning("Rule feedback update failed: %s", exc)
+
         await self.broadcast({
             "type": "trade_closed",
             "trade_id": trade.id,
@@ -933,6 +969,18 @@ class Orchestrator:
             )
             s.add(meeting)
             await s.commit()
+
+            # Ingest proposed_rules from meeting — new learning pipeline
+            proposed = meeting_result.get("proposed_rules", [])
+            if proposed:
+                try:
+                    from services.learning_rules import ingest_proposed_rules
+                    ids = await ingest_proposed_rules(proposed, source_type="MEETING",
+                                                        source_id=meeting.id)
+                    logger.info("Ingested %d learning rules from meeting #%d",
+                                len(ids), meeting.id)
+                except Exception as exc:
+                    logger.warning("Rule ingest failed: %s", exc)
 
             je = JournalEntry(
                 meeting_id=meeting.id,
@@ -1322,6 +1370,7 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     async def _save_trade(self, symbol, strategy, rm_result, trade_params, ict_analysis, is_paper: bool = False) -> int:
         position = rm_result.get("position_size", {})
+        rule_verdict = strategy.get("_rule_verdict") or {}
         async with async_session_factory() as s:
             trade = Trade(
                 symbol=symbol,
@@ -1341,6 +1390,8 @@ class Orchestrator:
                 analyst_verdict=json.dumps({}),
                 open_time=datetime.utcnow(),
                 is_paper=is_paper,
+                market_context=json.dumps(strategy.get("_market_context") or {}),
+                rules_applied=json.dumps(rule_verdict.get("rules_applied", [])),
             )
             s.add(trade)
             await s.commit()
