@@ -481,7 +481,93 @@ class Orchestrator:
                 await self._monitor_active_trades()
             except Exception as e:
                 logger.error(f"Monitor loop error: {e}", exc_info=True)
+            try:
+                await self._reconcile_mt5_positions()
+            except Exception as e:
+                logger.error(f"Reconcile error: {e}", exc_info=True)
             await asyncio.sleep(60)
+
+    async def _reconcile_mt5_positions(self):
+        """Reconcile DB state with actual MT5 positions.
+
+        Two failure modes we fix:
+        1. Trade marked CLOSED in DB but MT5 still has the ticket → retry close.
+           Happens when the original close order failed (pipe wedge, broker
+           offline, etc.) but the DB row was flipped to CLOSED anyway.
+        2. Trade marked ACTIVE in DB but MT5 no longer has the ticket → mark
+           it CLOSED in the DB. Happens when SL/TP was hit on the broker side
+           while we weren't watching.
+        """
+        # Production only — lab uses paper execution, no MT5 reconciliation needed
+        if os.environ.get("SYSTEM_MODE", "production").lower() == "lab":
+            return
+
+        # 1) Get live MT5 tickets
+        try:
+            from services.mt5_direct import get_mt5_direct
+            mt5 = get_mt5_direct()
+            positions = mt5.get_positions() or []
+        except Exception as exc:
+            logger.debug(f"Reconcile: cannot fetch positions: {exc}")
+            return
+        live_tickets = {str(p.get("ticket")) for p in positions if p.get("ticket")}
+
+        # 2) Find DB trades that might be out of sync
+        from datetime import timedelta as _td
+        cutoff = datetime.utcnow() - _td(days=7)  # only look at recent trades
+        async with async_session_factory() as s:
+            result = await s.execute(
+                select(Trade)
+                .where(Trade.mt5_ticket.isnot(None))
+                .where(Trade.is_paper == False)
+                .where(Trade.open_time >= cutoff)
+            )
+            rows = result.scalars().all()
+
+        for t in rows:
+            if not t.mt5_ticket:
+                continue
+            tw_tickets = {tk.strip() for tk in t.mt5_ticket.split(",") if tk.strip()}
+            still_open = tw_tickets & live_tickets
+
+            # Case 1: DB says CLOSED/CANCELLED but MT5 still has at least one ticket
+            if t.status in ("CLOSED", "CANCELLED") and still_open:
+                logger.warning(
+                    "Reconcile: trade #%d status=%s but MT5 still has %s — retrying close",
+                    t.id, t.status, still_open,
+                )
+                closed_count = 0
+                for ticket in still_open:
+                    try:
+                        res = mt5.close_trade(ticket, t.symbol)
+                        if res and res.get("success"):
+                            closed_count += 1
+                            logger.info("Reconcile: closed orphan ticket %s (trade #%d)", ticket, t.id)
+                        else:
+                            logger.warning("Reconcile: close failed for %s: %s",
+                                            ticket, res.get("error") if res else "no-response")
+                    except Exception as exc:
+                        logger.warning("Reconcile close error %s: %s", ticket, exc)
+                if closed_count > 0:
+                    await self._append_close_note(
+                        t.id,
+                        f"[RECONCILE] closed {closed_count}/{len(still_open)} orphan tickets"
+                    )
+
+            # Case 2: DB says ACTIVE but MT5 no longer has any of the tickets
+            elif t.status == "ACTIVE" and tw_tickets and not still_open:
+                logger.warning(
+                    "Reconcile: trade #%d status=ACTIVE but MT5 closed all tickets — marking CLOSED",
+                    t.id,
+                )
+                # Fetch current price for a best-effort close_price
+                try:
+                    data = await fetch_ohlcv(t.symbol, "H1", 5)
+                    price = data.get("indicators", {}).get("current_price", t.entry_price)
+                except Exception:
+                    price = t.entry_price
+                # Use existing close flow — it updates stats, memory, meeting trigger
+                await self._close_trade(t, price, "Reconcile: MT5 closed externally")
 
     async def _monitor_active_trades(self):
         async with async_session_factory() as s:
