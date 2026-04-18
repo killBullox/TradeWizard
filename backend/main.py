@@ -487,7 +487,12 @@ async def health_check():
         _mt5 = get_mt5_direct()
         h = _mt5.health()
         mt5_ok = h.get("connected", False)
-        worker_ok = _bridge_proc is not None and _bridge_proc.poll() is None
+        # In lab mode there's no local bridge subprocess — worker healthiness
+        # is proven by a reachable shared bridge instead.
+        if os.environ.get("SYSTEM_MODE", "production").lower() == "lab":
+            worker_ok = mt5_ok
+        else:
+            worker_ok = _bridge_proc is not None and _bridge_proc.poll() is None
     except Exception:
         pass
 
