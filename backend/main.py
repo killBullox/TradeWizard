@@ -569,42 +569,85 @@ async def list_trades(status: str | None = None, limit: int = 50, include_archiv
 # NOTE: must be defined BEFORE /api/trades/{trade_id} to avoid 422 on "live_pnl"
 @app.get("/api/trades/live_pnl")
 async def trades_live_pnl():
-    """Return current price + unrealized PNL for all active trades."""
+    """Return current price + unrealized PNL for all active trades.
+
+    SOURCE OF TRUTH: MT5 positions. We use price_open, price_current, and
+    profit directly from the broker — the DB entry_price can be out of sync
+    if a trade was opened before the fill-price sync was added, or if LIMIT
+    orders were overridden to MARKET at a different price.
+    """
     async with async_session_factory() as s:
         result = await s.execute(select(Trade).where(Trade.status == "ACTIVE"))
         active = result.scalars().all()
     if not active:
         return []
 
-    from services.forex_data import fetch_ohlcv
-
-    # Fetch prices concurrently, one per unique symbol
-    symbols = list({t.symbol for t in active})
-    async def _price(sym):
-        try:
-            data = await fetch_ohlcv(sym, "H1", 2)
-            return sym, float(data.get("indicators", {}).get("current_price") or 0)
-        except Exception:
-            return sym, 0.0
-
-    prices = dict(await asyncio.gather(*[_price(s) for s in symbols]))
+    # Fetch live MT5 positions in one call
+    live_by_ticket: dict[int, dict] = {}
+    try:
+        from services.mt5_direct import get_mt5_direct
+        mt5 = get_mt5_direct()
+        for p in (mt5.get_positions() or []):
+            tk = p.get("ticket")
+            if tk:
+                live_by_ticket[int(tk)] = p
+    except Exception:
+        pass
 
     out = []
     for t in active:
-        cp = prices.get(t.symbol, 0.0)
-        pip = 0.01 if "JPY" in t.symbol else (1.0 if t.symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
-        _pip_usd = {"XAUUSD":100.0,"US30":5.0,"NAS100":20.0,"US500":50.0,
-                    "USDJPY":6.5,"EURJPY":6.5,"GBPJPY":6.5,"AUDJPY":6.5,
-                    "USDCHF":11.0,"USDCAD":7.25}
-        pip_usd = _pip_usd.get(t.symbol, 10.0)
-        if cp and t.entry_price:
-            pnl_pips = ((cp - t.entry_price) if t.direction == "BUY" else (t.entry_price - cp)) / pip
-            pnl_usd  = round(pnl_pips * pip_usd * (t.lot_size or 0.01), 2)
+        tw_tickets = [int(x.strip()) for x in (t.mt5_ticket or "").split(",") if x.strip().isdigit()]
+        mt5_positions = [live_by_ticket[tk] for tk in tw_tickets if tk in live_by_ticket]
+
+        if mt5_positions:
+            # MT5 is the source of truth
+            total_vol = sum(float(p.get("volume", 0)) for p in mt5_positions) or 1
+            avg_entry = sum(float(p.get("volume", 0)) * float(p.get("price_open", 0))
+                             for p in mt5_positions) / total_vol
+            cp = float(mt5_positions[0].get("price_current", 0))
+            pnl_usd = round(sum(float(p.get("profit", 0)) for p in mt5_positions), 2)
+            pip = 0.01 if "JPY" in t.symbol else (1.0 if t.symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+            pnl_pips = None
+            if cp and avg_entry:
+                pnl_pips = round(((cp - avg_entry) if t.direction == "BUY" else (avg_entry - cp)) / pip, 1)
+            out.append({
+                "trade_id": t.id,
+                "symbol": t.symbol,
+                "entry_price": round(avg_entry, 6),  # REAL fill from MT5
+                "current_price": cp,
+                "pnl_pips": pnl_pips,
+                "pnl_usd": pnl_usd,
+                "source": "mt5",
+            })
         else:
-            pnl_pips = pnl_usd = None
-        out.append({"trade_id": t.id, "symbol": t.symbol, "current_price": cp,
-                    "pnl_pips": round(pnl_pips, 1) if pnl_pips is not None else None,
-                    "pnl_usd": pnl_usd})
+            # Fallback: paper trade OR position not found in MT5.
+            # Compute from DB + fresh tick.
+            from services.forex_data import fetch_ohlcv
+            try:
+                data = await fetch_ohlcv(t.symbol, "H1", 2)
+                cp = float(data.get("indicators", {}).get("current_price") or 0)
+            except Exception:
+                cp = 0.0
+            pip = 0.01 if "JPY" in t.symbol else (1.0 if t.symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+            _pip_usd = {"XAUUSD":100.0,"US30":5.0,"NAS100":20.0,"US500":50.0,
+                        "USDJPY":6.5,"EURJPY":6.5,"GBPJPY":6.5,"AUDJPY":6.5,
+                        "USDCHF":11.0,"USDCAD":7.25}
+            pip_usd = _pip_usd.get(t.symbol, 10.0)
+            if cp and t.entry_price:
+                pnl_pips = ((cp - t.entry_price) if t.direction == "BUY" else (t.entry_price - cp)) / pip
+                pnl_usd = round(pnl_pips * pip_usd * (t.lot_size or 0.01), 2)
+                pnl_pips = round(pnl_pips, 1)
+            else:
+                pnl_pips = pnl_usd = None
+            out.append({
+                "trade_id": t.id,
+                "symbol": t.symbol,
+                "entry_price": t.entry_price,
+                "current_price": cp,
+                "pnl_pips": pnl_pips,
+                "pnl_usd": pnl_usd,
+                "source": "db+tick",
+            })
     return out
 
 
