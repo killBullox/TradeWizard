@@ -232,6 +232,35 @@ async function checkWorkerStatus() {
 setInterval(checkWorkerStatus, 30000);
 setTimeout(checkWorkerStatus, 3000);
 
+// Watchdog alerts polling — shows red badge in header when there are ERROR alerts in the last hour
+let __lastAlerts = [];
+async function checkAlerts() {
+  try {
+    const r = await fetch('/api/alerts?limit=50');
+    const d = await r.json();
+    __lastAlerts = d.alerts || [];
+    const badge = document.getElementById('alerts-badge');
+    const count = document.getElementById('alerts-count');
+    if (badge && count) {
+      if (d.unacked_errors > 0) {
+        count.textContent = d.unacked_errors;
+        badge.style.display = 'inline-block';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+  } catch(e) {}
+}
+setInterval(checkAlerts, 30000);
+setTimeout(checkAlerts, 5000);
+
+window.showAlerts = function () {
+  if (!__lastAlerts.length) { alert('No alerts'); return; }
+  const recent = __lastAlerts.slice(-20).reverse();
+  const msg = recent.map(a => `${a.ts.substring(11, 19)}  [${a.level}]  ${a.component}: ${a.message}`).join('\n');
+  alert('Recent watchdog alerts (last 20):\n\n' + msg);
+};
+
 function updateAgentCard(agentKey, message, state) {
   const card  = document.getElementById(`agent-${agentKey}`);
   const badge = card?.querySelector('.agent-badge');

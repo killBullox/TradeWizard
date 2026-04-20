@@ -84,6 +84,12 @@
       </div>
     </div>
     <div class="header-right">
+      <div id="alerts-badge" style="display:none;cursor:pointer;margin-right:10px" onclick="showAlerts()" title="Watchdog alerts — click for details">
+        <span style="display:inline-flex;align-items:center;gap:6px;background:rgba(239,68,68,0.18);color:#ef4444;padding:4px 12px;border-radius:6px;font-size:0.82rem;font-weight:700">
+          <span style="width:10px;height:10px;background:#ef4444;border-radius:50%;display:inline-block;animation:pulse-red 1.5s infinite"></span>
+          ⚠️ <span id="alerts-count">0</span> alert
+        </span>
+      </div>
       <div class="tw-mode-switcher" id="tw-mode-switcher" title="Backend: Production (real MT5) or Lab (paper + learning rules)">
         <button class="tw-mode-btn" id="tw-mode-prod" onclick="twSwitchMode('production')">⚡ Production</button>
         <button class="tw-mode-btn lab" id="tw-mode-lab" onclick="twSwitchMode('lab')">🧪 Lab</button>

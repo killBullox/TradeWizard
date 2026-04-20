@@ -111,19 +111,104 @@ async def check_backend() -> tuple[bool, str]:
 
 
 async def check_mt5_connection() -> tuple[bool, str]:
-    """Check if MT5 is connected via the backend health endpoint."""
+    """Check MT5 connectivity — reads mt5_connected (bool) from /api/health."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             r = await client.get(f"{BACKEND_URL}/api/health")
             if r.status_code == 200:
                 data = r.json()
-                mt5_status = data.get("mt5", {})
-                if isinstance(mt5_status, dict) and mt5_status.get("connected"):
-                    return True, "MT5 connected (direct)"
-                return False, f"MT5 not connected: {mt5_status}"
+                if data.get("mt5_connected") is True:
+                    return True, "MT5 connected"
+                return False, f"MT5 not connected (health={data.get('status')})"
             return False, f"Backend returned HTTP {r.status_code}"
     except Exception as exc:
         return False, f"Cannot check MT5: {exc}"
+
+
+async def check_bridge() -> tuple[bool, str]:
+    """Check MT5 bridge directly (port 5555)."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get("http://localhost:5555/health")
+            if r.status_code == 200:
+                d = r.json()
+                if d.get("connected") and d.get("account"):
+                    return True, f"Bridge OK (account={d['account']})"
+                return False, f"Bridge not connected: {d}"
+            return False, f"Bridge HTTP {r.status_code}"
+    except Exception as exc:
+        return False, f"Bridge unreachable: {exc}"
+
+
+async def check_lab_backend() -> tuple[bool, str]:
+    """Check lab backend on port 8001."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get("http://localhost:8001/api/health")
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("status") in ("healthy", "degraded"):
+                    return True, f"Lab {data.get('status')}"
+                return False, f"Lab status={data.get('status')}"
+            return False, f"Lab HTTP {r.status_code}"
+    except Exception as exc:
+        return False, f"Lab unreachable: {exc}"
+
+
+async def check_analysis_freshness() -> tuple[bool, str]:
+    """During kill zone (5-19 Rome), last_analysis must be < 25 min old."""
+    from datetime import datetime as _dt
+    try:
+        from zoneinfo import ZoneInfo
+        now_rome = _dt.now(ZoneInfo("Europe/Rome"))
+    except Exception:
+        now_rome = _dt.utcnow()
+    if not (5 <= now_rome.hour < 19):
+        return True, "Outside kill zone — analysis freshness not required"
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{BACKEND_URL}/api/health")
+            if r.status_code != 200:
+                return False, f"Cannot check analysis: HTTP {r.status_code}"
+            data = r.json()
+            last = data.get("last_analysis")
+            if not last:
+                return False, "last_analysis is null during kill zone"
+            try:
+                last_dt = _dt.fromisoformat(last.replace("Z", "+00:00"))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
+                age_min = (_dt.now(timezone.utc) - last_dt).total_seconds() / 60
+                if age_min > 25:
+                    return False, f"last_analysis is {age_min:.0f} min old (>25)"
+                return True, f"Analysis fresh ({age_min:.0f} min ago)"
+            except Exception as exc:
+                return False, f"Cannot parse last_analysis: {exc}"
+    except Exception as exc:
+        return False, f"Cannot check analysis: {exc}"
+
+
+async def check_cancellation_rate() -> tuple[bool, str]:
+    """Alert if CANCELLED trades today exceed 10 on prod (usually means MT5 bug)."""
+    from datetime import datetime as _dt
+    today_iso = _dt.utcnow().date().isoformat()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{BACKEND_URL}/api/trades?limit=100")
+            if r.status_code != 200:
+                return True, "Cannot check CANCELLED count (non-fatal)"
+            trades = r.json()
+            cancelled_today = sum(
+                1 for t in trades
+                if t.get("status") == "CANCELLED"
+                and str(t.get("open_time", "")).startswith(today_iso)
+            )
+            if cancelled_today >= 10:
+                return False, f"{cancelled_today} CANCELLED trades today on prod — likely bug"
+            return True, f"{cancelled_today} CANCELLED today (OK)"
+    except Exception:
+        return True, "Cannot check CANCELLED (non-fatal)"
 
 
 def check_mt5_terminal() -> tuple[bool, str]:
@@ -189,6 +274,96 @@ def restart_mt5_connection():
     restart_mt5_terminal()
 
 
+def restart_bridge():
+    """Kill the bridge subprocess — the backend's watchdog thread will respawn it."""
+    logger.info("Killing bridge subprocess so backend watchdog respawns it...")
+    try:
+        result = subprocess.run(
+            ["wmic", "process", "where",
+             "name='python.exe' and commandline like '%mt5_bridge_server%'",
+             "get", "processid", "/value"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.strip().splitlines():
+            if line.startswith("ProcessId="):
+                pid = line.split("=")[1].strip()
+                if pid:
+                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
+                    logger.info("Killed bridge PID %s", pid)
+    except Exception as exc:
+        logger.error("Bridge kill failed: %s", exc)
+
+
+def restart_ava_terminal():
+    """Restart the Ava MT5 terminal via scheduled task."""
+    logger.info("Restarting Ava terminal via task MT5-Ava...")
+    try:
+        # Kill existing Ava terminal(s)
+        result = subprocess.run(
+            ["wmic", "process", "where",
+             r"name='terminal64.exe' and executablepath like '%Ava%'",
+             "get", "processid", "/value"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.strip().splitlines():
+            if line.startswith("ProcessId="):
+                pid = line.split("=")[1].strip()
+                if pid:
+                    subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
+        # Start task MT5-Ava
+        subprocess.run(["schtasks", "/run", "/tn", "MT5-Ava"], capture_output=True, timeout=10)
+        logger.info("Ava terminal restart triggered")
+    except Exception as exc:
+        logger.error("Ava restart failed: %s", exc)
+
+
+def restart_lab_backend():
+    """Kill lab backend (PID filtered on commandline) and re-run TradeWizardLab task."""
+    logger.info("Restarting lab backend...")
+    try:
+        result = subprocess.run(
+            ["wmic", "process", "where",
+             "name='python.exe' and commandline like '%backend%main.py%'",
+             "get", "processid", "/value"],
+            capture_output=True, text=True, timeout=10,
+        )
+        # Find lab PID by environment (harder): use port check instead — kill by port
+        import socket
+        for pline in result.stdout.strip().splitlines():
+            if not pline.startswith("ProcessId="):
+                continue
+            pid = pline.split("=")[1].strip()
+            if not pid:
+                continue
+            # Check if this PID listens on 8001
+            ns = subprocess.run(
+                ["netstat", "-ano", "-p", "tcp"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if f":8001" in ns.stdout and f" {pid}\n" in ns.stdout:
+                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
+                logger.info("Killed lab backend PID %s", pid)
+                break
+        subprocess.run(["schtasks", "/run", "/tn", "TradeWizardLab"], capture_output=True, timeout=10)
+    except Exception as exc:
+        logger.error("Lab restart failed: %s", exc)
+
+
+# Persistent alert log — appended to so the backend can expose via /api/alerts
+ALERTS_FILE = LOG_DIR / "alerts.log"
+
+
+def _log_alert(level: str, component: str, message: str):
+    """Append alert to alerts.log with ISO timestamp (UTC)."""
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    line = f"{ts}\t{level}\t{component}\t{message}\n"
+    try:
+        with open(ALERTS_FILE, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
 def restart_mt5_terminal():
     """Start MT5 terminal if not running."""
     logger.info("Starting MT5 terminal...")
@@ -238,6 +413,7 @@ class ComponentMonitor:
         if ok:
             if self.failures > 0:
                 logger.info("[%s] Recovered after %d failures: %s", self.name, self.failures, msg)
+                _log_alert("INFO", self.name, f"RECOVERED after {self.failures} failures: {msg}")
                 await _send_whatsapp(
                     f"✅ *{self.name} RECOVERED*\n\n{msg}\n\n"
                     f"After {self.failures} consecutive failures."
@@ -247,25 +423,30 @@ class ComponentMonitor:
 
         self.failures += 1
         logger.warning("[%s] Failure %d/%d: %s", self.name, self.failures, MAX_FAILURES, msg)
+        _log_alert("WARN", self.name, f"failure {self.failures}/{MAX_FAILURES}: {msg}")
 
         if self.failures >= MAX_FAILURES:
             now = time.time()
             if now - self.last_restart > self.cooldown:
                 logger.error("[%s] %d consecutive failures — RESTARTING", self.name, self.failures)
+                _log_alert("ERROR", self.name, f"RESTARTING after {self.failures} failures: {msg}")
                 await _send_whatsapp(
                     f"🔄 *RESTARTING {self.name}*\n\n"
                     f"Failed {self.failures}x consecutively.\n"
                     f"Last status: {msg}\n"
                     f"Restart #{self.total_restarts + 1}"
                 )
-                self.restart_fn()
+                try:
+                    self.restart_fn()
+                except Exception as exc:
+                    logger.error("[%s] restart_fn raised: %s", self.name, exc)
                 self.last_restart = now
                 self.total_restarts += 1
                 self.failures = 0  # Reset counter after restart
             else:
                 remaining = int(self.cooldown - (now - self.last_restart))
                 logger.info("[%s] Cooldown active (%ds remaining)", self.name, remaining)
-                # Still send alarm during cooldown
+                _log_alert("WARN", self.name, f"STILL DOWN (cooldown {remaining}s): {msg}")
                 await _send_whatsapp(
                     f"🚨 *{self.name} STILL DOWN*\n\n"
                     f"{msg}\n"
@@ -294,9 +475,13 @@ async def main():
     )
 
     monitors = [
-        ComponentMonitor("Backend", check_backend, restart_backend, is_async=True),
-        ComponentMonitor("MT5 Connection", check_mt5_connection, restart_mt5_connection, is_async=True),
+        ComponentMonitor("Backend (prod)", check_backend, restart_backend, is_async=True),
+        ComponentMonitor("Backend (lab)", check_lab_backend, restart_lab_backend, is_async=True),
+        ComponentMonitor("MT5 Bridge", check_bridge, restart_bridge, is_async=True),
+        ComponentMonitor("MT5 Connection", check_mt5_connection, restart_ava_terminal, is_async=True),
         ComponentMonitor("MT5 Terminal", check_mt5_terminal, restart_mt5_terminal, is_async=False),
+        ComponentMonitor("Analysis freshness", check_analysis_freshness, restart_backend, is_async=True),
+        ComponentMonitor("Cancellation rate", check_cancellation_rate, lambda: None, is_async=True),
     ]
 
     # Daily backup tracker

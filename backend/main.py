@@ -1393,6 +1393,39 @@ async def clear_strategy_memory():
     return {"deleted": result.rowcount}
 
 
+@app.get("/api/alerts")
+async def get_alerts(limit: int = 50):
+    """Return the most recent watchdog alerts from logs/alerts.log (TSV format).
+    Frontend can poll this to show a banner if there's anything ERROR in the last hour."""
+    alerts_path = os.path.join(_log_dir, "alerts.log")
+    if not os.path.exists(alerts_path):
+        return {"alerts": [], "unacked_errors": 0}
+    try:
+        with open(alerts_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()[-limit:]
+    except Exception:
+        return {"alerts": [], "unacked_errors": 0}
+    alerts = []
+    for ln in lines:
+        parts = ln.rstrip("\n").split("\t")
+        if len(parts) >= 4:
+            alerts.append({"ts": parts[0], "level": parts[1], "component": parts[2], "message": parts[3]})
+    # Count ERROR in the last hour
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    one_hour_ago = _dt.now(_tz.utc) - _td(hours=1)
+    unacked = 0
+    for a in alerts:
+        try:
+            ts = _dt.fromisoformat(a["ts"].replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_tz.utc)
+            if a["level"] == "ERROR" and ts > one_hour_ago:
+                unacked += 1
+        except Exception:
+            pass
+    return {"alerts": alerts, "unacked_errors": unacked}
+
+
 @app.get("/api/system-mode")
 async def get_system_mode():
     """Tells the frontend which instance it is talking to (production vs lab)."""

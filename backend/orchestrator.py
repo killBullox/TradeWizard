@@ -421,6 +421,32 @@ class Orchestrator:
                 await self._update_trade_ticket(trade_id, ticket_str)
                 logger.info("Trade #%d sent to MT5: tickets=%s (%d splits)",
                             trade_id, ticket_str, cc_result.get("splits", 1))
+
+                # Read the REAL fill price from MT5 and update entry_price.
+                # Without this, the DB keeps the proposed price (not the fill),
+                # and P&L is calculated off a wrong baseline.
+                if not paper_on:
+                    try:
+                        from services.mt5_direct import get_mt5_direct
+                        mt5 = get_mt5_direct()
+                        positions = mt5.get_positions() or []
+                        tw_tickets_int = {int(t) for t in all_tickets if str(t).isdigit()}
+                        fills = [(float(p.get("volume", 0)), float(p.get("price_open", 0)))
+                                  for p in positions
+                                  if p.get("ticket") in tw_tickets_int and p.get("price_open")]
+                        if fills:
+                            total_vol = sum(v for v, _ in fills) or 1
+                            avg_entry = sum(v * px for v, px in fills) / total_vol
+                            async with async_session_factory() as s:
+                                t = await s.get(Trade, trade_id)
+                                if t:
+                                    old = t.entry_price
+                                    t.entry_price = round(avg_entry, 6)
+                                    await s.commit()
+                            logger.info("Trade #%d entry_price realigned: %.6f → %.6f (MT5 fill)",
+                                         trade_id, old or 0, avg_entry)
+                    except Exception as exc:
+                        logger.warning("Could not realign entry_price for #%d: %s", trade_id, exc)
             else:
                 error = cc_result.get("error", "Unknown error")
                 logger.error("Trade #%d MT5 FAILED: %s | Full result: %s", trade_id, error, cc_result)
@@ -568,6 +594,29 @@ class Orchestrator:
                     price = t.entry_price
                 # Use existing close flow — it updates stats, memory, meeting trigger
                 await self._close_trade(t, price, "Reconcile: MT5 closed externally")
+
+            # Case 3: DB says ACTIVE, tickets match MT5 — verify entry_price matches
+            # MT5 fill price. If off by more than 5 pips, realign (fixes the mismatch
+            # on trades opened before the fill-price sync was added).
+            elif t.status == "ACTIVE" and still_open:
+                fills = [(float(p.get("volume", 0)), float(p.get("price_open", 0)))
+                          for p in positions
+                          if str(p.get("ticket")) in still_open and p.get("price_open")]
+                if fills:
+                    total_vol = sum(v for v, _ in fills) or 1
+                    avg_entry = sum(v * px for v, px in fills) / total_vol
+                    pip = 0.01 if "JPY" in t.symbol else (1.0 if t.symbol in ("XAUUSD", "US30", "NAS100", "US500") else 0.0001)
+                    diff_pips = abs((t.entry_price or 0) - avg_entry) / pip if t.entry_price else 0
+                    if diff_pips > 5:
+                        logger.warning(
+                            "Reconcile: trade #%d entry_price mismatch (DB=%.6f, MT5=%.6f, %.1fp) — realigning",
+                            t.id, t.entry_price, avg_entry, diff_pips,
+                        )
+                        async with async_session_factory() as s:
+                            row = await s.get(Trade, t.id)
+                            if row:
+                                row.entry_price = round(avg_entry, 6)
+                                await s.commit()
 
     async def _monitor_active_trades(self):
         async with async_session_factory() as s:

@@ -47,7 +47,7 @@ Convert analytical recommendations into precise MT5-ready trade parameters:
 {
   "symbol": "EURUSD",
   "direction": "BUY|SELL",
-  "order_type": "LIMIT|STOP|MARKET",
+  "order_type": "MARKET",
   "entry_price": float,
   "stop_loss": float,
   "take_profit_1": float,
@@ -125,6 +125,14 @@ Set SL at the ICT-defined invalidation level (must be ≥ min SL distance).
 Define TP levels at key liquidity targets.
 """
         result = await self._call_claude_structured(SYSTEM_PROMPT, user_msg, max_tokens=3000)
+
+        # ALWAYS MARKET — LIMIT/STOP orders produce mismatched entry_price vs fill.
+        # Bridge overrides to MARKET anyway; here we enforce consistently so the
+        # entry_price is recalibrated to the latest tick before sending.
+        result["order_type"] = "MARKET"
+        cp = ind.get("current_price")
+        if cp:
+            result["entry_price"] = float(cp)
 
         await self.broadcast_status(
             "TRADE_GENERATED",
