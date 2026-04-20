@@ -1,0 +1,38 @@
+# TradeWizard A/B Test Lab Report
+
+A/B test window: 2026-04-20 to 2026-04-24 (weekdays)
+
+---
+
+## 2026-04-20 03:07 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at audit time. No trade data, cancellation errors, or learning-rule updates could be retrieved. No regression analysis or patch was possible this run.
+
+Step 3 regression check: **skipped** — backend unreachable. Last known fix commits to relevant files:
+- `8c0e24c` fix: in lab mode worker_ok reflects shared bridge reachability
+- `119f7e4` fix: retry order_send in client after bridge respawn
+- `fe8bc94` fix: heartbeat + suicide-on-wedge + watchdog for MT5 bridge
+- `814aaff` fix: rewrite order_send flow to prevent IPC pipe corruption
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
