@@ -948,9 +948,25 @@ class Orchestrator:
         return round(pips * pip_usd * (trade.lot_size or 0.01), 2)
 
     async def _close_trade(self, trade, close_price: float, reason: str):
+        entry = trade.entry_price or 0
+
+        # GUARD: a zero or nonsensical close_price produces phantom pnl of
+        # thousands of dollars. Reject instead of committing the garbage.
+        # Acceptable range: within 20% of entry. Anything outside is a bug
+        # upstream (stale tick, failed fetch, etc.) — abort the close.
+        if not close_price or close_price <= 0:
+            logger.error("REFUSING to close trade #%d with close_price=%s — bug upstream; using entry as fallback",
+                          trade.id, close_price)
+            close_price = entry  # fallback: breakeven, avoids phantom pnl
+            reason = f"{reason} [GUARDED: close_price was 0/negative]"
+        elif entry > 0 and abs(close_price - entry) / entry > 0.20:
+            logger.error("REFUSING to close trade #%d: close_price=%.5f too far from entry=%.5f (>20%%)",
+                          trade.id, close_price, entry)
+            close_price = entry
+            reason = f"{reason} [GUARDED: close_price insane vs entry]"
+
         cc_result = await self.cc.close_trade(trade.mt5_ticket or "", trade.symbol)
 
-        entry = trade.entry_price or 0
         sym = trade.symbol
         pip_val = 0.01 if "JPY" in sym else (1.0 if sym in ("XAUUSD","US30","NAS100","US500") else 0.0001)
         if trade.direction == "BUY":
