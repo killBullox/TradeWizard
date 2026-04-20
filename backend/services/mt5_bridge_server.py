@@ -316,6 +316,64 @@ class CheckMarginRequest(BaseModel):
 
 # ── Write endpoints ──────────────────────────────────────────────────
 
+def _pick_filling_mode(symbol_info) -> int:
+    """Pick a filling mode the broker actually accepts RIGHT NOW.
+    Ava flips between FOK/IOC/RETURN during the day; read the bitmask fresh."""
+    fm = getattr(symbol_info, "filling_mode", 0) or 0
+    if fm & 1:
+        return mt5.ORDER_FILLING_FOK
+    if fm & 2:
+        return mt5.ORDER_FILLING_IOC
+    return mt5.ORDER_FILLING_RETURN
+
+
+def _conform_stops(sym_info, tick, is_buy: bool, price: float,
+                    sl: float, tp: float) -> tuple[float, float]:
+    """Ensure SL/TP respect broker stops_level + freeze_level + spread.
+    Ava's USDCHF widens stops_level at session boundaries; stale SL values
+    become invalid and order_send returns -2 (Invalid stops masked as
+    Invalid comment). Bumps SL/TP to the minimum required distance.
+    Returns (sl, tp), both rounded to symbol digits. Zero stays zero."""
+    point = sym_info.point or 0.00001
+    digits = sym_info.digits or 5
+    stops_level = (sym_info.trade_stops_level or 0) * point
+    freeze_level = (sym_info.trade_freeze_level or 0) * point
+    spread = max((tick.ask - tick.bid), 0)
+    safety = 5 * point
+    min_dist = max(stops_level, freeze_level) + spread + safety
+
+    if sl:
+        if is_buy:
+            min_sl = price - min_dist
+            if sl > min_sl:
+                sl = min_sl
+        else:
+            min_sl = price + min_dist
+            if sl < min_sl:
+                sl = min_sl
+        sl = round(sl, digits)
+    if tp:
+        if is_buy:
+            min_tp = price + min_dist
+            if tp < min_tp:
+                tp = min_tp
+        else:
+            min_tp = price - min_dist
+            if tp > min_tp:
+                tp = min_tp
+        tp = round(tp, digits)
+    return sl, tp
+
+
+def _deviation_for(symbol: str) -> int:
+    """CHF pairs need wider deviation due to volatile spread at session rollover."""
+    if "CHF" in symbol:
+        return 200
+    if "JPY" in symbol:
+        return 100
+    return 50
+
+
 @app.post("/order_send")
 def order_send(req: OrderRequest):
     _ensure_init()
@@ -325,7 +383,6 @@ def order_send(req: OrderRequest):
         return {"success": True, "ticket": str(ticket), "simulated": True}
 
     # STEP 1 — all MT5 calls that can corrupt the IPC pipe BEFORE _fresh_connect.
-    # Between _fresh_connect() and order_send() we must NOT call any other MT5 function.
     symbol = _normalize_symbol(req.symbol)
     if not symbol:
         return {"success": False, "error": f"Symbol not found: {req.symbol}"}
@@ -334,37 +391,83 @@ def order_send(req: OrderRequest):
     comment = _sanitize_comment(req.comment)
     is_buy = req.direction.upper() == "BUY"
 
+    # Re-read symbol spec FRESH (stops_level, filling_mode, trade_mode change
+    # during the session — caching them is the #1 cause of silent -2 errors).
+    sym_info = mt5.symbol_info(symbol)
+    if not sym_info:
+        return {"success": False, "error": f"No symbol_info for {symbol}"}
+    if not sym_info.visible:
+        mt5.symbol_select(symbol, True)
+        sym_info = mt5.symbol_info(symbol) or sym_info
+
+    # Guard: the symbol must be in FULL trade mode. If the broker flipped it
+    # to CLOSE_ONLY / LONG_ONLY / SHORT_ONLY / DISABLED, order_send will
+    # return -2 and we want to know why instead of spinning retries.
+    if sym_info.trade_mode != mt5.SYMBOL_TRADE_MODE_FULL:
+        return {"success": False,
+                "error": f"Symbol {symbol} trade_mode={sym_info.trade_mode} (not FULL) — broker restricted"}
+
     tick = mt5.symbol_info_tick(symbol)
     if not tick:
         return {"success": False, "error": f"No tick data for {symbol}"}
     price = tick.ask if is_buy else tick.bid
     otype = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
 
+    # Reject stale ticks — a >500ms old tick on CHF during rollover is a
+    # recipe for Invalid stops.
+    tick_age_s = max(0, datetime.now().timestamp() - (tick.time or 0))
+    if tick_age_s > 3:
+        logger.warning("Stale tick for %s (age=%.1fs) — proceeding but wider deviation",
+                       symbol, tick_age_s)
+
     if req.order_type.upper() != "MARKET":
         logger.info("Overriding %s to MARKET for %s %s", req.order_type, req.direction, symbol)
 
-    # deviation=50 lets the broker accept small slippage — needed because the tick
-    # captured above is a few hundred ms old by the time order_send runs, and even
-    # older on retry (we don't refresh tick on retry to keep the pipe clean).
+    # Conform SL/TP to broker-side minimum distance (stops_level + freeze_level + spread).
+    sl, tp = _conform_stops(sym_info, tick, is_buy, price, req.stop_loss, req.take_profit)
+    if sl != req.stop_loss or tp != req.take_profit:
+        logger.info("Stops conformed for %s: sl %.5f→%.5f, tp %.5f→%.5f (stops_level=%d pts)",
+                     symbol, req.stop_loss, sl, req.take_profit, tp,
+                     sym_info.trade_stops_level or 0)
+
+    # Filling mode read from THIS symbol's spec at THIS moment.
+    filling = _pick_filling_mode(sym_info)
+    deviation = _deviation_for(symbol)
+
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
         "volume": lots,
         "type": otype,
-        "price": price,
-        "deviation": 50,
+        "price": round(price, sym_info.digits or 5),
+        "deviation": deviation,
         "magic": 20250101,
         "comment": comment,
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_FOK,
+        "type_filling": filling,
     }
-    if req.stop_loss:
-        request["sl"] = req.stop_loss
-    if req.take_profit:
-        request["tp"] = req.take_profit
+    if sl:
+        request["sl"] = sl
+    if tp:
+        request["tp"] = tp
 
-    logger.info("MT5 OPEN: %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f",
-                 req.direction, symbol, lots, price, req.stop_loss, req.take_profit)
+    logger.info("MT5 OPEN: %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f dev=%d fill=%d",
+                 req.direction, symbol, lots, price, sl, tp, deviation, filling)
+
+    # PREFLIGHT: order_check() exposes the REAL retcode when order_send would
+    # return the misleading -2 Invalid comment. We run it once; if it fails
+    # with something actionable we surface the real reason immediately.
+    check = mt5.order_check(request)
+    if check is None:
+        logger.warning("order_check returned None — proceeding anyway (pipe may be wedged)")
+    elif check.retcode not in (0, mt5.TRADE_RETCODE_DONE):
+        # retcode 0 = Done check is valid even if not DONE (margin preview).
+        # Real failures: 10016 invalid stops, 10030 unsupported filling,
+        # 10018 market closed, 10021 no quotes, 10019 no money.
+        logger.error("order_check rejected: retcode=%d comment='%s' — aborting order_send",
+                      check.retcode, check.comment)
+        return {"success": False,
+                "error": f"order_check {check.retcode}: {check.comment}"}
 
     # STEP 2 — reset the pipe, then order_send with NO other MT5 calls in between.
     # This is the critical invariant per the IPC-corruption finding.
