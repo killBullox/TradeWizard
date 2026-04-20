@@ -371,26 +371,41 @@ def order_send(req: OrderRequest):
     import time as _time
     attempt_num = 0
     result = None
-    for attempt in range(4):
+    for attempt in range(2):
         if attempt > 0:
-            logger.warning("order_send None (retry %d/3) — waiting 2s...", attempt)
-            _time.sleep(2)
+            logger.warning("order_send None (retry %d/1) — waiting 1s...", attempt)
+            _time.sleep(1)
         _fresh_connect()
         result = mt5.order_send(request)
         if result is not None:
             attempt_num = attempt
             break
 
+    # If in-process retries failed, try subprocess fallback FIRST (cheaper than
+    # full bridge respawn + client retry, and historically it's the only thing
+    # that works when the pipe is stuck). Only then commit suicide.
     if result is None:
-        # Pipe is wedged and re-initialize didn't fix it — this state can only
-        # be cleared by a fresh process (mql5 forum 351590, 439845). Commit
-        # suicide so main.py's watchdog respawns the bridge.
+        logger.warning("In-process order_send wedged — trying subprocess fallback")
+        sub_result = _subprocess_order(
+            symbol=symbol,
+            direction=req.direction,
+            lot_size=lots,
+            stop_loss=req.stop_loss,
+            take_profit=req.take_profit,
+            comment=comment,
+        )
+        if sub_result.get("success"):
+            logger.info("OPEN OK (subprocess): ticket=%s %s %s",
+                        sub_result.get("ticket"), req.direction, symbol)
+            return sub_result
+        # Subprocess also failed — now commit suicide so the bridge fully resets.
         last_err = mt5.last_error()
-        logger.error("order_send returned None after 4 attempts — last_error=%s", last_err)
-        logger.error("IPC pipe is wedged — exiting so main.py watchdog can respawn the bridge")
+        logger.error("order_send None AND subprocess failed — last_error=%s  sub=%s",
+                     last_err, sub_result.get("error"))
+        logger.error("IPC pipe wedged beyond recovery — exiting for watchdog respawn")
         import os as _os, threading as _th
         _th.Timer(0.5, lambda: _os._exit(1)).start()
-        return {"success": False, "error": f"order_send None after retries: {last_err} (bridge will restart)"}
+        return {"success": False, "error": f"order_send None: {last_err} (bridge will restart)"}
 
     if result.retcode != mt5.TRADE_RETCODE_DONE:
         logger.error("Order failed: retcode=%d comment='%s'", result.retcode, result.comment)
@@ -399,6 +414,58 @@ def order_send(req: OrderRequest):
     logger.info("OPEN OK (attempt %d): ticket=%s %s %s @ %.5f",
                 attempt_num, result.order, req.direction, symbol, price)
     return {"success": True, "ticket": str(result.order), "message": "Order placed"}
+
+
+def _subprocess_order(symbol: str, direction: str, lot_size: float,
+                        stop_loss: float, take_profit: float, comment: str) -> dict:
+    """Execute order in a fresh Python subprocess — bypasses wedged IPC pipe.
+    The subprocess does a clean initialize+order_send+shutdown so it gets a
+    virgin pipe from the MT5 terminal. Slower (~1-2s) but works when the
+    main bridge is stuck."""
+    import subprocess, json, tempfile
+    script = f"""
+import MetaTrader5 as mt5, json, sys
+ok = mt5.initialize(path=r'{MT5_PATH}', login={MT5_LOGIN}, password='{MT5_PASSWORD}', server='{MT5_SERVER}', timeout=10000)
+if not ok:
+    print(json.dumps({{"success":False,"error":"init failed: "+str(mt5.last_error())}}))
+    sys.exit()
+if {MT5_LOGIN}:
+    info = mt5.account_info()
+    if info and info.login != {MT5_LOGIN}:
+        print(json.dumps({{"success":False,"error":f"wrong login {{info.login}}"}}))
+        mt5.shutdown()
+        sys.exit()
+is_buy = '{direction}'.upper() == 'BUY'
+tick = mt5.symbol_info_tick('{symbol}')
+if not tick:
+    print(json.dumps({{"success":False,"error":"no tick"}}))
+    sys.exit()
+price = tick.ask if is_buy else tick.bid
+req = {{
+    'action': mt5.TRADE_ACTION_DEAL, 'symbol': '{symbol}', 'volume': {lot_size},
+    'type': mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL,
+    'price': price, 'deviation': 50, 'magic': 20250101,
+    'comment': {comment!r}, 'type_time': mt5.ORDER_TIME_GTC,
+    'type_filling': mt5.ORDER_FILLING_FOK,
+}}
+if {stop_loss}: req['sl'] = {stop_loss}
+if {take_profit}: req['tp'] = {take_profit}
+r = mt5.order_send(req)
+if r and r.retcode == 10009:
+    print(json.dumps({{"success":True,"ticket":str(r.order),"message":"subprocess open"}}))
+else:
+    print(json.dumps({{"success":False,"error":f"retcode {{r.retcode if r else 'None'}}: {{r.comment if r else mt5.last_error()}}"}}))
+"""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=20,
+        )
+        if proc.stdout.strip():
+            return json.loads(proc.stdout.strip().splitlines()[-1])
+        return {"success": False, "error": f"no output, stderr={proc.stderr[-300:]}"}
+    except Exception as e:
+        return {"success": False, "error": f"subprocess exception: {e}"}
 
 
 @app.post("/modify_sl")
