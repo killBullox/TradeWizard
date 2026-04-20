@@ -249,6 +249,41 @@ Step 3 regression check: **skipped** — backend unreachable. Last known fix com
 
 ---
 
+## 2026-04-20 16:22 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at audit time. No trade data, cancellation errors, or learning-rule updates could be retrieved. No regression analysis or patch was possible this run. **Fourteenth consecutive timeout today** (03:07, 04:10, 05:13, 06:09, 07:02, 08:20, 09:04, 10:12, 11:19, 12:10, 13:31, 14:19, 15:08, 16:22 UTC) — the VPS has been unreachable throughout the entire first day of the A/B test window. Urgent manual investigation of VPS/firewall/process status is critical.
+
+Step 3 regression check: **skipped** — backend unreachable. Last known fix commits to relevant files:
+- `959fa7d` fix: restore subprocess fallback before suicide in bridge order_send
+- `8c0e24c` fix: in lab mode worker_ok reflects shared bridge reachability
+- `119f7e4` fix: retry order_send in client after bridge respawn
+- `fe8bc94` fix: heartbeat + suicide-on-wedge + watchdog for MT5 bridge
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
+
+---
+
 ## 2026-04-20 15:08 UTC
 
 ### Side-by-Side Metrics
