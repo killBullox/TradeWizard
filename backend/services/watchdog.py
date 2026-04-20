@@ -189,6 +189,42 @@ async def check_analysis_freshness() -> tuple[bool, str]:
         return False, f"Cannot check analysis: {exc}"
 
 
+async def check_bridge_wedge_rate() -> tuple[bool, str]:
+    """Count 'wedged beyond recovery' lines in the bridge log over the last 5 min.
+    If >=3, the Ava terminal itself is likely in a bad state — restart_fn will
+    restart the Ava terminal (not just the bridge). Reads only the tail of the
+    log to avoid O(n) scans of a huge file."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    log_path = LOG_DIR / "mt5_bridge.log"
+    if not log_path.exists():
+        return True, "no bridge log yet"
+    try:
+        # Read the last 8 KB — enough to cover ~5 min of typical log volume
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 16384))
+            tail = f.read().decode("utf-8", errors="ignore")
+    except Exception as exc:
+        return True, f"cannot read bridge log: {exc}"
+
+    cutoff = _dt.now(_tz.utc) - _td(minutes=5)
+    count = 0
+    for line in tail.splitlines():
+        if "wedged beyond recovery" not in line:
+            continue
+        try:
+            ts = _dt.fromisoformat(line[:19]).replace(tzinfo=_tz.utc)
+            if ts >= cutoff:
+                count += 1
+        except Exception:
+            pass
+
+    if count >= 3:
+        return False, f"{count} pipe wedges in last 5min — Ava terminal likely stuck"
+    return True, f"{count} wedges in 5min (OK)"
+
+
 async def check_cancellation_rate() -> tuple[bool, str]:
     """Alert if CANCELLED trades today exceed 10 on prod (usually means MT5 bug)."""
     from datetime import datetime as _dt
@@ -480,6 +516,7 @@ async def main():
         ComponentMonitor("MT5 Bridge", check_bridge, restart_bridge, is_async=True),
         ComponentMonitor("MT5 Connection", check_mt5_connection, restart_ava_terminal, is_async=True),
         ComponentMonitor("MT5 Terminal", check_mt5_terminal, restart_mt5_terminal, is_async=False),
+        ComponentMonitor("Bridge wedge rate", check_bridge_wedge_rate, restart_ava_terminal, is_async=True),
         ComponentMonitor("Analysis freshness", check_analysis_freshness, restart_backend, is_async=True),
         ComponentMonitor("Cancellation rate", check_cancellation_rate, lambda: None, is_async=True),
     ]
