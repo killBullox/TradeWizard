@@ -276,30 +276,113 @@ function updateAgentCard(agentKey, message, state) {
   }, 10000);
 }
 
+// ── Persistent Activity Log ────────────────────────────────────────────
+// Survives page refreshes via localStorage. One key per backend mode
+// (production/lab) so the log doesn't mix prod and lab events.
+const _activityStorageKey = () => `tw_activity_${window._TW_MODE || 'production'}`;
+const _MAX_ACTIVITY = 2000;   // hard cap to prevent localStorage overflow
+
+function _loadActivityHistory() {
+  try {
+    const raw = localStorage.getItem(_activityStorageKey());
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function _saveActivityHistory(entries) {
+  try {
+    localStorage.setItem(_activityStorageKey(), JSON.stringify(entries.slice(-_MAX_ACTIVITY)));
+  } catch (e) {
+    // QuotaExceeded — shrink and retry once
+    try { localStorage.setItem(_activityStorageKey(), JSON.stringify(entries.slice(-500))); } catch {}
+  }
+}
+
+function _renderActivityItem(feed, entry) {
+  const item = document.createElement('div');
+  item.className = `activity-item ${entry.type || 'info'}`;
+  item.innerHTML = `<span class="activity-time">${entry.time}</span>${escHtml(entry.text)}`;
+  feed.appendChild(item);
+}
+
 function addActivity(text, type = 'info') {
   const feed = document.getElementById('activity-feed');
   if (!feed) return;
-  const now  = new Date().toLocaleTimeString();
-  const item = document.createElement('div');
-  item.className = `activity-item ${type}`;
-  item.innerHTML = `<span class="activity-time">${now}</span>${escHtml(text)}`;
-  feed.appendChild(item);
+  const now = new Date();
+  const entry = {
+    time: now.toLocaleTimeString(),
+    date: now.toLocaleDateString(),
+    iso:  now.toISOString(),
+    text: text,
+    type: type,
+  };
+
+  // Persist
+  const hist = _loadActivityHistory();
+  hist.push(entry);
+  _saveActivityHistory(hist);
+
+  // Render
+  _renderActivityItem(feed, entry);
   feed.scrollTop = feed.scrollHeight;
-  // Keep last 100 items
-  while (feed.children.length > 100) feed.removeChild(feed.firstChild);
+
+  // DOM cap — render max 500 most recent (but localStorage keeps 2000)
+  while (feed.children.length > 500) feed.removeChild(feed.firstChild);
 }
 
-function copyActivityLog() {
+function restoreActivityHistory() {
   const feed = document.getElementById('activity-feed');
   if (!feed) return;
-  const lines = [...feed.children].map(el => el.textContent.trim()).join('\n');
+  feed.innerHTML = '';
+  const hist = _loadActivityHistory();
+  if (!hist.length) return;
+  // Add a separator at the top indicating start of persisted history
+  const sep = document.createElement('div');
+  sep.className = 'activity-item info';
+  sep.style.opacity = '0.6';
+  sep.innerHTML = `<span class="activity-time">${hist[0].date}</span>— storico (${hist.length} eventi) —`;
+  feed.appendChild(sep);
+  // Render last 500 from history
+  hist.slice(-500).forEach(e => _renderActivityItem(feed, e));
+  feed.scrollTop = feed.scrollHeight;
+}
+
+// Restore on page load
+document.addEventListener('DOMContentLoaded', restoreActivityHistory);
+
+function copyActivityLog() {
+  const hist = _loadActivityHistory();
+  const lines = hist.map(e => `[${e.date} ${e.time}] ${e.text}`).join('\n');
   navigator.clipboard.writeText(lines).then(() => {
-    showToast('success', 'Activity log copiato!');
+    showToast('success', `${hist.length} eventi copiati!`);
   }).catch(() => {
     showToast('error', 'Copia fallita');
   });
 }
 window.copyActivityLog = copyActivityLog;
+
+function clearActivityLog() {
+  if (!confirm('Cancellare tutto lo storico attività?')) return;
+  try { localStorage.removeItem(_activityStorageKey()); } catch {}
+  const feed = document.getElementById('activity-feed');
+  if (feed) feed.innerHTML = '';
+  showToast('info', 'Storico attività cancellato');
+}
+window.clearActivityLog = clearActivityLog;
+
+// Download full history as TXT
+function downloadActivityLog() {
+  const hist = _loadActivityHistory();
+  const lines = hist.map(e => `[${e.date} ${e.time}] [${e.type}] ${e.text}`).join('\n');
+  const blob = new Blob([lines], {type: 'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `tw_activity_${window._TW_MODE}_${new Date().toISOString().slice(0,10)}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+window.downloadActivityLog = downloadActivityLog;
 
 function addComm(agent, message, isThinking = false) {
   const feed = document.getElementById('comms-feed');

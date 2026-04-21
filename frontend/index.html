@@ -243,10 +243,11 @@
           <!-- Activity Feed -->
           <div class="card">
             <div class="card-header">
-              <h3>⚡ Live Activity</h3>
+              <h3>⚡ Activity Log <span style="opacity:0.5;font-size:0.75em;font-weight:normal">(persistente)</span></h3>
               <div style="display:flex;gap:6px">
-                <button class="btn btn-ghost btn-sm" onclick="copyActivityLog()" title="Copia log">📋 Copy</button>
-                <button class="btn btn-ghost btn-sm" id="btn-clear-feed">Clear</button>
+                <button class="btn btn-ghost btn-sm" onclick="copyActivityLog()" title="Copia tutto lo storico">📋 Copy</button>
+                <button class="btn btn-ghost btn-sm" onclick="downloadActivityLog()" title="Scarica storico come .txt">💾 Download</button>
+                <button class="btn btn-ghost btn-sm" onclick="clearActivityLog()" title="Cancella storico locale">🗑 Clear</button>
               </div>
             </div>
             <div class="activity-feed" id="activity-feed">
