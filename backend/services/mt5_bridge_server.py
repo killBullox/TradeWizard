@@ -454,20 +454,39 @@ def order_send(req: OrderRequest):
     logger.info("MT5 OPEN: %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f dev=%d fill=%d",
                  req.direction, symbol, lots, price, sl, tp, deviation, filling)
 
-    # PREFLIGHT: order_check() exposes the REAL retcode when order_send would
-    # return the misleading -2 Invalid comment. We run it once; if it fails
-    # with something actionable we surface the real reason immediately.
-    check = mt5.order_check(request)
-    if check is None:
-        logger.warning("order_check returned None — proceeding anyway (pipe may be wedged)")
-    elif check.retcode not in (0, mt5.TRADE_RETCODE_DONE):
-        # retcode 0 = Done check is valid even if not DONE (margin preview).
-        # Real failures: 10016 invalid stops, 10030 unsupported filling,
-        # 10018 market closed, 10021 no quotes, 10019 no money.
-        logger.error("order_check rejected: retcode=%d comment='%s' — aborting order_send",
-                      check.retcode, check.comment)
-        return {"success": False,
-                "error": f"order_check {check.retcode}: {check.comment}"}
+    # EXECUTE VIA SUBPROCESS — a standalone Python process with fresh
+    # initialize() was empirically proven to succeed (retcode 10009) where
+    # the long-running bridge returns None. The bridge's in-process MT5
+    # library session gets poisoned over time (documented MetaTrader5 bug);
+    # a short-lived subprocess sidesteps that entirely.
+    sub_result = _subprocess_order_v2(
+        symbol=symbol,
+        is_buy=is_buy,
+        lot_size=lots,
+        price=request["price"],
+        sl=sl,
+        tp=tp,
+        deviation=deviation,
+        filling=filling,
+        comment=comment,
+    )
+    if sub_result.get("success"):
+        logger.info("OPEN OK (subprocess): ticket=%s %s %s @ %.5f",
+                    sub_result.get("ticket"), req.direction, symbol, price)
+        return sub_result
+
+    # Subprocess failed with a real retcode (not a wedge). Surface the error.
+    err = sub_result.get("error", "unknown")
+    logger.error("Subprocess order_send failed: %s", err)
+
+    # If the subprocess itself couldn't even initialize, the Ava terminal
+    # is likely stuck — suicide the bridge so the watchdog restarts Ava.
+    if "init failed" in err.lower():
+        import os as _os, threading as _th
+        _th.Timer(0.5, lambda: _os._exit(1)).start()
+        return {"success": False, "error": f"{err} (bridge will restart to force Ava reconnect)"}
+
+    return sub_result
 
     # STEP 2 — reset the pipe, then order_send with NO other MT5 calls in between.
     # This is the critical invariant per the IPC-corruption finding.
@@ -517,6 +536,66 @@ def order_send(req: OrderRequest):
     logger.info("OPEN OK (attempt %d): ticket=%s %s %s @ %.5f",
                 attempt_num, result.order, req.direction, symbol, price)
     return {"success": True, "ticket": str(result.order), "message": "Order placed"}
+
+
+def _subprocess_order_v2(symbol: str, is_buy: bool, lot_size: float,
+                          price: float, sl: float, tp: float,
+                          deviation: int, filling: int, comment: str) -> dict:
+    """Execute order in a short-lived Python subprocess.
+
+    Empirically proven via diag_ordersend.py: a fresh Python process with
+    mt5.initialize() successfully sends orders where the long-running bridge
+    session returns None. Slower (~1-2s) but reliable.
+
+    Runs order_check first to surface the REAL broker retcode (10030
+    unsupported filling / 10016 invalid stops / etc) instead of the
+    misleading -2 from the wrapper.
+    """
+    import subprocess, json
+    script = f"""
+import MetaTrader5 as mt5, json, sys
+ok = mt5.initialize(path=r'{MT5_PATH}', login={MT5_LOGIN}, password='{MT5_PASSWORD}', server='{MT5_SERVER}', timeout=10000)
+if not ok:
+    print(json.dumps({{"success":False,"error":"init failed: "+str(mt5.last_error())}}))
+    sys.exit()
+req = {{
+    'action': mt5.TRADE_ACTION_DEAL,
+    'symbol': '{symbol}',
+    'volume': {lot_size},
+    'type': mt5.ORDER_TYPE_BUY if {is_buy} else mt5.ORDER_TYPE_SELL,
+    'price': {price},
+    'deviation': {deviation},
+    'magic': 20250101,
+    'comment': {comment!r},
+    'type_time': mt5.ORDER_TIME_GTC,
+    'type_filling': {filling},
+}}
+if {sl}: req['sl'] = {sl}
+if {tp}: req['tp'] = {tp}
+chk = mt5.order_check(req)
+if chk is None:
+    print(json.dumps({{"success":False,"error":"order_check None: "+str(mt5.last_error())}}))
+    sys.exit()
+if chk.retcode not in (0, 10009):
+    print(json.dumps({{"success":False,"error":f"check {{chk.retcode}}: {{chk.comment}}"}}))
+    sys.exit()
+r = mt5.order_send(req)
+if r and r.retcode == 10009:
+    print(json.dumps({{"success":True,"ticket":str(r.order),"message":"subprocess open","price":r.price}}))
+else:
+    print(json.dumps({{"success":False,"error":f"retcode {{r.retcode if r else 'None'}}: {{r.comment if r else mt5.last_error()}}"}}))
+"""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=25,
+        )
+        out = proc.stdout.strip()
+        if out:
+            return json.loads(out.splitlines()[-1])
+        return {"success": False, "error": f"no output, stderr={proc.stderr[-300:]}"}
+    except Exception as e:
+        return {"success": False, "error": f"subprocess exception: {e}"}
 
 
 def _subprocess_order(symbol: str, direction: str, lot_size: float,
