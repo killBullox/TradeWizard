@@ -668,3 +668,40 @@ Step 3 regression check: **skipped** — backend unreachable. Last known fix com
 **0 new CANDIDATE rules retrieved** — lab backend unreachable.
 
 ---
+
+## 2026-04-21 07:11 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at 07:11 UTC — TCP SYN never acknowledged on either port. This is the third recorded timeout on 2026-04-21 (previous: 04:04 UTC, 06:04 UTC) and part of an ongoing outage spanning the entire A/B test window. No trade data, cancellation errors, or learning-rule updates could be retrieved. No regression analysis or patch was possible this run.
+
+Step 3 regression check: **skipped** — backend unreachable. Last known fix commits to relevant files:
+- `22047b7` fix: route ALL order_send through fresh subprocess (definitive)
+- `5fee9a2` fix: order_check preflight + dynamic stops/filling/deviation (solves -2)
+- `959fa7d` fix: restore subprocess fallback before suicide in bridge order_send
+- `119f7e4` fix: retry order_send in client after bridge respawn
+
+**Action required (escalated):** VPS has been unreachable for every audit run since the A/B window opened on 2026-04-20. Manually verify FastAPI processes are running (`ps aux | grep uvicorn`), confirm firewall allows inbound TCP on ports 8000 and 8001, and check that the VPS itself is online.
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
+
+---
