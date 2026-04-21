@@ -596,3 +596,38 @@ Step 3 regression check: **skipped** — backend unreachable. Last known fix com
 **0 new CANDIDATE rules retrieved** — lab backend unreachable.
 
 ---
+
+## 2026-04-21 05:21 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at audit time — TCP SYN never acknowledged on either port. This is the second consecutive timeout on 2026-04-21 (previous: 04:04 UTC) and part of an extended outage spanning all of 2026-04-20. No trade data, cancellation errors, or learning-rule updates could be retrieved. No regression analysis or patch was possible this run. Persistent unavailability throughout the A/B test window is a concern — urgent manual VPS investigation recommended.
+
+Step 3 regression check: **skipped** — backend unreachable. Last known fix commits to relevant files:
+- `5fee9a2` fix: order_check preflight + dynamic stops/filling/deviation (solves -2)
+- `959fa7d` fix: restore subprocess fallback before suicide in bridge order_send
+- `119f7e4` fix: retry order_send in client after bridge respawn
+- `fe8bc94` fix: heartbeat + suicide-on-wedge + watchdog for MT5 bridge
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
+
+---
