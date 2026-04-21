@@ -402,7 +402,13 @@ def order_send(req: OrderRequest):
 
 
 def _order_send_locked(req: OrderRequest) -> dict:
-    # STEP 1 — all MT5 calls that can corrupt the IPC pipe BEFORE _fresh_connect.
+    import json as _json
+    # FULL VERBOSE LOG — every parameter the backend sent + every parameter
+    # we compute. This is the debug trail we need to find why real trades
+    # fail while stress-test EURUSD 0.01 succeeds.
+    logger.info("────── ORDER REQUEST DUMP ──────")
+    logger.info("  raw req: %s", _json.dumps(req.model_dump(), default=str))
+
     symbol = _normalize_symbol(req.symbol)
     if not symbol:
         return {"success": False, "error": f"Symbol not found: {req.symbol}"}
@@ -471,8 +477,19 @@ def _order_send_locked(req: OrderRequest) -> dict:
     if tp:
         request["tp"] = tp
 
-    logger.info("MT5 OPEN: %s %s lots=%.2f price=%.5f sl=%.5f tp=%.5f dev=%d fill=%d",
-                 req.direction, symbol, lots, price, sl, tp, deviation, filling)
+    # FULL DUMP of every conformed/computed parameter before subprocess call.
+    logger.info("  symbol(normalized): %s", symbol)
+    logger.info("  symbol_info: visible=%s trade_mode=%s stops_level=%s filling_bitmask=%s digits=%s point=%s",
+                 sym_info.visible, sym_info.trade_mode, sym_info.trade_stops_level,
+                 sym_info.filling_mode, sym_info.digits, sym_info.point)
+    logger.info("  tick: bid=%s ask=%s time=%s (age=%.1fs)",
+                 tick.bid, tick.ask, tick.time, tick_age_s)
+    logger.info("  lots(norm)=%s  price(rounded)=%s  sl=%s  tp=%s",
+                 lots, request["price"], sl, tp)
+    logger.info("  deviation=%s  filling=%s  comment=%r (len=%d)",
+                 deviation, filling, comment, len(comment))
+    logger.info("  request dict: %s", _json.dumps(request, default=str))
+    logger.info("────────────────────────────────")
 
     # EXECUTE VIA SUBPROCESS — a standalone Python process with fresh
     # initialize() was empirically proven to succeed (retcode 10009) where
@@ -508,55 +525,6 @@ def _order_send_locked(req: OrderRequest) -> dict:
 
     return sub_result
 
-    # STEP 2 — reset the pipe, then order_send with NO other MT5 calls in between.
-    # This is the critical invariant per the IPC-corruption finding.
-    import time as _time
-    attempt_num = 0
-    result = None
-    for attempt in range(2):
-        if attempt > 0:
-            logger.warning("order_send None (retry %d/1) — waiting 1s...", attempt)
-            _time.sleep(1)
-        _fresh_connect()
-        result = mt5.order_send(request)
-        if result is not None:
-            attempt_num = attempt
-            break
-
-    # If in-process retries failed, try subprocess fallback FIRST (cheaper than
-    # full bridge respawn + client retry, and historically it's the only thing
-    # that works when the pipe is stuck). Only then commit suicide.
-    if result is None:
-        logger.warning("In-process order_send wedged — trying subprocess fallback")
-        sub_result = _subprocess_order(
-            symbol=symbol,
-            direction=req.direction,
-            lot_size=lots,
-            stop_loss=req.stop_loss,
-            take_profit=req.take_profit,
-            comment=comment,
-        )
-        if sub_result.get("success"):
-            logger.info("OPEN OK (subprocess): ticket=%s %s %s",
-                        sub_result.get("ticket"), req.direction, symbol)
-            return sub_result
-        # Subprocess also failed — now commit suicide so the bridge fully resets.
-        last_err = mt5.last_error()
-        logger.error("order_send None AND subprocess failed — last_error=%s  sub=%s",
-                     last_err, sub_result.get("error"))
-        logger.error("IPC pipe wedged beyond recovery — exiting for watchdog respawn")
-        import os as _os, threading as _th
-        _th.Timer(0.5, lambda: _os._exit(1)).start()
-        return {"success": False, "error": f"order_send None: {last_err} (bridge will restart)"}
-
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        logger.error("Order failed: retcode=%d comment='%s'", result.retcode, result.comment)
-        return {"success": False, "error": f"retcode {result.retcode}: {result.comment}"}
-
-    logger.info("OPEN OK (attempt %d): ticket=%s %s %s @ %.5f",
-                attempt_num, result.order, req.direction, symbol, price)
-    return {"success": True, "ticket": str(result.order), "message": "Order placed"}
-
 
 def _subprocess_order_v2(symbol: str, is_buy: bool, lot_size: float,
                           price: float, sl: float, tp: float,
@@ -572,12 +540,20 @@ def _subprocess_order_v2(symbol: str, is_buy: bool, lot_size: float,
     misleading -2 from the wrapper.
     """
     import subprocess, json
+    # Subprocess script with verbose DEBUG lines to stderr so we can see
+    # WHERE exactly it fails (init? order_check? order_send?).
     script = f"""
 import MetaTrader5 as mt5, json, sys
+sys.stderr.write('SUB: entry\\n')
 ok = mt5.initialize(path=r'{MT5_PATH}', login={MT5_LOGIN}, password='{MT5_PASSWORD}', server='{MT5_SERVER}', timeout=10000)
+sys.stderr.write(f'SUB: initialize={{ok}} last_err={{mt5.last_error()}}\\n')
 if not ok:
     print(json.dumps({{"success":False,"error":"init failed: "+str(mt5.last_error())}}))
     sys.exit()
+info = mt5.account_info()
+sys.stderr.write(f'SUB: account={{info.login if info else None}} server={{info.server if info else None}}\\n')
+si = mt5.symbol_info('{symbol}')
+sys.stderr.write(f'SUB: symbol_info visible={{si.visible if si else None}} trade_mode={{si.trade_mode if si else None}} filling_bitmask={{si.filling_mode if si else None}} stops_level={{si.trade_stops_level if si else None}}\\n')
 req = {{
     'action': mt5.TRADE_ACTION_DEAL,
     'symbol': '{symbol}',
@@ -592,14 +568,18 @@ req = {{
 }}
 if {sl}: req['sl'] = {sl}
 if {tp}: req['tp'] = {tp}
+sys.stderr.write(f'SUB: request={{req}}\\n')
 chk = mt5.order_check(req)
 if chk is None:
+    sys.stderr.write(f'SUB: order_check=None last_err={{mt5.last_error()}}\\n')
     print(json.dumps({{"success":False,"error":"order_check None: "+str(mt5.last_error())}}))
     sys.exit()
+sys.stderr.write(f'SUB: order_check retcode={{chk.retcode}} comment={{chk.comment}}\\n')
 if chk.retcode not in (0, 10009):
     print(json.dumps({{"success":False,"error":f"check {{chk.retcode}}: {{chk.comment}}"}}))
     sys.exit()
 r = mt5.order_send(req)
+sys.stderr.write(f'SUB: order_send retcode={{r.retcode if r else None}} comment={{r.comment if r else mt5.last_error()}}\\n')
 if r and r.retcode == 10009:
     print(json.dumps({{"success":True,"ticket":str(r.order),"message":"subprocess open","price":r.price}}))
 else:
@@ -611,10 +591,17 @@ else:
             capture_output=True, text=True, timeout=25,
         )
         out = proc.stdout.strip()
+        err = proc.stderr.strip()
+        # Always log the full subprocess output — this is where the truth lives
+        logger.info("SUBPROC stdout: %s", out[-1500:] if out else "(empty)")
+        if err:
+            logger.warning("SUBPROC stderr: %s", err[-800:])
+        logger.info("SUBPROC exit=%d", proc.returncode)
         if out:
             return json.loads(out.splitlines()[-1])
-        return {"success": False, "error": f"no output, stderr={proc.stderr[-300:]}"}
+        return {"success": False, "error": f"no output, stderr={err[-300:]}"}
     except Exception as e:
+        logger.error("SUBPROC exception: %s", e)
         return {"success": False, "error": f"subprocess exception: {e}"}
 
 

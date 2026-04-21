@@ -1540,22 +1540,44 @@ async def clear_activity(before_days: int = 30):
 
 @app.get("/api/alerts")
 async def get_alerts(limit: int = 50):
-    """Return the most recent watchdog alerts from logs/alerts.log (TSV format).
-    Frontend can poll this to show a banner if there's anything ERROR in the last hour."""
+    """Return watchdog alerts for THIS backend's mode only.
+    The watchdog log is shared on disk, but the 'component' field tells
+    which backend the alert refers to (e.g. 'Backend (prod)' vs 'Backend
+    (lab)'). We filter so /api/alerts on port 8000 returns only prod
+    events, and port 8001 returns only lab events. Component strings
+    that match neither (bridge, MT5 terminal) are shown on BOTH because
+    they describe shared infrastructure."""
+    import os as _os
+    my_mode = _os.getenv("SYSTEM_MODE", "production").lower()
+
     alerts_path = os.path.join(_log_dir, "alerts.log")
     if not os.path.exists(alerts_path):
-        return {"alerts": [], "unacked_errors": 0}
+        return {"alerts": [], "unacked_errors": 0, "mode": my_mode}
     try:
         with open(alerts_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()[-limit:]
+            lines = f.readlines()[-500:]  # read a wider window before filtering
     except Exception:
-        return {"alerts": [], "unacked_errors": 0}
+        return {"alerts": [], "unacked_errors": 0, "mode": my_mode}
+
     alerts = []
     for ln in lines:
         parts = ln.rstrip("\n").split("\t")
-        if len(parts) >= 4:
-            alerts.append({"ts": parts[0], "level": parts[1], "component": parts[2], "message": parts[3]})
-    # Count ERROR in the last hour
+        if len(parts) < 4:
+            continue
+        comp = parts[2]
+        # Filter: keep alerts that belong to this mode OR shared infrastructure
+        comp_lower = comp.lower()
+        if "prod" in comp_lower and my_mode != "production":
+            continue
+        if "lab" in comp_lower and my_mode != "lab":
+            continue
+        # "Cancellation rate" is prod-scoped (checks prod trades) — hide in lab
+        if "cancellation" in comp_lower and my_mode != "production":
+            continue
+        alerts.append({"ts": parts[0], "level": parts[1], "component": comp, "message": parts[3]})
+
+    alerts = alerts[-limit:]
+
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     one_hour_ago = _dt.now(_tz.utc) - _td(hours=1)
     unacked = 0
@@ -1568,7 +1590,7 @@ async def get_alerts(limit: int = 50):
                 unacked += 1
         except Exception:
             pass
-    return {"alerts": alerts, "unacked_errors": unacked}
+    return {"alerts": alerts, "unacked_errors": unacked, "mode": my_mode}
 
 
 @app.get("/api/system-mode")
