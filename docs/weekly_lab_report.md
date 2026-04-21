@@ -997,3 +997,40 @@ Step 3 regression check: **skipped** — backend unreachable. Most recent fix co
 ### New CANDIDATE Rules
 
 **0 new CANDIDATE rules retrieved** — lab backend unreachable.
+
+---
+
+## 2026-04-21 16:06 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at 16:06 UTC — TCP SYN never acknowledged on either port. This is the fourteenth recorded timeout on 2026-04-21 (previous: 03:09, 04:04, 05:21, 06:04, 07:11, 08:19, 09:17, 10:12, 11:23, 12:27, 13:11, 14:08, 15:12 UTC) and part of an ongoing outage spanning the entire A/B test window since it opened 2026-04-20. No trade data, cancellation errors, or learning-rule updates could be retrieved. No regression analysis or patch was possible this run.
+
+Step 3 regression check: **skipped** — backend unreachable. Most recent fix commits to monitored files:
+- `37e6771` fix: global mt5 lock — serialize every MT5 call in bridge + during subprocess
+- `22047b7` fix: route ALL order_send through fresh subprocess (definitive)
+- `5fee9a2` fix: order_check preflight + dynamic stops/filling/deviation (solves -2)
+- `959fa7d` fix: restore subprocess fallback before suicide in bridge order_send
+
+**Action required (critical):** VPS unreachable for every audit since 2026-04-20 03:07 UTC — over 37 hours continuous outage. Immediate manual VPS/firewall/process investigation required. Only ~2 days of the A/B test window remain (closes 2026-04-24).
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
