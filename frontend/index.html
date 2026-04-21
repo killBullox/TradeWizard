@@ -31,10 +31,20 @@
 
       const _OrigWS = window.WebSocket;
       window.WebSocket = function (url, protocols) {
-        if (typeof url === 'string' && (url.startsWith('/ws') || url.startsWith('ws://') && url.includes(location.host))) {
+        // Route WS to the selected backend. Handle three input forms:
+        //   "/ws"                  -> prefix with base
+        //   "ws://host:port/ws"    -> rewrite host:port to base
+        //   absolute that already matches location -> rewrite to base
+        if (typeof url === 'string') {
           const base = BACKENDS[window._TW_MODE]?.ws;
-          if (base && !url.startsWith('http') && !url.startsWith('ws')) {
-            url = base + url;
+          if (base) {
+            if (url.startsWith('/')) {
+              url = base + url;
+            } else if (url.startsWith('ws://') || url.startsWith('wss://')) {
+              // Replace the protocol+host part with the mode's base
+              const m = url.match(/^wss?:\/\/[^\/]+(\/.*)?$/);
+              if (m) url = base + (m[1] || '');
+            }
           }
         }
         return protocols ? new _OrigWS(url, protocols) : new _OrigWS(url);
