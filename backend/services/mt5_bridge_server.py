@@ -146,8 +146,26 @@ def _normalize_lots(symbol: str, lots: float) -> float:
 
 
 def _sanitize_comment(raw: str) -> str:
-    """ASCII only, max 31 chars."""
-    clean = ''.join(c for c in raw if c.isascii() and (c.isalnum() or c in ' -_.'))[:31]
+    """Strict comment sanitizer — AvaTrade actively rejects comments with
+    certain patterns (empirically: 31-char + double spaces + words like
+    'Block'/'Breaker'/'-TP' triggers genuine -2 'Invalid comment argument').
+
+    Empirically proven tolerant: short ASCII alphanum + single hyphen,
+    max 20 chars, no consecutive spaces, no weird patterns.
+
+    Strategy: keep only [A-Za-z0-9_-], single hyphen prefix 'TW-',
+    collapse whitespace, cap at 20 chars. Fallback to 'TW' if empty.
+    """
+    if not raw:
+        return "TW"
+    # Strip to ascii alnum + hyphen + underscore only (no spaces, no dots,
+    # no '+' which the old code already removed). Collapse everything else
+    # into a single hyphen separator.
+    import re as _re
+    clean = _re.sub(r'[^A-Za-z0-9_-]+', '-', raw)
+    clean = _re.sub(r'-+', '-', clean).strip('-')
+    if len(clean) > 20:
+        clean = clean[:20].rstrip('-')
     return clean or "TW"
 
 
