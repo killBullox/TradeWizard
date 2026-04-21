@@ -69,7 +69,32 @@ class ConnectionManager:
         async with self._lock:
             self.active.discard(ws)
 
+    # Broadcast types that we also persist to the Activity Log DB.
+    # Internal / verbose events (agent_thinking, heartbeat tick, etc.) are skipped.
+    _PERSIST_TYPES = {
+        "system_started", "system_stopped", "trade_opened", "trade_closed",
+        "trade_rejected", "trade_sent", "sl_trailed", "tp_hit", "partial_close",
+        "meeting_started", "meeting_completed", "meeting_verdict",
+        "config_updated", "news_block", "error", "rule_block",
+    }
+
     async def broadcast(self, message: dict):
+        # Persist to DB if it's a meaningful activity event
+        try:
+            mtype = message.get("type", "")
+            if mtype in self._PERSIST_TYPES:
+                level = {
+                    "trade_opened": "success", "trade_closed": "success",
+                    "trade_rejected": "warning", "news_block": "warning",
+                    "error": "error", "rule_block": "warning",
+                }.get(mtype, "info")
+                # Craft a human-readable message from the event
+                sym = message.get("symbol", "")
+                msg_text = message.get("message") or _format_activity(mtype, message)
+                await log_activity(msg_text, level=level, source=mtype, data=message)
+        except Exception:
+            pass
+
         if not self.active:
             return
         data = json.dumps(message, default=str)
@@ -81,6 +106,35 @@ class ConnectionManager:
                 disconnected.add(ws)
         async with self._lock:
             self.active -= disconnected
+
+
+def _format_activity(mtype: str, msg: dict) -> str:
+    sym = msg.get("symbol", "")
+    if mtype == "trade_opened":
+        return f"Trade #{msg.get('trade_id')} aperto {sym} {msg.get('direction')}"
+    if mtype == "trade_closed":
+        pnl = msg.get("pnl_usd", 0)
+        return f"Trade #{msg.get('trade_id')} chiuso {sym} {msg.get('result')} P&L ${pnl}"
+    if mtype == "trade_rejected":
+        return f"Trade {sym} rifiutato da {msg.get('agent')}: {msg.get('reason')}"
+    if mtype == "sl_trailed":
+        return f"SL trailed #{msg.get('trade_id')} {sym} → {msg.get('new_sl')}"
+    if mtype == "partial_close":
+        return f"Partial close #{msg.get('trade_id')} {msg.get('percent')}%"
+    if mtype == "tp_hit":
+        return f"TP hit #{msg.get('trade_id')} {sym}"
+    if mtype == "meeting_started":
+        return f"Meeting {msg.get('meeting_type')} avviato"
+    if mtype == "meeting_completed":
+        n = len(msg.get("improvements", []))
+        return f"Meeting {msg.get('meeting_type')} completato ({n} improvements)"
+    if mtype == "news_block":
+        return f"NEWS BLOCK {sym}: {msg.get('message','')}"
+    if mtype == "rule_block":
+        return f"Rule block {sym}: {msg.get('reason','')}"
+    if mtype == "error":
+        return f"Errore: {msg.get('message','')}"
+    return mtype
 
 
 manager = ConnectionManager()
@@ -1432,6 +1486,54 @@ async def clear_strategy_memory():
     """Clear all strategy memory (use after intentional strategy reset)."""
     async with async_session_factory() as s:
         result = await s.execute(delete(StrategyMemory))
+        await s.commit()
+    return {"deleted": result.rowcount}
+
+
+from models.database import ActivityEvent
+
+
+async def log_activity(message: str, level: str = "info", source: str = "system", data: dict | None = None):
+    """Persist an event so the frontend Activity Log survives refreshes and
+    can be shared across browsers. Silently tolerates DB errors (logging
+    must never break the main flow)."""
+    try:
+        async with async_session_factory() as s:
+            ev = ActivityEvent(
+                level=level,
+                source=source,
+                message=message[:4000],
+                data=json.dumps(data)[:8000] if data else None,
+            )
+            s.add(ev)
+            await s.commit()
+    except Exception:
+        pass
+
+
+@app.get("/api/activity")
+async def get_activity(since_id: int = 0, limit: int = 500):
+    """Return recent activity events. Frontend calls this at boot to
+    hydrate the Activity Log, then polls with since_id for incremental
+    updates (or just relies on WebSocket + periodic reconciliation)."""
+    async with async_session_factory() as s:
+        q = select(ActivityEvent).where(ActivityEvent.id > since_id).order_by(ActivityEvent.id.desc()).limit(limit)
+        rows = (await s.execute(q)).scalars().all()
+    return [
+        {"id": r.id, "ts": r.timestamp.isoformat() if r.timestamp else None,
+         "level": r.level, "source": r.source, "message": r.message,
+         "data": json.loads(r.data) if r.data else None}
+        for r in reversed(rows)  # oldest first
+    ]
+
+
+@app.delete("/api/activity")
+async def clear_activity(before_days: int = 30):
+    """Purge old activity events — defaults to keeping only last 30 days."""
+    from datetime import timedelta as _td
+    cutoff = datetime.utcnow() - _td(days=before_days)
+    async with async_session_factory() as s:
+        result = await s.execute(delete(ActivityEvent).where(ActivityEvent.timestamp < cutoff))
         await s.commit()
     return {"deleted": result.rowcount}
 

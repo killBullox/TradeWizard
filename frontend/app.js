@@ -330,25 +330,55 @@ function addActivity(text, type = 'info') {
   while (feed.children.length > 500) feed.removeChild(feed.firstChild);
 }
 
-function restoreActivityHistory() {
+// Source of truth: DB via /api/activity. localStorage is a fallback cache.
+async function hydrateActivityFromDB() {
+  const feed = document.getElementById('activity-feed');
+  if (!feed) return;
+  try {
+    const r = await fetch('/api/activity?limit=500');
+    const events = await r.json();
+    if (!Array.isArray(events) || !events.length) {
+      return restoreActivityHistoryLocal();  // fresh DB or empty → try local
+    }
+    feed.innerHTML = '';
+    const sep = document.createElement('div');
+    sep.className = 'activity-item info';
+    sep.style.opacity = '0.6';
+    sep.innerHTML = `<span class="activity-time">DB</span>— storico dal database (${events.length} eventi) —`;
+    feed.appendChild(sep);
+    for (const ev of events) {
+      const d = new Date(ev.ts);
+      _renderActivityItem(feed, {
+        time: d.toLocaleTimeString(),
+        date: d.toLocaleDateString(),
+        iso:  ev.ts,
+        text: ev.message,
+        type: ev.level,
+      });
+    }
+    feed.scrollTop = feed.scrollHeight;
+  } catch (e) {
+    restoreActivityHistoryLocal();
+  }
+}
+
+function restoreActivityHistoryLocal() {
   const feed = document.getElementById('activity-feed');
   if (!feed) return;
   feed.innerHTML = '';
   const hist = _loadActivityHistory();
   if (!hist.length) return;
-  // Add a separator at the top indicating start of persisted history
   const sep = document.createElement('div');
   sep.className = 'activity-item info';
   sep.style.opacity = '0.6';
-  sep.innerHTML = `<span class="activity-time">${hist[0].date}</span>— storico (${hist.length} eventi) —`;
+  sep.innerHTML = `<span class="activity-time">${hist[0].date}</span>— storico locale (${hist.length} eventi) —`;
   feed.appendChild(sep);
-  // Render last 500 from history
   hist.slice(-500).forEach(e => _renderActivityItem(feed, e));
   feed.scrollTop = feed.scrollHeight;
 }
 
-// Restore on page load
-document.addEventListener('DOMContentLoaded', restoreActivityHistory);
+// Restore on page load: prefer DB, fallback to localStorage
+document.addEventListener('DOMContentLoaded', hydrateActivityFromDB);
 
 function copyActivityLog() {
   const hist = _loadActivityHistory();

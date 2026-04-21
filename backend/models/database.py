@@ -144,6 +144,20 @@ class StrategyMemory(Base):
     last_updated = Column(DateTime, default=datetime.utcnow)
 
 
+class ActivityEvent(Base):
+    """Persistent Activity Log — every user-visible event is stored here so the
+    frontend's 'Live Activity' panel survives refreshes and is shared across
+    browsers. Keeps last ~5000 events per instance (prod/lab have separate DBs)."""
+    __tablename__ = "activity_events"
+
+    id        = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    level     = Column(String(20), default="info")   # info / success / warning / error
+    source    = Column(String(30), default="system") # trade / meeting / analysis / rule / system / error
+    message   = Column(Text, nullable=False)
+    data      = Column(Text, nullable=True)          # JSON extra context
+
+
 class LearningRule(Base):
     """Structured trading rules extracted from meeting insights.
     Rules go through lifecycle: CANDIDATE → ACTIVE → CONFIRMED → DEPRECATED.
