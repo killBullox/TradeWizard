@@ -159,24 +159,32 @@ _mt5_initialized = False
 _keepalive_thread = None
 _keepalive_symbol = "EURUSD"
 
-def _keepalive_loop():
-    """Heartbeat with symbol_info_tick every 1s — keeps the IPC pipe warm
-    so the first order_send after an idle period doesn't hit the dead-pipe
-    state (see research report; this is the most-cited fix across mql5 forum
-    and forexfactory threads).
+# Global lock: serializes every mt5.* call AND every order_send subprocess.
+# Rationale: while an order_send subprocess is running, ANY mt5.* call from
+# the bridge (keepalive tick, positions, candles) touches the same MT5
+# terminal and corrupts the subprocess's pipe — subprocess gets
+# 'order_check None (-2, Invalid comment)'. Holding this lock around all
+# mt5 interactions + during the subprocess eliminates the conflict.
+import threading as _threading
+_MT5_LOCK = _threading.Lock()
 
-    Note: the original TW memory said symbol_info_tick corrupts the pipe —
-    that refers to calling it IMMEDIATELY before order_send in the same
-    sequence. Background heartbeat is a different pattern and is actively
-    recommended."""
+def _keepalive_loop():
+    """Heartbeat with symbol_info_tick — keeps the IPC pipe warm.
+    MUST acquire _MT5_LOCK to not collide with an in-flight order_send
+    subprocess. Uses non-blocking acquire so if the lock is held by a
+    subprocess, this skip is harmless."""
     import time
     while True:
-        time.sleep(1)
+        time.sleep(2)  # 2s instead of 1s — lighter pressure on the terminal
         if _mt5_initialized and MT5_AVAILABLE:
+            if not _MT5_LOCK.acquire(blocking=False):
+                continue  # order_send in flight, skip this heartbeat
             try:
                 mt5.symbol_info_tick(_keepalive_symbol)
             except Exception as e:
                 logger.warning("Keepalive tick error: %s", e)
+            finally:
+                _MT5_LOCK.release()
 
 
 @app.on_event("startup")
@@ -200,7 +208,8 @@ def health():
     if not MT5_AVAILABLE:
         return {"status": "ok", "mt5_available": False, "connected": True}
     _ensure_init()
-    info = mt5.account_info()
+    with _MT5_LOCK:
+        info = mt5.account_info()
     return {"status": "ok", "mt5_available": True, "connected": info is not None,
             "account": info.login if info else None}
 
@@ -209,7 +218,8 @@ def health():
 def account():
     if not MT5_AVAILABLE:
         return {"balance": 10000.0, "equity": 10000.0, "currency": "USD", "simulated": True}
-    info = mt5.account_info()
+    with _MT5_LOCK:
+        info = mt5.account_info()
     if not info:
         return {"error": "Not connected"}
     return {
@@ -223,7 +233,8 @@ def account():
 def positions():
     if not MT5_AVAILABLE:
         return []
-    pos = mt5.positions_get()
+    with _MT5_LOCK:
+        pos = mt5.positions_get()
     if not pos:
         return []
     return [
@@ -242,16 +253,17 @@ def positions():
 def candles(symbol: str = Query(...), timeframe: str = Query("H1"), count: int = Query(500)):
     if not MT5_AVAILABLE:
         return []
-    sym = _normalize_symbol(symbol)
-    if not sym:
-        return []
-    tf_map = {
-        "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
-        "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
-        "D1": mt5.TIMEFRAME_D1, "W1": mt5.TIMEFRAME_W1,
-    }
-    tf_id = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
-    rates = mt5.copy_rates_from_pos(sym, tf_id, 0, min(count, 50000))
+    with _MT5_LOCK:
+        sym = _normalize_symbol(symbol)
+        if not sym:
+            return []
+        tf_map = {
+            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
+            "D1": mt5.TIMEFRAME_D1, "W1": mt5.TIMEFRAME_W1,
+        }
+        tf_id = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
+        rates = mt5.copy_rates_from_pos(sym, tf_id, 0, min(count, 50000))
     if rates is None or len(rates) == 0:
         return []
     result = []
@@ -269,10 +281,11 @@ def candles(symbol: str = Query(...), timeframe: str = Query("H1"), count: int =
 def tick(symbol: str = Query(...)):
     if not MT5_AVAILABLE:
         return {"bid": 1.0, "ask": 1.0, "simulated": True}
-    sym = _normalize_symbol(symbol)
-    if not sym:
-        return {"error": f"Symbol not found: {symbol}"}
-    t = mt5.symbol_info_tick(sym)
+    with _MT5_LOCK:
+        sym = _normalize_symbol(symbol)
+        if not sym:
+            return {"error": f"Symbol not found: {symbol}"}
+        t = mt5.symbol_info_tick(sym)
     if not t:
         return {"error": f"No tick data for {sym}"}
     return {"bid": t.bid, "ask": t.ask, "last": t.last, "volume": t.volume, "time": t.time}
@@ -382,6 +395,13 @@ def order_send(req: OrderRequest):
         logger.info("SIM OPEN %s %s @ lots=%.2f", req.direction, req.symbol, req.lot_size)
         return {"success": True, "ticket": str(ticket), "simulated": True}
 
+    # Serialize: hold the lock for the ENTIRE order flow including the
+    # subprocess call. No other mt5.* activity can run concurrently.
+    with _MT5_LOCK:
+        return _order_send_locked(req)
+
+
+def _order_send_locked(req: OrderRequest) -> dict:
     # STEP 1 — all MT5 calls that can corrupt the IPC pipe BEFORE _fresh_connect.
     symbol = _normalize_symbol(req.symbol)
     if not symbol:
@@ -659,6 +679,11 @@ def modify_sl(req: ModifySLRequest):
     if not MT5_AVAILABLE:
         return {"success": True, "ticket": req.ticket, "message": f"SL -> {req.new_sl}"}
 
+    with _MT5_LOCK:
+        return _modify_sl_locked(req, ticket_int)
+
+
+def _modify_sl_locked(req, ticket_int):
     pos = mt5.positions_get(ticket=ticket_int)
     if not pos:
         return {"success": False, "error": f"Position not found: {req.ticket}"}
@@ -687,6 +712,11 @@ def close(req: CloseRequest):
     if not MT5_AVAILABLE:
         return {"success": True, "ticket": req.ticket, "message": "Closed"}
 
+    with _MT5_LOCK:
+        return _close_locked(req, ticket_int)
+
+
+def _close_locked(req, ticket_int):
     if not ticket_int:
         if not req.symbol:
             return {"success": False, "error": "No ticket or symbol"}
@@ -724,6 +754,11 @@ def close_partial(req: ClosePartialRequest):
     if not MT5_AVAILABLE:
         return {"success": True, "ticket": req.ticket, "message": f"Closed {req.percent*100}%"}
 
+    with _MT5_LOCK:
+        return _close_partial_locked(req, ticket_int)
+
+
+def _close_partial_locked(req, ticket_int):
     pos = mt5.positions_get(ticket=ticket_int)
     if not pos:
         return {"success": False, "error": f"Position not found: {req.ticket}"}
@@ -763,6 +798,11 @@ def check_margin(req: CheckMarginRequest):
     if not MT5_AVAILABLE:
         return {"ok": True, "margin_required": 0, "margin_free": 99999, "max_lots": req.lots, "simulated": True}
 
+    with _MT5_LOCK:
+        return _check_margin_locked(req)
+
+
+def _check_margin_locked(req):
     symbol = _normalize_symbol(req.symbol)
     if not symbol:
         return {"ok": False, "margin_required": 0, "margin_free": 0, "max_lots": 0,
