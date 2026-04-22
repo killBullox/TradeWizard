@@ -216,22 +216,36 @@ def _start_mt5_direct():
         logger.warning("Could not start MT5 bridge: %s", exc)
 
 
-_SETTINGS_BACKUP = os.path.join(os.path.dirname(__file__), "..", "settings_backup.json")
+_SYSTEM_MODE = os.getenv("SYSTEM_MODE", "production").lower()
+# Separate backup file per mode — prod and lab must NOT share state.
+# Otherwise lab's boot restores paper_mode=false from prod backup and
+# opens real trades. (Root cause of 2026-04-21 incident.)
+_BACKUP_FILE = "settings_backup_lab.json" if _SYSTEM_MODE == "lab" else "settings_backup.json"
+_SETTINGS_BACKUP = os.path.join(os.path.dirname(__file__), "..", _BACKUP_FILE)
 
 
 async def _restore_settings_from_backup():
-    """If DB settings are missing/default, restore from backup file or .env."""
+    """If DB settings are missing/default, restore from backup file or .env.
+    Lab mode: ALWAYS force paper_mode=true before anything else."""
     backup_path = _SETTINGS_BACKUP
     backup_data = {}
     if os.path.exists(backup_path):
         try:
             with open(backup_path, "r") as f:
                 backup_data = json.load(f)
-            logger.info("Settings backup found with %d keys", len(backup_data))
+            logger.info("Settings backup found at %s with %d keys", _BACKUP_FILE, len(backup_data))
         except Exception:
             pass
 
     async with async_session_factory() as s:
+        # HARD INVARIANT: lab must operate in paper mode. This runs before
+        # any other restore so even if the backup contains paper_mode=false,
+        # the lab DB is immediately corrected. An extra guard in orchestrator
+        # still prevents real order execution if this ever gets bypassed.
+        if _SYSTEM_MODE == "lab":
+            await set_config("paper_mode", "true", s)
+            logger.info("Lab mode: paper_mode forced to true (ignoring backup)")
+
         # Restore MT5 credentials: .env takes priority, then backup
         env_fallbacks = {
             "mt5_login":      os.getenv("MT5_LOGIN", ""),
@@ -249,11 +263,13 @@ async def _restore_settings_from_backup():
                     logger.info("Restored setting '%s' from %s",
                                 key, "backup" if backup_data.get(key) else ".env")
 
-        # Restore paper_mode from backup if DB has default 'true' but backup says 'false'
-        paper_val = await get_config("paper_mode", s)
-        if paper_val == "true" and backup_data.get("paper_mode") == "false":
-            await set_config("paper_mode", "false", s)
-            logger.info("Restored paper_mode=false from backup")
+        # Restore paper_mode from backup ONLY in production mode. In lab mode
+        # paper_mode was already forced to true above.
+        if _SYSTEM_MODE != "lab":
+            paper_val = await get_config("paper_mode", s)
+            if paper_val == "true" and backup_data.get("paper_mode") == "false":
+                await set_config("paper_mode", "false", s)
+                logger.info("Restored paper_mode=false from backup")
 
         # Restore other important settings from backup
         restore_keys = [
@@ -877,6 +893,9 @@ async def debug_info(limit: int = 20):
 @app.put("/api/config/{key}")
 async def update_config(key: str, data: dict):
     value = str(data.get("value", ""))
+    # HARD INVARIANT: lab cannot be taken out of paper mode via API.
+    if _SYSTEM_MODE == "lab" and key == "paper_mode" and value.lower() != "true":
+        raise HTTPException(403, "Lab is locked in paper mode — cannot set paper_mode=false")
     async with async_session_factory() as s:
         await set_config(key, value, s)
         # Keep paper_balance in sync with account_balance
@@ -1520,7 +1539,9 @@ async def get_activity(since_id: int = 0, limit: int = 500):
         q = select(ActivityEvent).where(ActivityEvent.id > since_id).order_by(ActivityEvent.id.desc()).limit(limit)
         rows = (await s.execute(q)).scalars().all()
     return [
-        {"id": r.id, "ts": r.timestamp.isoformat() if r.timestamp else None,
+        {"id": r.id,
+         # Force UTC suffix so frontends parse unambiguously
+         "ts": r.timestamp.isoformat() + "Z" if r.timestamp else None,
          "level": r.level, "source": r.source, "message": r.message,
          "data": json.loads(r.data) if r.data else None}
         for r in reversed(rows)  # oldest first

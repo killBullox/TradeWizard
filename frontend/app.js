@@ -309,9 +309,10 @@ function addActivity(text, type = 'info') {
   const feed = document.getElementById('activity-feed');
   if (!feed) return;
   const now = new Date();
+  // Force Europe/Rome display for consistency across browsers
   const entry = {
-    time: now.toLocaleTimeString(),
-    date: now.toLocaleDateString(),
+    time: now.toLocaleTimeString('it-IT', {timeZone: 'Europe/Rome'}),
+    date: now.toLocaleDateString('it-IT', {timeZone: 'Europe/Rome'}),
     iso:  now.toISOString(),
     text: text,
     type: type,
@@ -353,9 +354,10 @@ async function hydrateActivityFromDB() {
       const tsUtc = ev.ts && !ev.ts.endsWith('Z') && !/[+-]\d\d:?\d\d$/.test(ev.ts)
                     ? ev.ts + 'Z' : ev.ts;
       const d = new Date(tsUtc);
+      // Force Europe/Rome display regardless of browser locale
       _renderActivityItem(feed, {
-        time: d.toLocaleTimeString(),
-        date: d.toLocaleDateString(),
+        time: d.toLocaleTimeString('it-IT', {timeZone: 'Europe/Rome'}),
+        date: d.toLocaleDateString('it-IT', {timeZone: 'Europe/Rome'}),
         iso:  tsUtc,
         text: ev.message,
         type: ev.level,
