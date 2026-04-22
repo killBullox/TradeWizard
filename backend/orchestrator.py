@@ -109,6 +109,12 @@ class Orchestrator:
 
         self._analysis_task = asyncio.create_task(self._analysis_loop())
         self._monitor_task  = asyncio.create_task(self._monitor_loop())
+        # Lab-only: autonomous tuning loop that analyzes rejects and nudges
+        # config parameters when the system is stuck (no trades opening).
+        if os.environ.get("SYSTEM_MODE", "production").lower() == "lab":
+            self._autotune_task = asyncio.create_task(self._autonomous_tuning_loop())
+        else:
+            self._autotune_task = None
         await self.broadcast({"type": "system_started", "timestamp": datetime.utcnow().isoformat()})
         logger.info("Orchestrator started")
 
@@ -118,7 +124,7 @@ class Orchestrator:
             self._tg.stop_polling()
         if self._paper:
             await self._paper.stop()
-        for task in (self._analysis_task, self._monitor_task):
+        for task in (self._analysis_task, self._monitor_task, getattr(self, '_autotune_task', None)):
             if task:
                 task.cancel()
                 try:
@@ -193,6 +199,124 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Analysis loop sleep error: {e}", exc_info=True)
                 await asyncio.sleep(900)  # fallback interval
+
+    async def _autonomous_tuning_loop(self):
+        """LAB-ONLY. Every 4h during kill zone, if the system has been stuck
+        (too few trades opened/closed in the last 4h and many rejects),
+        trigger an AUTO_TUNING meeting. The meeting receives as context
+        the rejection reasons and proposes config_change for tunable
+        parameters. This is how the system unblocks itself without any
+        human intervention.
+
+        max_risk_usd and risk_percent are in PROTECTED_CONFIG_KEYS and
+        cannot be changed by the meeting — the capital-at-risk contract
+        is invariant by design.
+        """
+        INTERVAL_SEC = 4 * 3600  # 4 hours
+        STUCK_THRESHOLD = 3       # <3 trades (opened+closed) in last window
+        # Brief startup delay so boot activity doesn't trigger immediately
+        await asyncio.sleep(60)
+        while self._running:
+            try:
+                if await self._in_kill_zone():
+                    if await self._is_stuck(hours=4, threshold=STUCK_THRESHOLD):
+                        logger.info("Lab stuck — triggering AUTO_TUNING meeting")
+                        try:
+                            await self._run_auto_tuning_meeting()
+                        except Exception as exc:
+                            logger.warning("Auto-tuning meeting failed: %s", exc)
+            except Exception as exc:
+                logger.warning("Autonomous tuning loop error: %s", exc)
+            await asyncio.sleep(INTERVAL_SEC)
+
+    async def _is_stuck(self, hours: int = 4, threshold: int = 3) -> bool:
+        """Return True if very few trade events happened in the last N hours.
+        Signals that the system's constraints are too tight."""
+        from datetime import timedelta as _td
+        cutoff = datetime.utcnow() - _td(hours=hours)
+        async with async_session_factory() as s:
+            q = select(Trade).where(Trade.created_at >= cutoff)
+            rows = (await s.execute(q)).scalars().all()
+        active_or_recent = [t for t in rows
+                            if t.status in ("ACTIVE", "CLOSED", "PROPOSED", "APPROVED")]
+        return len(active_or_recent) < threshold
+
+    async def _run_auto_tuning_meeting(self):
+        """Collect rejected trades + rejection reasons from the last 4h and
+        run a meeting whose agenda is exclusively: 'unblock the system by
+        adjusting tunable parameters'."""
+        from datetime import timedelta as _td
+        cutoff = datetime.utcnow() - _td(hours=4)
+        async with async_session_factory() as s:
+            log_q = (select(AgentLog)
+                     .where(AgentLog.action == "REJECTED")
+                     .where(AgentLog.timestamp >= cutoff)
+                     .order_by(desc(AgentLog.timestamp))
+                     .limit(50))
+            rejects = (await s.execute(log_q)).scalars().all()
+            trade_q = (select(Trade)
+                       .where(Trade.created_at >= cutoff)
+                       .order_by(desc(Trade.created_at))
+                       .limit(30))
+            recent_trades = (await s.execute(trade_q)).scalars().all()
+            config = await self._load_config(s)
+
+        # Format rejects for the meeting prompt
+        reject_lines = []
+        for r in rejects:
+            reject_lines.append(f"- {str(r.timestamp)[:19]} {r.agent_name}: {(r.message or '')[:160]}")
+        rejects_context = "\n".join(reject_lines) if reject_lines else "(no rejections in window)"
+
+        perf = await self._performance_stats()
+        trades_dicts = []
+        for t in recent_trades:
+            trades_dicts.append({
+                "id": t.id, "symbol": t.symbol, "direction": t.direction,
+                "status": t.status, "result": t.result,
+                "pnl_usd": t.pnl_usd, "ict_setup": t.ict_setup,
+                "entry_price": t.entry_price, "close_price": t.close_price,
+                "open_time": str(t.open_time)[:16],
+            })
+
+        current_memory = await build_context_string()
+
+        # Re-use conduct_meeting with a dedicated meeting type. The
+        # Journalist prompt already has the AUTO-ADAPTIVE MANDATE section
+        # that lists the tunable keys and when to change them.
+        topic = (
+            "AUTO_TUNING. System is stuck. Analyze the rejection reasons "
+            "below and propose at least one config_change to unblock trades. "
+            "Remember: max_risk_usd and risk_percent are PROTECTED — do NOT "
+            "propose changes to those. Every other tunable is fair game.\n\n"
+            f"RECENT REJECTIONS:\n{rejects_context}"
+        )
+        result = await self.jr.conduct_meeting(
+            "AUTO_TUNING", trades_dicts, perf, config,
+            current_memory=current_memory,
+            post_trade_context=topic,
+        )
+        improvements = result.get("system_improvements", [])
+        if improvements:
+            await self._apply_improvements(improvements)
+            logger.info("Auto-tuning applied %d config changes", len(improvements))
+            await self.broadcast({"type": "config_updated",
+                                   "key": "auto-tuning",
+                                   "value": f"{len(improvements)} changes",
+                                   "reason": "Lab autonomous tuning"})
+        # Save meeting record
+        async with async_session_factory() as s:
+            meeting = Meeting(
+                meeting_type="AUTO_TUNING",
+                trigger="Autonomous (lab stuck)",
+                participants="JR",
+                agenda=topic[:500],
+                summary=json.dumps(result.get("conclusions", []), default=str)[:2000],
+                improvements=json.dumps(improvements, default=str)[:4000],
+                status="COMPLETED",
+                completed_at=datetime.utcnow(),
+            )
+            s.add(meeting)
+            await s.commit()
 
     async def _run_killzone_review(self):
         """Post-killzone deep review: what happened during this session, what could have been better."""
@@ -1324,10 +1448,15 @@ class Orchestrator:
         "rm_min_sl_atr_mult", "rm_max_tp_atr_mult", "rm_min_rr_gate",
         "rm_sl_cap_atr_mult", "rm_min_sl_pips_floor", "max_trade_duration_hours",
     })
-    # Keys that agents are NOT allowed to change (user-only)
+    # Keys that agents are NOT allowed to change (user-only).
+    # HARD INVARIANT: max_risk_usd and risk_percent are the only risk-capital
+    # parameters. They are the contract between the trader and the system:
+    # "you can optimize everything but never risk more per trade than this."
+    # No meeting, no rule, no agent can mutate these.
     _PROTECTED_CONFIG_KEYS = frozenset({
         "mt5_login", "mt5_password", "mt5_server", "oanda_api_key",
         "oanda_practice", "mt5_bridge_url", "paper_mode", "model_mode",
+        "max_risk_usd", "risk_percent",
     })
 
     def _validate_config_change(self, key: str, val: str) -> str | None:
