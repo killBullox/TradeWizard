@@ -354,6 +354,13 @@ async def init_db():
                     SystemConfig(key="news_block_medium",         value="false", description="Also block Medium-impact events"),
                     SystemConfig(key="model_mode",      value="economy", description="AI model mode: economy (Haiku) or quality (Sonnet)"),
                     SystemConfig(key="min_sl_pips",     value="30",      description="Minimum SL distance in pips (anti-scalping)"),
+                    # ── RM tuning parameters (self-adapting via meetings) ──
+                    SystemConfig(key="rm_min_sl_atr_mult", value="1.0",  description="SL = max(min_sl_pips, ATR_H1 × this). Tune via meetings."),
+                    SystemConfig(key="rm_max_tp_atr_mult", value="2.0",  description="Max TP1 = ATR_H1 × this (day-trading horizon cap)."),
+                    SystemConfig(key="rm_min_rr_gate",     value="1.2",  description="Reject trade if best achievable RR is below this."),
+                    SystemConfig(key="rm_sl_cap_atr_mult", value="2.5",  description="Hard cap on SL: never wider than ATR × this."),
+                    SystemConfig(key="rm_min_sl_pips_floor", value="0",  description="Extra hard floor on SL pips (0 = use min_sl_pips only)."),
+                    SystemConfig(key="max_trade_duration_hours", value="6", description="Force-close any trade older than this many hours."),
                 ]
             session.add_all(defaults)
             await session.commit()
@@ -380,6 +387,18 @@ async def init_db():
             msl = await session.execute(select(SystemConfig).where(SystemConfig.key == "min_sl_pips"))
             if not msl.scalar_one_or_none():
                 session.add(SystemConfig(key="min_sl_pips", value="30", description="Minimum SL distance in pips (anti-scalping)"))
+            # RM self-adapting tuning parameters — added April 2026 for meeting-driven auto-tune
+            for key, default, desc in [
+                ("rm_min_sl_atr_mult", "1.0", "SL = max(min_sl_pips, ATR_H1 × this). Tune via meetings."),
+                ("rm_max_tp_atr_mult", "2.0", "Max TP1 = ATR_H1 × this (day-trading horizon cap)."),
+                ("rm_min_rr_gate",     "1.2", "Reject trade if best achievable RR is below this."),
+                ("rm_sl_cap_atr_mult", "2.5", "Hard cap on SL: never wider than ATR × this."),
+                ("rm_min_sl_pips_floor", "0", "Extra hard floor on SL pips (0 = use min_sl_pips only)."),
+                ("max_trade_duration_hours", "6", "Force-close any trade older than this many hours."),
+            ]:
+                res = await session.execute(select(SystemConfig).where(SystemConfig.key == key))
+                if not res.scalar_one_or_none():
+                    session.add(SystemConfig(key=key, value=default, description=desc))
             await session.commit()
 
 

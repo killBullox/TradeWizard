@@ -100,48 +100,47 @@ class RiskManagerAgent(BaseAgent):
         # Use entry zone midpoint as entry reference
         entry_ref = (entry_low + entry_high) / 2 if entry_low and entry_high else current_price
 
-        # LAB-only: parameters are ADAPTIVE to the symbol's current volatility.
-        # Goal of lab phase 1 is maximum experimentation — let the self-learning
-        # layer collect data, meetings will generate rules, rule_engine will
-        # enforce them. Prod keeps the classic fixed-parameter logic.
-        import os as _os
-        _LAB = _os.getenv("SYSTEM_MODE", "production").lower() == "lab"
+        # Read ALL tuning parameters from system_config — no hardcoded values.
+        # Meetings can propose config_change for any of these keys, they are
+        # auto-applied by _apply_improvements. This is the hook that makes
+        # the system self-adapting: the Journalist observes outcomes,
+        # proposes parameter changes, _apply_improvements writes to DB, and
+        # the next evaluate() uses the updated values.
+        rm_min_sl_atr_mult  = float(system_config.get("rm_min_sl_atr_mult", 1.0))
+        rm_max_tp_atr_mult  = float(system_config.get("rm_max_tp_atr_mult", 2.0))
+        rm_min_rr_gate      = float(system_config.get("rm_min_rr_gate", 1.2))
+        rm_sl_cap_atr_mult  = float(system_config.get("rm_sl_cap_atr_mult", 2.5))
+        rm_min_sl_pips_floor = float(system_config.get("rm_min_sl_pips_floor", 0))  # 0 = use min_sl_pips
 
-        if _LAB:
-            # Min SL proportional to volatility, floor 10 pips
-            adaptive_min_sl = max(10, round(atr_pips * 0.7, 1))
-            sl_pips = max(adaptive_min_sl, round(atr_pips * 1.0, 1))
-            # Max TP cap: 3× ATR instead of 2× — more room for winners
-            max_tp1_pips = round(atr_pips * 3, 1)
-            # Min RR gate: 1.0 instead of 1.2 — accept tight trades for data
-            min_rr_gate = 1.0
-        else:
-            sl_pips = max(min_sl_pips, round(atr_pips * 1.0, 1))
-            max_tp1_pips = round(atr_pips * 2, 1)
-            min_rr_gate = 1.2
+        # SL distance: ATR-based floor; respect the min_sl_pips config AND
+        # the additional optional hard floor (rm_min_sl_pips_floor).
+        sl_pips = max(min_sl_pips, rm_min_sl_pips_floor, round(atr_pips * rm_min_sl_atr_mult, 1))
 
-        # Cap SL at 2.5x ATR to avoid oversized stops
-        if sl_pips > atr_pips * 2.5:
-            sl_pips = round(atr_pips * 2.5, 1)
+        # Cap SL: don't let it balloon beyond X× ATR
+        if sl_pips > atr_pips * rm_sl_cap_atr_mult:
+            sl_pips = round(atr_pips * rm_sl_cap_atr_mult, 1)
             risk_factors.append({"factor": "SL capped", "severity": "MEDIUM",
-                                 "description": f"SL capped at 2.5x ATR ({sl_pips}p)"})
+                                 "description": f"SL capped at {rm_sl_cap_atr_mult}x ATR ({sl_pips}p)"})
+
+        # Max TP1 within day trading horizon
+        max_tp1_pips = round(atr_pips * rm_max_tp_atr_mult, 1)
 
         # Ideal TP1 for configured RR
         ideal_tp1 = round(sl_pips * rr_ratio, 1)
 
         # Use min of ideal and max allowed (leave 1 pip margin for sanity check)
-        tp1_pips = min(ideal_tp1, max(max_tp1_pips - 1, sl_pips * min_rr_gate))
+        tp1_pips = min(ideal_tp1, max(max_tp1_pips - 1, sl_pips * rm_min_rr_gate))
 
         # Ensure TP1 is at least min_rr_gate × SL (absolute floor)
-        if tp1_pips < sl_pips * min_rr_gate:
-            tp1_pips = round(sl_pips * min_rr_gate, 1)
+        if tp1_pips < sl_pips * rm_min_rr_gate:
+            tp1_pips = round(sl_pips * rm_min_rr_gate, 1)
 
         # If even min_rr_gate × SL exceeds max TP1, this pair can't be traded intraday
         if tp1_pips > max_tp1_pips and max_tp1_pips > 0:
             return self._reject(
-                f"Cannot achieve min RR {min_rr_gate} within day trading limit: "
+                f"Cannot achieve min RR {rm_min_rr_gate} within day trading limit: "
                 f"need {tp1_pips}p TP1, max allowed {max_tp1_pips}p "
-                f"({'3x' if _LAB else '2x'} ATR H1)",
+                f"({rm_max_tp_atr_mult}x ATR H1)",
                 risk_score=20
             )
 

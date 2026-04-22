@@ -1320,6 +1320,9 @@ class Orchestrator:
         "analysis_interval", "max_risk_usd", "min_sl_pips", "paper_balance",
         "news_block_minutes_before", "news_block_minutes_after",
         "max_consecutive_losses", "trade_max_duration_hours",
+        # RM self-adapting parameters (meetings propose changes, auto-applied)
+        "rm_min_sl_atr_mult", "rm_max_tp_atr_mult", "rm_min_rr_gate",
+        "rm_sl_cap_atr_mult", "rm_min_sl_pips_floor", "max_trade_duration_hours",
     })
     # Keys that agents are NOT allowed to change (user-only)
     _PROTECTED_CONFIG_KEYS = frozenset({
