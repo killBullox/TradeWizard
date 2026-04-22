@@ -347,11 +347,16 @@ async function hydrateActivityFromDB() {
     sep.innerHTML = `<span class="activity-time">DB</span>— storico dal database (${events.length} eventi) —`;
     feed.appendChild(sep);
     for (const ev of events) {
-      const d = new Date(ev.ts);
+      // Backend timestamps are UTC but emitted without 'Z' suffix — the
+      // naive Date() constructor would treat them as local time and show
+      // them 2 hours in the past (for Europe/Rome). Force UTC parsing.
+      const tsUtc = ev.ts && !ev.ts.endsWith('Z') && !/[+-]\d\d:?\d\d$/.test(ev.ts)
+                    ? ev.ts + 'Z' : ev.ts;
+      const d = new Date(tsUtc);
       _renderActivityItem(feed, {
         time: d.toLocaleTimeString(),
         date: d.toLocaleDateString(),
-        iso:  ev.ts,
+        iso:  tsUtc,
         text: ev.message,
         type: ev.level,
       });
