@@ -12,7 +12,7 @@ import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional, Callable, Awaitable
-from sqlalchemy import select
+from sqlalchemy import select, desc
 
 from models.database import (
     async_session_factory, Trade, AgentLog, JournalEntry, Meeting,
