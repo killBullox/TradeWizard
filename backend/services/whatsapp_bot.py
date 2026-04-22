@@ -58,15 +58,31 @@ class WhatsAppBot:
         self._orc      = orchestrator_ref
         self._enabled  = bool(account_sid and auth_token and from_number and to_number)
 
+        # Circuit breaker: when Twilio returns 429 (rate limit), we stop
+        # hammering them. All sends are short-circuited until this unix
+        # timestamp. Default cooldown 1h. Prevents the pattern we saw
+        # where every news_block call triggers a 429 and spams the log.
+        self._rate_limited_until = 0.0
+        self._rate_limit_cooldown_sec = 3600
+
         if not self._enabled:
             logger.info("WhatsApp bot disabled (missing Twilio credentials)")
 
     # ── Low-level API ─────────────────────────────────────────────────────────
 
     async def send_message(self, text: str, to: str | None = None) -> dict:
-        """Send a WhatsApp message via Twilio API."""
+        """Send a WhatsApp message via Twilio API. Respects the circuit
+        breaker: if we got a 429 in the last hour we skip without calling."""
         if not self._enabled:
             return {"ok": False, "note": "disabled"}
+
+        import time as _time
+        now = _time.time()
+        if now < self._rate_limited_until:
+            remaining = int(self._rate_limited_until - now)
+            # Log only at DEBUG to avoid the spam that bloated the bridge log
+            logger.debug("WhatsApp skipped (rate-limit cooldown, %ds left)", remaining)
+            return {"ok": False, "note": f"rate-limited, cooldown {remaining}s"}
 
         url = self.TWILIO_API.format(sid=self.sid)
         data = {
@@ -81,10 +97,18 @@ class WhatsAppBot:
                     data=data,
                     auth=(self.sid, self.token),
                 )
-                result = r.json()
+                result = r.json() if r.content else {}
                 if r.status_code in (200, 201):
                     logger.debug("WhatsApp message sent: %s", result.get("sid", "?"))
                     return {"ok": True, "sid": result.get("sid")}
+                elif r.status_code == 429:
+                    # Open the circuit breaker for 1h.
+                    self._rate_limited_until = now + self._rate_limit_cooldown_sec
+                    logger.warning(
+                        "Twilio 429 — circuit breaker OPEN for %ds. Suppressing further sends.",
+                        self._rate_limit_cooldown_sec,
+                    )
+                    return {"ok": False, "error": "rate_limited"}
                 else:
                     logger.warning("Twilio error %d: %s", r.status_code, result.get("message", ""))
                     return {"ok": False, "error": result.get("message", str(r.status_code))}

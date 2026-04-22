@@ -264,11 +264,14 @@ def check_mt5_terminal() -> tuple[bool, str]:
 # ── Restart functions ─────────────────────────────────────────────────────────
 
 def restart_backend():
-    """Kill only the TradeWizard backend process (not all Python) and restart via schtasks."""
-    logger.info("Restarting backend...")
+    """Kill only the TradeWizard backend process (not all Python) and restart
+    via schtasks. Handles the 'zombie task' case: Windows Task Scheduler may
+    mark the task as 'Running' even when the child process has already died,
+    and in that state schtasks /run refuses to start a new instance. We
+    proactively send schtasks /end first to clear the zombie state."""
+    logger.info("Restarting backend (prod)...")
     try:
-        # Kill ONLY python processes running TradeWizard's main.py
-        # Use full project path to avoid killing TradeMachine or other apps
+        # 1. Kill the actual python child process, if any
         tw_path = str(PROJECT_ROOT).replace("\\", "\\\\")
         wmic_filter = f"commandline like '%{tw_path}%' and commandline like '%main.py%'"
         result = subprocess.run(
@@ -282,8 +285,14 @@ def restart_backend():
                 if pid:
                     subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
                     logger.info("Killed backend PID %s", pid)
-        time.sleep(3)
-        # Restart via scheduled task (the standard way)
+
+        # 2. Clear any zombie task state at the scheduler level.
+        # /end always returns 0 even if there is nothing to end — safe no-op.
+        subprocess.run(["schtasks", "/end", "/tn", "TradeWizard"],
+                        capture_output=True, text=True, timeout=10)
+        time.sleep(2)
+
+        # 3. Restart the task cleanly
         r = subprocess.run(
             ["schtasks", "/run", "/tn", "TradeWizard"],
             capture_output=True, text=True, timeout=10,
@@ -293,7 +302,6 @@ def restart_backend():
         else:
             logger.warning("schtasks /run failed (rc=%d): %s — falling back to direct start",
                            r.returncode, r.stderr.strip())
-            # Fallback: start directly
             subprocess.Popen(
                 ["python", str(PROJECT_ROOT / "backend" / "main.py")],
                 cwd=str(PROJECT_ROOT),
@@ -354,7 +362,9 @@ def restart_ava_terminal():
 
 
 def restart_lab_backend():
-    """Kill lab backend (PID filtered on commandline) and re-run TradeWizardLab task."""
+    """Kill lab backend (PID filtered on port 8001) and re-run TradeWizardLab
+    task. Like restart_backend, proactively clears any zombie task state
+    before issuing /run."""
     logger.info("Restarting lab backend...")
     try:
         result = subprocess.run(
@@ -363,15 +373,12 @@ def restart_lab_backend():
              "get", "processid", "/value"],
             capture_output=True, text=True, timeout=10,
         )
-        # Find lab PID by environment (harder): use port check instead — kill by port
-        import socket
         for pline in result.stdout.strip().splitlines():
             if not pline.startswith("ProcessId="):
                 continue
             pid = pline.split("=")[1].strip()
             if not pid:
                 continue
-            # Check if this PID listens on 8001
             ns = subprocess.run(
                 ["netstat", "-ano", "-p", "tcp"],
                 capture_output=True, text=True, timeout=5,
@@ -380,7 +387,12 @@ def restart_lab_backend():
                 subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
                 logger.info("Killed lab backend PID %s", pid)
                 break
-        subprocess.run(["schtasks", "/run", "/tn", "TradeWizardLab"], capture_output=True, timeout=10)
+        # Clear zombie task state, then run
+        subprocess.run(["schtasks", "/end", "/tn", "TradeWizardLab"],
+                        capture_output=True, text=True, timeout=10)
+        time.sleep(2)
+        subprocess.run(["schtasks", "/run", "/tn", "TradeWizardLab"],
+                        capture_output=True, timeout=10)
     except Exception as exc:
         logger.error("Lab restart failed: %s", exc)
 
