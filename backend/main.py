@@ -2252,18 +2252,23 @@ async def _build_m1_cache(symbol, h1_candles, oanda_key, oanda_practice, mt5_bri
 
 
 @app.get("/api/analytics")
-async def get_analytics():
-    """Full analytics report — equity curve, drawdown, breakdowns, stats."""
-    return await compute_analytics()
+async def get_analytics(include_archived: bool = False):
+    """Full analytics report — equity curve, drawdown, breakdowns, stats.
+    By default excludes archived trades (respects reset-stats); pass
+    include_archived=true to get lifetime view."""
+    return await compute_analytics(include_archived=include_archived)
 
 
 @app.get("/api/performance")
-async def get_performance():
+async def get_performance(include_archived: bool = False):
     async with async_session_factory() as s:
-        # Include ALL closed trades (including archived) for accurate performance stats
-        result = await s.execute(
-            select(Trade).where(Trade.status == "CLOSED")
-        )
+        # Respect the archived flag by default — reset-stats archives trades
+        # to hide them from the user's visible performance. Set include_archived
+        # =true explicitly if you need all-time stats ignoring the reset.
+        q = select(Trade).where(Trade.status == "CLOSED")
+        if not include_archived:
+            q = q.where((Trade.archived == False) | (Trade.archived == None))
+        result = await s.execute(q)
         closed = result.scalars().all()
 
     total  = len(closed)

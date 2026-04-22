@@ -20,9 +20,10 @@ from typing import Any
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
-async def compute_analytics() -> dict:
-    """Fetch all closed trades from DB and return a full analytics report."""
-    trades = await _fetch_closed_trades()
+async def compute_analytics(include_archived: bool = False) -> dict:
+    """Fetch closed trades from DB and return a full analytics report.
+    By default excludes archived trades so reset-stats has effect here too."""
+    trades = await _fetch_closed_trades(include_archived=include_archived)
     return _build_report(trades)
 
 
@@ -299,16 +300,17 @@ def _streaks(trades: list[dict]) -> tuple[int, int, dict]:
 
 # ── DB fetch ──────────────────────────────────────────────────────────────────
 
-async def _fetch_closed_trades() -> list[dict]:
+async def _fetch_closed_trades(include_archived: bool = False) -> list[dict]:
     from models.database import async_session_factory, Trade
     from sqlalchemy import select
     async with async_session_factory() as s:
-        # Include ALL closed trades (including archived) for accurate analytics
-        result = await s.execute(
-            select(Trade)
-            .where(Trade.status == "CLOSED")
-            .order_by(Trade.close_time)
-        )
+        # Respect archived flag by default so reset-stats actually resets
+        # what the user sees in Analytics. Pass include_archived=True to
+        # see lifetime stats.
+        q = select(Trade).where(Trade.status == "CLOSED").order_by(Trade.close_time)
+        if not include_archived:
+            q = q.where((Trade.archived == False) | (Trade.archived == None))
+        result = await s.execute(q)
         trades = result.scalars().all()
     return [
         {
