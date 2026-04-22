@@ -100,8 +100,25 @@ class RiskManagerAgent(BaseAgent):
         # Use entry zone midpoint as entry reference
         entry_ref = (entry_low + entry_high) / 2 if entry_low and entry_high else current_price
 
-        # SL distance: use ATR-based SL (1.0-1.5x ATR H1) or min_sl_pips, whichever is larger
-        sl_pips = max(min_sl_pips, round(atr_pips * 1.0, 1))
+        # LAB-only: parameters are ADAPTIVE to the symbol's current volatility.
+        # Goal of lab phase 1 is maximum experimentation — let the self-learning
+        # layer collect data, meetings will generate rules, rule_engine will
+        # enforce them. Prod keeps the classic fixed-parameter logic.
+        import os as _os
+        _LAB = _os.getenv("SYSTEM_MODE", "production").lower() == "lab"
+
+        if _LAB:
+            # Min SL proportional to volatility, floor 10 pips
+            adaptive_min_sl = max(10, round(atr_pips * 0.7, 1))
+            sl_pips = max(adaptive_min_sl, round(atr_pips * 1.0, 1))
+            # Max TP cap: 3× ATR instead of 2× — more room for winners
+            max_tp1_pips = round(atr_pips * 3, 1)
+            # Min RR gate: 1.0 instead of 1.2 — accept tight trades for data
+            min_rr_gate = 1.0
+        else:
+            sl_pips = max(min_sl_pips, round(atr_pips * 1.0, 1))
+            max_tp1_pips = round(atr_pips * 2, 1)
+            min_rr_gate = 1.2
 
         # Cap SL at 2.5x ATR to avoid oversized stops
         if sl_pips > atr_pips * 2.5:
@@ -109,24 +126,22 @@ class RiskManagerAgent(BaseAgent):
             risk_factors.append({"factor": "SL capped", "severity": "MEDIUM",
                                  "description": f"SL capped at 2.5x ATR ({sl_pips}p)"})
 
-        # ── Calculate TP1 (day trading constraint) ────────────────────────
-        max_tp1_pips = round(atr_pips * 2, 1)  # 2x ATR H1 = intraday reachable
-
         # Ideal TP1 for configured RR
         ideal_tp1 = round(sl_pips * rr_ratio, 1)
 
         # Use min of ideal and max allowed (leave 1 pip margin for sanity check)
-        tp1_pips = min(ideal_tp1, max(max_tp1_pips - 1, sl_pips * 1.2))
+        tp1_pips = min(ideal_tp1, max(max_tp1_pips - 1, sl_pips * min_rr_gate))
 
-        # Ensure TP1 is at least 1.2x SL (absolute floor)
-        if tp1_pips < sl_pips * 1.2:
-            tp1_pips = round(sl_pips * 1.2, 1)
+        # Ensure TP1 is at least min_rr_gate × SL (absolute floor)
+        if tp1_pips < sl_pips * min_rr_gate:
+            tp1_pips = round(sl_pips * min_rr_gate, 1)
 
-        # If even 1.2x SL exceeds max TP1, this pair can't be traded intraday
+        # If even min_rr_gate × SL exceeds max TP1, this pair can't be traded intraday
         if tp1_pips > max_tp1_pips and max_tp1_pips > 0:
             return self._reject(
-                f"Cannot achieve min RR 1.2 within day trading limit: "
-                f"need {tp1_pips}p TP1, max allowed {max_tp1_pips}p (2x ATR H1)",
+                f"Cannot achieve min RR {min_rr_gate} within day trading limit: "
+                f"need {tp1_pips}p TP1, max allowed {max_tp1_pips}p "
+                f"({'3x' if _LAB else '2x'} ATR H1)",
                 risk_score=20
             )
 

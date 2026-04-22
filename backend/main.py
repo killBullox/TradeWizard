@@ -1559,6 +1559,67 @@ async def clear_activity(before_days: int = 30):
     return {"deleted": result.rowcount}
 
 
+@app.get("/api/diagnostics/bias")
+async def diagnostics_bias(limit: int = 30):
+    """Analyze the last N trades to understand direction bias and whether
+    the strategy contradicts ICTEA's own declared HTF trend. Read-only."""
+    async with async_session_factory() as s:
+        q = (select(Trade)
+             .order_by(desc(Trade.created_at))
+             .limit(limit))
+        rows = (await s.execute(q)).scalars().all()
+
+    from collections import Counter
+    total = len(rows)
+    by_dir = Counter(t.direction for t in rows)
+    by_sym_dir: dict = {}
+    conflicts = []   # trades where proposed direction is opposite to ICTEA's HTF trend
+    bias_items = []
+
+    for t in rows:
+        sym = t.symbol
+        dirn = t.direction
+        by_sym_dir.setdefault(sym, Counter())[dirn] += 1
+        ictea = {}
+        try:
+            ictea = json.loads(t.ict_context or "{}")
+        except Exception:
+            pass
+        htf_bias = (ictea.get("bias") or "").upper()
+        htf_trend = ""
+        try:
+            htf_trend = (ictea.get("htf_analysis", {}).get("trend") or "").lower()
+        except Exception:
+            pass
+
+        row = {
+            "id": t.id, "symbol": sym, "direction": dirn,
+            "status": t.status, "result": t.result, "pnl_usd": t.pnl_usd,
+            "ictea_bias": htf_bias, "ictea_htf_trend": htf_trend,
+        }
+        bias_items.append(row)
+
+        # Conflict: ICTEA reports bullish but we SELL, or bearish but we BUY
+        if htf_trend in ("bullish", "up", "uptrend") and dirn == "SELL":
+            conflicts.append({**row, "conflict": "SELL into bullish HTF"})
+        elif htf_trend in ("bearish", "down", "downtrend") and dirn == "BUY":
+            conflicts.append({**row, "conflict": "BUY into bearish HTF"})
+        elif htf_bias == "BULLISH" and dirn == "SELL":
+            conflicts.append({**row, "conflict": "SELL while ICTEA bias=BULLISH"})
+        elif htf_bias == "BEARISH" and dirn == "BUY":
+            conflicts.append({**row, "conflict": "BUY while ICTEA bias=BEARISH"})
+
+    return {
+        "total_trades_examined": total,
+        "direction_distribution": dict(by_dir),
+        "per_symbol_distribution": {k: dict(v) for k, v in by_sym_dir.items()},
+        "conflict_count": len(conflicts),
+        "conflict_rate_pct": round(len(conflicts) / total * 100, 1) if total else 0,
+        "conflicts": conflicts[:15],
+        "sample_trades": bias_items[:15],
+    }
+
+
 @app.get("/api/alerts")
 async def get_alerts(limit: int = 50):
     """Return watchdog alerts for THIS backend's mode only.
