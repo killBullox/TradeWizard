@@ -1620,6 +1620,18 @@ async def diagnostics_bias(limit: int = 30):
     }
 
 
+@app.post("/api/alerts/ack")
+async def ack_alerts():
+    """Mark all current alerts as acknowledged. Future GET /api/alerts will
+    count only alerts strictly AFTER this timestamp toward unacked_errors.
+    Does NOT delete the underlying alerts.log (audit trail stays intact)."""
+    from datetime import datetime as _dt, timezone as _tz
+    ack_ts = _dt.now(_tz.utc).isoformat()
+    async with async_session_factory() as s:
+        await set_config("alerts_acked_until", ack_ts, s)
+    return {"acked_until": ack_ts}
+
+
 @app.get("/api/alerts")
 async def get_alerts(limit: int = 50):
     """Return watchdog alerts for THIS backend's mode only.
@@ -1662,14 +1674,31 @@ async def get_alerts(limit: int = 50):
 
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
     one_hour_ago = _dt.now(_tz.utc) - _td(hours=1)
+    # Read the user's ack cutoff — everything strictly before is not counted.
+    acked_until = None
+    async with async_session_factory() as s:
+        acked_str = await get_config("alerts_acked_until", s)
+    if acked_str:
+        try:
+            acked_until = _dt.fromisoformat(acked_str.replace("Z", "+00:00"))
+            if acked_until.tzinfo is None:
+                acked_until = acked_until.replace(tzinfo=_tz.utc)
+        except Exception:
+            acked_until = None
+
     unacked = 0
     for a in alerts:
         try:
             ts = _dt.fromisoformat(a["ts"].replace("Z", "+00:00"))
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=_tz.utc)
-            if a["level"] == "ERROR" and ts > one_hour_ago:
-                unacked += 1
+            if a["level"] != "ERROR":
+                continue
+            if ts <= one_hour_ago:
+                continue
+            if acked_until and ts <= acked_until:
+                continue
+            unacked += 1
         except Exception:
             pass
     return {"alerts": alerts, "unacked_errors": unacked, "mode": my_mode}

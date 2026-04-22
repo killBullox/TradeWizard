@@ -254,11 +254,34 @@ async function checkAlerts() {
 setInterval(checkAlerts, 30000);
 setTimeout(checkAlerts, 5000);
 
+function _fmtAlertTime(isoTs) {
+  // Backend writes alerts with explicit +00:00 or Z — but guard anyway.
+  if (!isoTs) return '';
+  const hasTz = isoTs.endsWith('Z') || /[+-]\d\d:?\d\d$/.test(isoTs);
+  const tsUtc = hasTz ? isoTs : isoTs + 'Z';
+  try {
+    return new Date(tsUtc).toLocaleTimeString('it-IT', {timeZone: 'Europe/Rome'});
+  } catch { return isoTs.substring(11, 19); }
+}
+
 window.showAlerts = function () {
   if (!__lastAlerts.length) { alert('No alerts'); return; }
   const recent = __lastAlerts.slice(-20).reverse();
-  const msg = recent.map(a => `${a.ts.substring(11, 19)}  [${a.level}]  ${a.component}: ${a.message}`).join('\n');
+  const msg = recent.map(a => `${_fmtAlertTime(a.ts)}  [${a.level}]  ${a.component}: ${a.message}`).join('\n');
   alert('Recent watchdog alerts (last 20):\n\n' + msg);
+};
+
+window.dismissAlerts = async function (ev) {
+  if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+  try {
+    await fetch('/api/alerts/ack', {method: 'POST'});
+    // Hide immediately without waiting for the next poll
+    const badge = document.getElementById('alerts-badge');
+    if (badge) badge.style.display = 'none';
+    showToast('success', 'Alert dismissed');
+  } catch (e) {
+    showToast('error', 'Dismiss fallito');
+  }
 };
 
 function updateAgentCard(agentKey, message, state) {
