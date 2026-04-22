@@ -1068,3 +1068,40 @@ Step 3 regression check: **skipped** — backend unreachable.
 
 **0 new CANDIDATE rules retrieved** — lab backend unreachable.
 
+---
+
+## 2026-04-22 04:19 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at 04:19 UTC — TCP SYN never acknowledged on either port. This is the first recorded timeout on 2026-04-22 and part of an ongoing outage spanning the entire A/B test window since it opened 2026-04-20 03:07 UTC (~49 hours continuous). No trade data, cancellation errors, or learning-rule updates could be retrieved. No regression analysis or patch was possible this run.
+
+Step 3 regression check: **skipped** — backend unreachable. Most recent fix commits to monitored files:
+- `b4a53e7` fix: strict comment sanitizer — the -2 WAS literally the comment
+- `032eae0` debug: verbose logging of every order_send param + filter alerts per mode
+- `37e6771` fix: global mt5 lock — serialize every MT5 call in bridge + during subprocess
+- `22047b7` fix: route ALL order_send through fresh subprocess (definitive)
+
+**Action required (critical):** VPS unreachable for every audit since 2026-04-20 03:07 UTC — ~49 hours continuous outage. Only ~2 days of the A/B test window remain (closes 2026-04-24). Immediate manual VPS/firewall/process investigation required.
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
+
