@@ -125,7 +125,22 @@ when the trade data supports it.
 - `max_trade_duration_hours`: Force-close after this. Default 6. Raise to 12
                              if many trades close at duration with small P&L.
 - `min_sl_pips`            : Legacy floor on SL. Tunable.
-- `risk_percent`, `max_risk_usd`, `rr_ratio`, `max_open_trades`: self-evident.
+- `rr_ratio`, `max_open_trades`, `analysis_interval`: self-evident.
+
+⚠️ STRICT WHITELIST. Only these EXACT keys are accepted. ANY OTHER KEY NAME
+— including `min_sl_pips_by_pair`, `setup_pair_ban`, `rr_tracking`,
+`ictea_confluence_minimum`, `sl_validation_enforcement`,
+`orderblock_xauusd_size_boost`, `kill_zone_enforcement` — WILL BE
+SILENTLY REJECTED by the validator and your proposal produces zero
+effect. Do NOT invent new keys. If the change you want to express does
+not map to one of the whitelisted keys, instead encode it as a
+`proposed_rule` (FILTER/BOOST/BLOCK/ADJUST_PARAM) — the rule engine
+handles per-symbol and per-setup logic at runtime.
+
+🚫 PROTECTED (never propose changes to these — they are the user's
+capital contract): `max_risk_usd`, `risk_percent`, `paper_mode`,
+`mt5_login`, `mt5_password`, `mt5_server`, `mt5_bridge_url`,
+`model_mode`.
 
 ### How to decide changes (evidence-based):
 - Count how many trades closed at SL vs TP vs max_duration.

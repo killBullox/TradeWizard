@@ -107,6 +107,32 @@ class Orchestrator:
             self._tg.start_polling()
         self._wa = get_whatsapp_bot(orchestrator=self)
 
+        # Lab-only: if the DB has not yet collected any opened trades, seed
+        # the RM config with an "exploration profile" — more permissive than
+        # default so the Journalist has data to reason on. Runs ONCE: after
+        # any real opened trade appears, subsequent boots skip this.
+        # After this, the Journalist/auto-tuning is in full control.
+        if os.environ.get("SYSTEM_MODE", "production").lower() == "lab":
+            try:
+                async with async_session_factory() as s:
+                    seen = await s.execute(
+                        select(Trade).where(Trade.mt5_ticket != None).limit(1)
+                    )
+                    has_any_opened = seen.scalar_one_or_none() is not None
+                if not has_any_opened:
+                    exploration = {
+                        "rm_min_rr_gate":     "1.0",
+                        "rm_max_tp_atr_mult": "3.0",
+                        "rm_min_sl_atr_mult": "0.8",
+                        "max_trade_duration_hours": "12",
+                    }
+                    async with async_session_factory() as s:
+                        for k, v in exploration.items():
+                            await set_config(k, v, s)
+                    logger.info("Lab virgin DB — applied exploration profile: %s", exploration)
+            except Exception as exc:
+                logger.warning("Lab exploration seed failed: %s", exc)
+
         self._analysis_task = asyncio.create_task(self._analysis_loop())
         self._monitor_task  = asyncio.create_task(self._monitor_loop())
         # Lab-only: autonomous tuning loop that analyzes rejects and nudges
@@ -186,11 +212,17 @@ class Orchestrator:
                     logger.error(f"Analysis loop error: {e}", exc_info=True)
                     await self.broadcast({"type": "error", "message": str(e)})
             else:
-                # Just exited a kill zone → trigger KILLZONE_REVIEW meeting
+                # Just exited a kill zone → trigger KILLZONE_REVIEW meeting.
+                # In lab mode, also trigger AUTO_TUNING (reflect on parameters
+                # at every session end, not only when stuck) so the system
+                # keeps nudging its own config daily.
                 if _was_in_kz:
                     _was_in_kz = False
                     logger.info("Kill zone ended — scheduling KILLZONE_REVIEW meeting")
                     asyncio.create_task(self._run_killzone_review())
+                    if os.environ.get("SYSTEM_MODE", "production").lower() == "lab":
+                        logger.info("Kill zone ended (lab) — scheduling AUTO_TUNING meeting")
+                        asyncio.create_task(self._run_auto_tuning_meeting())
                 else:
                     await self.broadcast({"type": "heartbeat", "message": f"😴 Fuori Kill Zone [{now_str}]"})
                     logger.info("Outside Kill Zone — skipping analysis cycle")
@@ -1470,12 +1502,16 @@ class Orchestrator:
                     return f"Key '{key}' requires a JSON array/object, got {type(parsed).__name__}"
             except (json.JSONDecodeError, TypeError):
                 return f"Key '{key}' requires valid JSON, got: {val[:80]}"
+            return None
         if key in self._NUMERIC_CONFIG_KEYS:
             try:
                 float(val)
             except (ValueError, TypeError):
                 return f"Key '{key}' requires a number, got: {val[:80]}"
-        return None
+            return None
+        # Unknown key — the meeting invented a name that does not exist.
+        # We surface this loudly so it's obvious the proposal had zero effect.
+        return f"Key '{key}' is not a recognized tunable parameter (whitelist only). If you want per-symbol/per-setup logic, emit a proposed_rule instead."
 
     async def _apply_improvements(self, improvements: list):
         """Apply system config changes proposed by JR — with validation."""
@@ -1968,26 +2004,28 @@ class Orchestrator:
         sl_pips = abs(entry - sl) / pip
         tp_pips = abs(entry - tp) / pip
 
-        # Min SL = max(0.5 × ATR, configurable min_sl_pips)
+        # Min SL — multiplier on ATR driven by the tunable rm_min_sl_atr_mult
+        # (was hardcoded 0.5). Halved coefficient kept as floor safety.
         atr_pips = float((market_data.get("H1") or {}).get("indicators", {}).get("atr_pips") or 0)
         cfg_min_sl = float((config or {}).get("min_sl_pips") or 30)
-        min_sl_pips = max(atr_pips * 0.5, cfg_min_sl)
-        if sl_pips < min_sl_pips - 0.1:  # tolerance for floating point (15.0 is ok for min 15)
-            return f"SL too tight: {sl_pips:.1f} pips (min {min_sl_pips:.1f}, cfg_min={cfg_min_sl}p, 0.5×ATR={atr_pips*0.5:.1f}p)"
+        min_sl_mult = float((config or {}).get("rm_min_sl_atr_mult") or 1.0)
+        min_sl_pips = max(atr_pips * min_sl_mult * 0.5, cfg_min_sl)
+        if sl_pips < min_sl_pips - 0.1:
+            return f"SL too tight: {sl_pips:.1f} pips (min {min_sl_pips:.1f}, cfg_min={cfg_min_sl}p, {min_sl_mult*0.5}×ATR={atr_pips*min_sl_mult*0.5:.1f}p)"
 
-        # Max TP1 distance for day trading (2x ATR H1)
-        max_tp1_pips = atr_pips * 2 if atr_pips > 0 else 999
+        # Max TP1 distance driven by rm_max_tp_atr_mult (was hardcoded 2).
+        max_tp_mult = float((config or {}).get("rm_max_tp_atr_mult") or 2.0)
+        max_tp1_pips = atr_pips * max_tp_mult if atr_pips > 0 else 999
         if tp_pips > max_tp1_pips:
             return (f"TP1 too far for intraday: {tp_pips:.0f} pips "
-                    f"(max {max_tp1_pips:.0f}p = 2x ATR H1 {atr_pips:.0f}p)")
+                    f"(max {max_tp1_pips:.0f}p = {max_tp_mult}x ATR H1 {atr_pips:.0f}p)")
 
-        # RR check — use min between configured RR and what ATR allows
+        # RR check — floor now driven by rm_min_rr_gate (was hardcoded 1.2).
         required_rr = float((config or {}).get("rr_ratio") or 2.0)
+        rr_floor    = float((config or {}).get("rm_min_rr_gate") or 1.2)
         friction_pips = 1.5
-        # What's the best net RR achievable within ATR limit?
         max_net_rr = (max_tp1_pips - friction_pips) / (sl_pips + friction_pips) if sl_pips > 0 else 0
-        # Use the lower of configured RR and ATR-limited RR (min 1.2 absolute floor)
-        effective_rr = max(1.2, min(required_rr, max_net_rr))
+        effective_rr = max(rr_floor, min(required_rr, max_net_rr))
 
         actual_rr = tp_pips / sl_pips if sl_pips else 0
         net_tp_pips = tp_pips - friction_pips
