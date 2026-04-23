@@ -107,19 +107,16 @@ class Orchestrator:
             self._tg.start_polling()
         self._wa = get_whatsapp_bot(orchestrator=self)
 
-        # Lab-only: if the DB has not yet collected any opened trades, seed
-        # the RM config with an "exploration profile" — more permissive than
-        # default so the Journalist has data to reason on. Runs ONCE: after
-        # any real opened trade appears, subsequent boots skip this.
-        # After this, the Journalist/auto-tuning is in full control.
+        # Lab-only: apply the exploration profile ONCE in the life of this
+        # lab DB. Keyed on a sentinel config entry `lab_exploration_applied`
+        # so the seeding is genuinely one-shot regardless of any trade
+        # history already present. After this, the Journalist and auto-
+        # tuning loop own the parameters.
         if os.environ.get("SYSTEM_MODE", "production").lower() == "lab":
             try:
                 async with async_session_factory() as s:
-                    seen = await s.execute(
-                        select(Trade).where(Trade.mt5_ticket != None).limit(1)
-                    )
-                    has_any_opened = seen.scalar_one_or_none() is not None
-                if not has_any_opened:
+                    applied = await get_config("lab_exploration_applied", s)
+                if applied != "true":
                     exploration = {
                         "rm_min_rr_gate":     "1.0",
                         "rm_max_tp_atr_mult": "3.0",
@@ -129,7 +126,8 @@ class Orchestrator:
                     async with async_session_factory() as s:
                         for k, v in exploration.items():
                             await set_config(k, v, s)
-                    logger.info("Lab virgin DB — applied exploration profile: %s", exploration)
+                        await set_config("lab_exploration_applied", "true", s)
+                    logger.info("Lab exploration profile applied (one-shot): %s", exploration)
             except Exception as exc:
                 logger.warning("Lab exploration seed failed: %s", exc)
 
