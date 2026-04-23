@@ -1583,3 +1583,40 @@ Step 3 regression check: **skipped** — backend unreachable. Most recent fix co
 ### New CANDIDATE Rules
 
 **0 new CANDIDATE rules retrieved** — lab backend unreachable.
+
+---
+
+## 2026-04-23 03:01 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at 03:01 UTC — TCP SYN never acknowledged on either port. This continues the unbroken outage first recorded at 2026-04-20 03:07 UTC (~96 hours and counting). Only ~21 hours remain in the A/B test window (closes 2026-04-24). No trade data, cancellation errors, or learning-rule updates could be retrieved.
+
+Step 3 regression check: **skipped** — backend unreachable. Most recent fix commits to monitored files:
+- `9329544` feat: force Europe/Rome display + UTC-unambiguous API timestamps
+- `b4a53e7` fix: strict comment sanitizer — the -2 WAS literally the comment
+- `032eae0` debug: verbose logging of every order_send param + filter alerts per mode
+- `37e6771` fix: global mt5 lock — serialize every MT5 call in bridge + during subprocess
+
+**Action required (CRITICAL):** VPS has been unreachable for every audit since 2026-04-20 03:07 UTC (~96 h). Only ~21 hours remain in the A/B test window (closes 2026-04-24). The entire test will yield zero data if not resolved immediately. Manual VPS/firewall/process investigation is urgently required.
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
