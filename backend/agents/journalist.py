@@ -124,8 +124,28 @@ including user-convened EMERGENCY meetings.
 - `rm_min_sl_pips_floor`   : Additional absolute floor on SL. Default 0.
 - `max_trade_duration_hours`: Force-close after this. Default 6. Raise to 12
                              if many trades close at duration with small P&L.
-- `min_sl_pips`            : Legacy floor on SL. Tunable.
+- `min_sl_pips`            : Absolute floor on SL pips. Tunable. Default 20.
+                             When setup SL is tighter than this AND
+                             `sl_accommodation_enabled`=1, SL is widened to
+                             min_sl_pips and lot is resized automatically.
+- `double_entry_cooldown_minutes`: Block new trades on same symbol for N
+                             minutes after last trade opens. Default 60.
+                             Raise if over-exposure on the same pair is a
+                             recurring failure mode.
+- `sl_accommodation_enabled`: 0/1. If 1, widen tight SLs to min_sl_pips
+                             instead of rejecting. Default 1.
+- `tp_atr_rolling_window_trades`: N closed trades to compute rolling ATR
+                             used as TP-size floor. 0 disables. Default 20.
+- `overlap_block_enabled`  : 0/1. If 1, block new entries during configured
+                             session-overlap windows (high-volatility).
+                             Default 1.
 - `rr_ratio`, `max_open_trades`, `analysis_interval`: self-evident.
+
+JSON-valued keys (must be emitted as a JSON string in `new_value`):
+- `overlap_windows_utc`    : Array of {"start":"HH:MM","end":"HH:MM"} UTC
+                             windows. Default
+                             `[{"start":"12:00","end":"13:00"},{"start":"14:00","end":"15:30"}]`.
+                             Edit when session overlaps shift.
 
 ⚠️ STRICT WHITELIST. Only these EXACT keys are accepted. ANY OTHER KEY NAME
 — including `min_sl_pips_by_pair`, `setup_pair_ban`, `rr_tracking`,

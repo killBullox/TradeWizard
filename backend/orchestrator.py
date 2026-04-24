@@ -476,6 +476,20 @@ class Orchestrator:
                 })
                 return
 
+            # Rolling ATR: average SL width from last N closed trades on this
+            # symbol, injected next to current H1 ATR so sanity_check_trade can
+            # use max(current, rolling*0.8) and avoid over-tight TPs when the
+            # pair has become more volatile than the most recent H1 bar.
+            try:
+                n_roll = int(float(config.get("tp_atr_rolling_window_trades", 0) or 0))
+                if n_roll > 0:
+                    roll = await self._rolling_atr_pips(symbol, n_roll)
+                    if roll > 0:
+                        indic = h1_data.setdefault("indicators", {})
+                        indic["atr_pips_rolling"] = roll
+            except Exception as exc:
+                logger.warning("rolling-ATR injection failed for %s: %s", symbol, exc)
+
             # 2. Load strategy memory — injected into all agent prompts for continuous learning
             memory_ctx = await _build_memory()
 
@@ -510,6 +524,35 @@ class Orchestrator:
                     await self.broadcast({"type": "trade_rejected", "symbol": symbol,
                                           "reason": f"Already have an active trade on {symbol}", "agent": "SYS"})
                     return
+
+            # 4b-bis. Double-entry cooldown — reject if last trade on this symbol
+            # opened within the cooldown window (fixes post-meeting #132 intent).
+            cooldown_min = int(float(config.get("double_entry_cooldown_minutes", 0) or 0))
+            if cooldown_min > 0:
+                async with async_session_factory() as s:
+                    last_row = await s.execute(
+                        select(Trade).where(Trade.symbol == symbol)
+                        .order_by(desc(Trade.open_time)).limit(1)
+                    )
+                    last = last_row.scalar_one_or_none()
+                    if last and last.open_time:
+                        age_min = (datetime.utcnow() - last.open_time).total_seconds() / 60
+                        if age_min < cooldown_min:
+                            reason = f"Double-entry cooldown: last {symbol} {age_min:.0f}min ago (cooldown {cooldown_min}min)"
+                            logger.info(reason)
+                            await self.broadcast({"type": "trade_rejected", "symbol": symbol,
+                                                  "reason": reason, "agent": "SYS"})
+                            return
+
+            # 4b-ter. Overlap-window block — avoid new entries during high-volatility
+            # session overlaps (fixes post-meeting #132 intent on market-in-kill-zone).
+            if self._in_overlap_window(config):
+                now_utc = datetime.utcnow().strftime("%H:%M")
+                reason = f"Overlap window active at {now_utc} UTC — new entries blocked"
+                logger.info("Overlap block: %s — %s", symbol, reason)
+                await self.broadcast({"type": "trade_rejected", "symbol": symbol,
+                                      "reason": reason, "agent": "SYS"})
+                return
 
             # 4c. Rule Engine — evaluate learning_rules BEFORE the RM
             from services.rule_engine import build_market_context, evaluate_trade as eval_rules
@@ -564,6 +607,11 @@ class Orchestrator:
 
             # Guard: enforce minimum RR on TP1 using RM-approved values if LLM returned bad params
             trade_params = self._enforce_rr(trade_params, rm_result, config)
+
+            # Guard: if setup SL is tighter than min_sl_pips, widen SL to the floor
+            # and mark rm_result so lot is recomputed on the widened distance.
+            # Turn off via sl_accommodation_enabled=0 to fall back to old hard-reject.
+            self._enforce_min_sl(trade_params, rm_result, config)
 
             # Enforce lot size using ACTUAL entry/SL from trade_params (not RM's sl_pips which can be 0)
             self._enforce_lot_size(rm_result, trade_params, symbol, config)
@@ -1517,6 +1565,7 @@ class Orchestrator:
     _JSON_CONFIG_KEYS = frozenset({
         "enabled_pairs", "kill_zones", "ict_strategies", "system_performance",
         "paper_mode_exit_criteria", "trading_sessions",
+        "overlap_windows_utc",
     })
     # Keys that must be numeric
     _NUMERIC_CONFIG_KEYS = frozenset({
@@ -1527,6 +1576,9 @@ class Orchestrator:
         # RM self-adapting parameters (meetings propose changes, auto-applied)
         "rm_min_sl_atr_mult", "rm_max_tp_atr_mult", "rm_min_rr_gate",
         "rm_sl_cap_atr_mult", "rm_min_sl_pips_floor", "max_trade_duration_hours",
+        # Emergency-meeting tunables (2026-04-24, #132) — all features implemented
+        "double_entry_cooldown_minutes", "sl_accommodation_enabled",
+        "tp_atr_rolling_window_trades", "overlap_block_enabled",
     })
     # Keys that agents are NOT allowed to change (user-only).
     # HARD INVARIANT: max_risk_usd and risk_percent are the only risk-capital
@@ -2046,6 +2098,96 @@ class Orchestrator:
             logger.warning("Margin check error (proceeding anyway): %s", exc)
             return True  # don't block on check errors
 
+    async def _rolling_atr_pips(self, symbol: str, n: int) -> float:
+        """Average SL width (pips) across the last N closed trades on `symbol`,
+        used as a rolling proxy for true volatility when computing TP distances.
+        Returns 0 when there is not enough data — callers must fallback to
+        current H1 ATR. Fixes post-meeting #132 intent (rolling 20-trade ATR
+        for TP calibration) without requiring a new data table.
+        """
+        if n <= 0 or not symbol:
+            return 0.0
+        pip = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+        try:
+            async with async_session_factory() as s:
+                rows = await s.execute(
+                    select(Trade).where(
+                        Trade.symbol == symbol,
+                        Trade.status == "CLOSED",
+                    ).order_by(desc(Trade.close_time)).limit(n)
+                )
+                trades = rows.scalars().all()
+            widths = []
+            for t in trades:
+                if t.entry_price and t.stop_loss:
+                    widths.append(abs(float(t.entry_price) - float(t.stop_loss)) / pip)
+            if not widths:
+                return 0.0
+            return sum(widths) / len(widths)
+        except Exception as exc:
+            logger.warning("_rolling_atr_pips(%s, %d) failed: %s", symbol, n, exc)
+            return 0.0
+
+    def _in_overlap_window(self, config: dict) -> bool:
+        """True if current UTC time is inside any configured high-volatility
+        session-overlap window AND overlap_block_enabled is on. Config key
+        `overlap_windows_utc` is a JSON list of {start,end} strings "HH:MM"
+        (UTC). Broken config = graceful skip (return False)."""
+        try:
+            if int(float(config.get("overlap_block_enabled", 0) or 0)) != 1:
+                return False
+            windows = config.get("overlap_windows_utc")
+            if isinstance(windows, str):
+                windows = json.loads(windows or "[]")
+            if not windows:
+                return False
+            now = datetime.utcnow().time()
+            for w in windows:
+                try:
+                    sh, sm = w["start"].split(":")
+                    eh, em = w["end"].split(":")
+                    start = now.replace(hour=int(sh), minute=int(sm), second=0, microsecond=0)
+                    end   = now.replace(hour=int(eh), minute=int(em), second=0, microsecond=0)
+                except Exception:
+                    continue
+                if start <= now <= end:
+                    return True
+            return False
+        except Exception as exc:
+            logger.warning("_in_overlap_window failed: %s", exc)
+            return False
+
+    def _enforce_min_sl(self, trade_params: dict, rm_result: dict, config: dict | None = None) -> None:
+        """Widen SL to min_sl_pips when the setup's SL is tighter, and
+        recompute lot size so risk stays within the configured budget.
+        In-place mutation of trade_params + rm_result.
+        Fixes post-meeting #132 intent: resize position to accommodate min SL
+        rather than silently rejecting the setup. If sl_accommodation_enabled
+        is off, leave SL alone — sanity_check_trade will still reject later."""
+        if int(float((config or {}).get("sl_accommodation_enabled", 1) or 0)) != 1:
+            return
+        direction = (trade_params.get("direction") or "").upper()
+        entry = float(trade_params.get("entry_price") or 0)
+        sl    = float(trade_params.get("stop_loss") or 0)
+        if not entry or not sl or direction not in ("BUY", "SELL"):
+            return
+        symbol = trade_params.get("symbol", "")
+        pip = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+        sl_pips = abs(entry - sl) / pip
+        floor_pips = float((config or {}).get("min_sl_pips", 0) or 0)
+        floor_pips = max(floor_pips, float((config or {}).get("rm_min_sl_pips_floor", 0) or 0))
+        if floor_pips <= 0 or sl_pips >= floor_pips - 0.01:
+            return
+        # Widen SL to the floor, preserving direction
+        sign = -1 if direction == "BUY" else 1
+        new_sl = round(entry + sign * floor_pips * pip, 6)
+        logger.info("SL accommodation: %s %s SL widened %.1fp -> %.1fp (entry=%.5f, new_sl=%.5f)",
+                    symbol, direction, sl_pips, floor_pips, entry, new_sl)
+        trade_params["stop_loss"] = new_sl
+        # Tell downstream lot enforcement to use the new SL pips
+        pos = rm_result.setdefault("position_size", {})
+        pos["sl_pips"] = floor_pips
+
     def _sanity_check_trade(self, trade_params: dict, market_data: dict, config: dict | None = None) -> str | None:
         """Return rejection reason string if trade params are mathematically invalid, else None."""
         direction = trade_params.get("direction", "")
@@ -2066,6 +2208,10 @@ class Orchestrator:
         # Min SL — multiplier on ATR driven by the tunable rm_min_sl_atr_mult
         # (was hardcoded 0.5). Halved coefficient kept as floor safety.
         atr_pips = float((market_data.get("H1") or {}).get("indicators", {}).get("atr_pips") or 0)
+        # Rolling ATR from last N closed trades: used to avoid under-sizing
+        # TP when the current H1 bar is unusually quiet vs. recent volatility.
+        rolling_atr = float((market_data.get("H1") or {}).get("indicators", {}).get("atr_pips_rolling") or 0)
+        effective_atr = max(atr_pips, rolling_atr * 0.8) if rolling_atr else atr_pips
         cfg_min_sl = float((config or {}).get("min_sl_pips") or 30)
         min_sl_mult = float((config or {}).get("rm_min_sl_atr_mult") or 1.0)
         min_sl_pips = max(atr_pips * min_sl_mult * 0.5, cfg_min_sl)
@@ -2074,10 +2220,11 @@ class Orchestrator:
 
         # Max TP1 distance driven by rm_max_tp_atr_mult (was hardcoded 2).
         max_tp_mult = float((config or {}).get("rm_max_tp_atr_mult") or 2.0)
-        max_tp1_pips = atr_pips * max_tp_mult if atr_pips > 0 else 999
+        max_tp1_pips = effective_atr * max_tp_mult if effective_atr > 0 else 999
         if tp_pips > max_tp1_pips:
             return (f"TP1 too far for intraday: {tp_pips:.0f} pips "
-                    f"(max {max_tp1_pips:.0f}p = {max_tp_mult}x ATR H1 {atr_pips:.0f}p)")
+                    f"(max {max_tp1_pips:.0f}p = {max_tp_mult}x effective ATR {effective_atr:.0f}p "
+                    f"[H1={atr_pips:.0f}p rolling={rolling_atr:.0f}p])")
 
         # RR check — floor now driven by rm_min_rr_gate (was hardcoded 1.2).
         required_rr = float((config or {}).get("rr_ratio") or 2.0)

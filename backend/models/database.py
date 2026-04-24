@@ -361,6 +361,18 @@ async def init_db():
                     SystemConfig(key="rm_sl_cap_atr_mult", value="2.5",  description="Hard cap on SL: never wider than ATR × this."),
                     SystemConfig(key="rm_min_sl_pips_floor", value="0",  description="Extra hard floor on SL pips (0 = use min_sl_pips only)."),
                     SystemConfig(key="max_trade_duration_hours", value="6", description="Force-close any trade older than this many hours."),
+                    # ── Emergency-meeting tunables (2026-04-24, meeting #132) ──
+                    SystemConfig(key="double_entry_cooldown_minutes", value="60",
+                                 description="Block new trades on same symbol for N minutes after last trade open."),
+                    SystemConfig(key="sl_accommodation_enabled", value="1",
+                                 description="If 1, widen SL to min_sl_pips when setup SL is tighter (auto-resize lot). If 0, reject."),
+                    SystemConfig(key="tp_atr_rolling_window_trades", value="20",
+                                 description="N closed trades to compute rolling ATR for TP calibration (0 = use current H1 ATR)."),
+                    SystemConfig(key="overlap_block_enabled", value="1",
+                                 description="If 1, block new trades during high-volatility session-overlap windows."),
+                    SystemConfig(key="overlap_windows_utc",
+                                 value='[{"start":"12:00","end":"13:00"},{"start":"14:00","end":"15:30"}]',
+                                 description="UTC windows where overlap_block_enabled applies (session overlaps)."),
                 ]
             session.add_all(defaults)
             await session.commit()
@@ -395,6 +407,18 @@ async def init_db():
                 ("rm_sl_cap_atr_mult", "2.5", "Hard cap on SL: never wider than ATR × this."),
                 ("rm_min_sl_pips_floor", "0", "Extra hard floor on SL pips (0 = use min_sl_pips only)."),
                 ("max_trade_duration_hours", "6", "Force-close any trade older than this many hours."),
+                # Emergency-meeting tunables (2026-04-24, #132)
+                ("double_entry_cooldown_minutes", "60",
+                    "Block new trades on same symbol for N minutes after last trade open."),
+                ("sl_accommodation_enabled", "1",
+                    "If 1, widen SL to min_sl_pips when setup SL is tighter (auto-resize lot). If 0, reject."),
+                ("tp_atr_rolling_window_trades", "20",
+                    "N closed trades to compute rolling ATR for TP calibration (0 = use current H1 ATR)."),
+                ("overlap_block_enabled", "1",
+                    "If 1, block new trades during high-volatility session-overlap windows."),
+                ("overlap_windows_utc",
+                    '[{"start":"12:00","end":"13:00"},{"start":"14:00","end":"15:30"}]',
+                    "UTC windows where overlap_block_enabled applies (session overlaps)."),
             ]:
                 res = await session.execute(select(SystemConfig).where(SystemConfig.key == key))
                 if not res.scalar_one_or_none():
