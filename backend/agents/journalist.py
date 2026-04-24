@@ -213,6 +213,23 @@ THROWN AWAY because it cannot change anything:
    "ban LiquiditySweep on XAUUSD"), emit a `proposed_rule` instead
    (see the proposed_rules schema below). Do NOT try to squeeze it
    into a config_change.
+6. **proposed_rules is NOT OPTIONAL when the diagnostics table has qualifying
+   cells.** This is the most important rule in this prompt.
+   - For EVERY cell with verdict=WORKING (n≥3, WR≥55%, expectancy≥+0.15R)
+     you MUST emit a proposed_rule of type BOOST with action INCREASE_SIZE
+     (factor 1.25–1.50) scoped to that exact (setup_type, symbol, session).
+   - For EVERY cell with verdict=FAILING (n≥3, WR<40% or expectancy≤-0.10)
+     you MUST emit a proposed_rule of type BLOCK or FILTER scoped to that
+     exact (setup_type, symbol, session). Choose BLOCK if the root cause is
+     structural (pair-setup mismatch); FILTER if the cell fails only under
+     a specific condition (counter-trend, news, low liquidity).
+   - If the topic says "System is stuck" BUT the diagnostics table shows
+     working or failing cells, proposed_rules for those cells take priority
+     over any global loosening via config_change. A system stuck with a
+     2/3 winning cell is NOT stuck — it is starved of that cell. The
+     correct reaction is BOOSTing the winner, not lowering global gates.
+   - Returning proposed_rules=[] when qualifying cells exist is a HARD
+     FAILURE of this meeting.
 
 Be explicit about WHY based on the trades reviewed. Only the keys listed
 above are accepted — other keys will be rejected by the validator.
