@@ -793,12 +793,16 @@ async def force_auto_tuning():
     """Manually trigger an AUTO_TUNING meeting in the lab. Lab only.
     Synchronously awaits the meeting so caller can inspect the result
     (applied config changes) via the meetings endpoint afterward."""
-    import os as _os
+    import os as _os, traceback as _tb
     if _os.getenv("SYSTEM_MODE", "production").lower() != "lab":
         raise HTTPException(403, "AUTO_TUNING can only be forced on the lab backend")
     if not orchestrator:
         raise HTTPException(503, "System not ready")
-    await orchestrator._run_auto_tuning_meeting()
+    try:
+        await orchestrator._run_auto_tuning_meeting()
+    except Exception as exc:
+        logger.error("force-tuning failed: %s\n%s", exc, _tb.format_exc())
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
     # Read back the current config so caller sees the effect immediately
     async with async_session_factory() as s:
         from models.database import SystemConfig
