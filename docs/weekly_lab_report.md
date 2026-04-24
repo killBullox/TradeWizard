@@ -2432,3 +2432,40 @@ Step 3 regression check: **skipped** — backend unreachable. Most recent fix co
 **0 new CANDIDATE rules retrieved** — lab backend unreachable.
 
 ---
+
+## 2026-04-24 10:06 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at 10:06 UTC — TCP SYN never acknowledged on either port. This is the **16th consecutive failed audit** since 2026-04-20 03:07 UTC (~107 hours of continuous outage). Today (2026-04-24) is the **final day** of the A/B test window. No trade data, cancellation errors, or learning-rule updates could be retrieved.
+
+Step 3 regression check: **skipped** — backend unreachable. Most recent fix commits to monitored files:
+- `cdaaf31` feat: alerts dismiss 'x' button + Europe/Rome time display
+- `ef6ad61` fix: reset-stats now effective on Performance and Analytics pages
+- `eec39b7` feat: L.2 adaptive RM lab + P.1 bias diagnostics endpoint
+- `b4a53e7` fix: strict comment sanitizer — the -2 WAS literally the comment
+
+**Action required (CRITICAL):** VPS unreachable for 16 consecutive audits spanning the entire A/B test window. This is the **last scheduled audit** — the window closes EOD 2026-04-24. The full A/B test has been rendered unmonitorable by the outage. Immediate VPS/firewall/process investigation and log retrieval is required before the window closes.
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
+
+---
