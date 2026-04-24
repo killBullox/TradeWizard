@@ -788,6 +788,29 @@ async def trigger_meeting(data: dict):
     return {"status": "Meeting scheduled", "type": meeting_type}
 
 
+@app.post("/api/lab/force-tuning")
+async def force_auto_tuning():
+    """Manually trigger an AUTO_TUNING meeting in the lab. Lab only.
+    Synchronously awaits the meeting so caller can inspect the result
+    (applied config changes) via the meetings endpoint afterward."""
+    import os as _os
+    if _os.getenv("SYSTEM_MODE", "production").lower() != "lab":
+        raise HTTPException(403, "AUTO_TUNING can only be forced on the lab backend")
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    await orchestrator._run_auto_tuning_meeting()
+    # Read back the current config so caller sees the effect immediately
+    async with async_session_factory() as s:
+        from models.database import SystemConfig
+        rows = (await s.execute(select(SystemConfig).where(
+            SystemConfig.key.in_([
+                "rm_min_sl_atr_mult", "rm_max_tp_atr_mult", "rm_min_rr_gate",
+                "rm_sl_cap_atr_mult", "max_trade_duration_hours", "min_sl_pips",
+            ])
+        ))).scalars().all()
+    return {"status": "done", "current_tunables": {r.key: r.value for r in rows}}
+
+
 @app.post("/api/meetings/emergency")
 async def trigger_emergency_meeting(data: dict):
     """User-convened interactive emergency meeting."""
