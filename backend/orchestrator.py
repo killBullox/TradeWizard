@@ -312,14 +312,26 @@ class Orchestrator:
 
         current_memory = await _build_memory()
 
-        # Re-use conduct_meeting with a dedicated meeting type. The
-        # Journalist prompt already has the AUTO-ADAPTIVE MANDATE section
-        # that lists the tunable keys and when to change them.
+        # Per-(setup × symbol × session) diagnostics are the primary input:
+        # the Journalist must reason about WHICH setups work WHERE and WHEN
+        # before proposing any loosening of global gates.
+        diag_text = ""
+        try:
+            from services.setup_diagnostics import diagnose_setups, format_diagnostics_for_prompt
+            diag = await diagnose_setups(days_back=7)
+            diag_text = format_diagnostics_for_prompt(diag)
+        except Exception as exc:
+            logger.warning("Setup diagnostics build failed: %s", exc)
+
         topic = (
-            "AUTO_TUNING. System is stuck. Analyze the rejection reasons "
-            "below and propose at least one config_change to unblock trades. "
-            "Remember: max_risk_usd and risk_percent are PROTECTED — do NOT "
-            "propose changes to those. Every other tunable is fair game.\n\n"
+            "AUTO_TUNING. System is stuck. Use the diagnostics table below to "
+            "decide whether the problem is (a) specific failing cells that "
+            "must be banned/filtered via proposed_rules, or (b) globally too "
+            "strict gates that must be relaxed via config_change. Prefer "
+            "surgical proposed_rules over broad loosening. Remember: "
+            "max_risk_usd and risk_percent are PROTECTED — do NOT propose "
+            "changes to those.\n\n"
+            f"{diag_text}\n\n"
             f"RECENT REJECTIONS:\n{rejects_context}"
         )
         result = await self.jr.conduct_meeting(
@@ -1243,6 +1255,17 @@ class Orchestrator:
 
         # Build "what happened after close" context for KILLZONE_REVIEW
         post_ctx = await self._build_post_trade_context(trade_dicts) if meeting_type == "KILLZONE_REVIEW" else ""
+
+        # Per-(setup × symbol × session) diagnostics: the quality-vs-frequency
+        # table the Journalist needs in order to propose targeted BLOCK/BOOST
+        # rules instead of only loosening global tunables.
+        try:
+            from services.setup_diagnostics import diagnose_setups, format_diagnostics_for_prompt
+            diag = await diagnose_setups(days_back=7)
+            diag_text = format_diagnostics_for_prompt(diag)
+            post_ctx = (post_ctx + "\n\n" + diag_text).strip() if post_ctx else diag_text
+        except Exception as exc:
+            logger.warning("Setup diagnostics build failed: %s", exc)
 
         meeting_result = await self.jr.conduct_meeting(
             meeting_type, trade_dicts, perf, config,

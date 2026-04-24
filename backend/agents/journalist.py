@@ -143,15 +143,46 @@ capital contract): `max_risk_usd`, `risk_percent`, `paper_mode`,
 `model_mode`.
 
 ### How to decide changes (evidence-based):
-- Count how many trades closed at SL vs TP vs max_duration.
-- Look at win rate per setup + avg_win/avg_loss ratio.
-- If >50% of losses are "hit SL in < 1h" → SL likely too tight → propose
-  config_change raising `rm_min_sl_atr_mult` to 1.3 or 1.5.
-- If >50% of trades close at max_duration with <20% of TP distance traveled
-  → TP likely too far or duration too short → propose raising
-  `max_trade_duration_hours` OR lowering `rm_max_tp_atr_mult`.
-- If avg_loss > 1.5× avg_win consistently → RR not being achieved in
-  practice → tighten `rm_min_rr_gate` to 1.5.
+
+PRIMARY SOURCE OF TRUTH: the SETUP DIAGNOSTICS table in the context
+(per-cell breakdown of setup × symbol × session with n, WR, avg_RR,
+expectancy, failure types, counter-trend %, verdict). Read it FIRST.
+Every proposal must cite specific cells from it.
+
+**Symmetric tuning principle** — auto-tuning must both TIGHTEN AND LOOSEN.
+Never only loosen. If quality is degrading, your job is to restrict.
+
+Reasoning playbook:
+1. **Scan the cells for FAILING verdicts** (WR<40% or expectancy≤-0.10, n≥3).
+   Each FAILING cell with n≥3 is a candidate for a proposed_rule BLOCK or
+   FILTER targeted at that exact (setup, symbol, session). Do NOT solve
+   cell-level failures by loosening global gates — that worsens the other
+   cells. Use proposed_rules for targeted action.
+
+2. **Scan the cells for WORKING verdicts** (WR≥55% and expectancy≥+0.15, n≥5).
+   Each WORKING cell is a candidate for BOOST (INCREASE_SIZE) — reward what
+   works rather than averaging it down with relaxations elsewhere.
+
+3. **Only after cell-level action**, examine GLOBAL failure_patterns:
+   - SL-hit >60% of losses AND multiple cells showing `SL≫TP` in failures
+     → consider raising `rm_min_sl_atr_mult` (but ONLY if most FAILING cells
+     actually suffer from SL-hit, not from timeout or counter-trend).
+   - Timeout >30% of losses → consider raising `max_trade_duration_hours`
+     OR lowering `rm_max_tp_atr_mult` so TPs are reachable.
+   - Counter-trend entries >50% of HTF-evaluated trades → propose a FILTER
+     rule requiring `htf_trend` alignment with `strategy.direction`, not a
+     global tunable.
+   - System-wide blockage with 0 opened trades → only then consider lowering
+     `rm_min_rr_gate` or `rm_min_sl_atr_mult` as a last resort to restart
+     the flow, and plan to re-tighten once data accrues.
+
+4. **When cells are MARGINAL or n is small**, do nothing to global gates;
+   propose at most CONTEXT_NOTE or ADD_CONTEXT rules that inject a warning
+   into future decisions without hard-blocking.
+
+Anti-pattern (do NOT do this): "15/15 trades rejected → lower rm_min_rr_gate
+and rm_min_sl_atr_mult globally." That only makes the next 15 trades low
+quality. If cells show you WHERE rejections come from, target those cells.
 
 Each `system_improvement` MUST have this exact shape. NO OTHER SHAPE
 IS ACCEPTED. An improvement without a non-empty `config_change` is
