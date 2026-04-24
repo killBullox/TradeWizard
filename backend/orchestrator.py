@@ -361,6 +361,31 @@ class Orchestrator:
             )
             s.add(meeting)
             await s.commit()
+            meeting_id = meeting.id
+
+        # Ingest proposed_rules — this path was missing from AUTO_TUNING,
+        # so the Journalist's granular BLOCK/BOOST/FILTER recommendations
+        # were being discarded even when emitted. Without this, the whole
+        # symmetric-tuning prompt change produces no effect.
+        proposed = result.get("proposed_rules", [])
+        if proposed:
+            try:
+                from services.learning_rules import ingest_proposed_rules
+                ids = await ingest_proposed_rules(proposed, source_type="MEETING",
+                                                    source_id=meeting_id)
+                logger.info("AUTO_TUNING ingested %d learning rules from meeting #%d",
+                            len(ids), meeting_id)
+            except Exception as exc:
+                logger.warning("AUTO_TUNING rule ingest failed: %s", exc)
+
+        # Strategy-memory updates — also previously dropped on this path
+        memory_updates = result.get("setup_memory_updates", [])
+        if memory_updates:
+            try:
+                await _mem_update_meeting(memory_updates)
+                logger.info("AUTO_TUNING strategy memory updated: %d entries", len(memory_updates))
+            except Exception as exc:
+                logger.warning("AUTO_TUNING memory update failed: %s", exc)
 
     async def _run_killzone_review(self):
         """Post-killzone deep review: what happened during this session, what could have been better."""
