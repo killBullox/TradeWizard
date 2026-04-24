@@ -310,7 +310,7 @@ class Orchestrator:
                 "open_time": str(t.open_time)[:16],
             })
 
-        current_memory = await build_context_string()
+        current_memory = await _build_memory()
 
         # Re-use conduct_meeting with a dedicated meeting type. The
         # Journalist prompt already has the AUTO-ADAPTIVE MANDATE section
