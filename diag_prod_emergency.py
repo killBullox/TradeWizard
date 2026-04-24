@@ -33,8 +33,8 @@ async def main():
                 if has_cc:
                     print(f"  [{i}] {cat:8s}  {cc.get('key')} = {cc.get('new_value')}")
                 else:
-                    print(f"  [{i}] {cat:8s}  (no config_change — discarded by applier)")
-                print(f"       └─ {desc_}")
+                    print(f"  [{i}] {cat:8s}  (no config_change - discarded by applier)")
+                print(f"       desc: {desc_.encode('ascii', 'replace').decode('ascii')}")
 
         print()
         print("=== CURRENT PROD CONFIG (keys of interest) ===")
