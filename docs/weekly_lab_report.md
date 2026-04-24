@@ -2362,3 +2362,36 @@ Step 3 regression check: **skipped** — backend unreachable.
 **0 new CANDIDATE rules retrieved** — lab backend unreachable.
 
 ---
+
+## 2026-04-24 08:29 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at 08:29 UTC — TCP SYN never acknowledged on either port. This is the **14th consecutive failed audit** since 2026-04-20 03:07 UTC. Today is the **final day** of the A/B test window (2026-04-24). No trade data, cancellation errors, or learning-rule updates could be retrieved.
+
+Step 3 regression check: **skipped** — backend unreachable.
+
+**Action required (CRITICAL):** VPS unreachable for 14 consecutive audits spanning the entire A/B test window. Today is the last day of the test window; the outage has rendered the entire A/B test unmonitorable. Immediate manual VPS/firewall/process investigation is required to determine root cause and salvage any remaining server-side logs before the window closes.
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
+
+---
