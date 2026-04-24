@@ -2329,3 +2329,36 @@ Step 3 regression check: **skipped** — backend unreachable. Most recent fix co
 **0 new CANDIDATE rules retrieved** — lab backend unreachable.
 
 ---
+
+## 2026-04-24 07:30 UTC
+
+### Side-by-Side Metrics
+
+| Metric                  | Production (`:8000`) | Lab (`:8001`) |
+|-------------------------|----------------------|---------------|
+| Reachable               | ❌ TIMEOUT           | ❌ TIMEOUT    |
+| Today's trades          | N/A                  | N/A           |
+| CANCELLED count         | N/A                  | N/A           |
+| Active trades           | N/A                  | N/A           |
+| W / L                   | N/A                  | N/A           |
+| Win rate                | N/A                  | N/A           |
+| Total P&L               | N/A                  | N/A           |
+| Rules CANDIDATE         | N/A                  | N/A           |
+| Rules ACTIVE            | N/A                  | N/A           |
+| Rules CONFIRMED         | N/A                  | N/A           |
+| Rules DEPRECATED        | N/A                  | N/A           |
+| Avg rule accuracy       | N/A                  | N/A           |
+
+### Notable Events
+
+Both VPS backends (185.218.126.96:8000 and 185.218.126.96:8001) timed out on all HTTP endpoints at 07:30 UTC — TCP SYN never acknowledged on either port. This is the **13th consecutive failed audit** since 2026-04-20 03:07 UTC (~100+ hours of continuous outage). The A/B test window closes today (2026-04-24 EOD) — this is the **final day** of the test window. No trade data, cancellation errors, or learning-rule updates could be retrieved.
+
+Step 3 regression check: **skipped** — backend unreachable.
+
+**Action required (CRITICAL):** VPS unreachable for 13 consecutive audits spanning the entire A/B test window. Today is the last day of the test window. The entire A/B test has been unmonitorable due to persistent VPS/firewall/process outage. Manual investigation is required immediately to determine cause and salvage any logs before the window closes.
+
+### New CANDIDATE Rules
+
+**0 new CANDIDATE rules retrieved** — lab backend unreachable.
+
+---
