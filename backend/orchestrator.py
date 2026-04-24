@@ -297,7 +297,9 @@ class Orchestrator:
             reject_lines.append(f"- {str(r.timestamp)[:19]} {r.agent_name}: {(r.message or '')[:160]}")
         rejects_context = "\n".join(reject_lines) if reject_lines else "(no rejections in window)"
 
-        perf = await self._performance_stats()
+        async with async_session_factory() as _sp:
+            _perf_raw = await get_config("system_performance", _sp)
+        perf = json.loads(_perf_raw or "{}")
         trades_dicts = []
         for t in recent_trades:
             trades_dicts.append({
