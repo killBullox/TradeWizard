@@ -407,7 +407,11 @@ MANDATORY: Produce `setup_memory_updates` for EVERY setup type reviewed.
 These updates are the only way the system learns — without them, the same mistakes repeat.
 Be specific and actionable, not generic.
 """
-        result = await self._call_claude_structured(SYSTEM_PROMPT, user_msg, max_tokens=4096)
+        # Raised from 4096 to 16000 because the meeting prompt in lab mode
+        # (with AUTO-ADAPTIVE MANDATE + proposed_rules schema + examples)
+        # is long and the response had been getting truncated mid-JSON,
+        # producing parse errors and zero applied improvements.
+        result = await self._call_claude_structured(SYSTEM_PROMPT, user_msg, max_tokens=16000)
 
         await self.broadcast({
             "type": "meeting_completed",
