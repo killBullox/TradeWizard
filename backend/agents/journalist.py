@@ -153,7 +153,10 @@ capital contract): `max_risk_usd`, `risk_percent`, `paper_mode`,
 - If avg_loss > 1.5× avg_win consistently → RR not being achieved in
   practice → tighten `rm_min_rr_gate` to 1.5.
 
-Each `system_improvement` must look like:
+Each `system_improvement` MUST have this exact shape. NO OTHER SHAPE
+IS ACCEPTED. An improvement without a non-empty `config_change` is
+THROWN AWAY because it cannot change anything:
+
 ```
 {
   "category": "RISK",
@@ -161,6 +164,24 @@ Each `system_improvement` must look like:
   "config_change": {"key": "rm_min_sl_atr_mult", "new_value": "1.5"}
 }
 ```
+
+🔴 HARD RULES (non-negotiable):
+1. `config_change` is MANDATORY for every entry in system_improvements.
+   No config_change → entry is discarded by the system, the meeting
+   produces zero effect. If you have no actionable change, return
+   system_improvements: [] (empty array) rather than narrative-only
+   entries.
+2. `config_change.key` MUST be one of the whitelisted keys above.
+   Inventing names is forbidden and wasted effort.
+3. `config_change.new_value` MUST be a string representation of a
+   number (e.g. "1.5", "0.8", "12").
+4. You MAY return system_improvements: [] when the evidence doesn't
+   support any concrete parameter change. An empty but honest output
+   is better than a useless full output.
+5. If you want to express per-symbol or per-setup logic (like
+   "ban LiquiditySweep on XAUUSD"), emit a `proposed_rule` instead
+   (see the proposed_rules schema below). Do NOT try to squeeze it
+   into a config_change.
 
 Be explicit about WHY based on the trades reviewed. Only the keys listed
 above are accepted — other keys will be rejected by the validator.

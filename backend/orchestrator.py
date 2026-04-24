@@ -1512,32 +1512,43 @@ class Orchestrator:
         return f"Key '{key}' is not a recognized tunable parameter (whitelist only). If you want per-symbol/per-setup logic, emit a proposed_rule instead."
 
     async def _apply_improvements(self, improvements: list):
-        """Apply system config changes proposed by JR — with validation."""
+        """Apply system config changes proposed by JR — with validation.
+        Pre-filter: entries without a valid config_change are counted but
+        discarded without noise. We log a single summary line per meeting
+        so it's clear how many of the proposed improvements actually took
+        effect (vs how many were narrative-only)."""
+        applied = 0
+        discarded_no_change = 0
+        rejected_invalid = 0
         async with async_session_factory() as s:
             for imp in improvements:
-                change = imp.get("config_change", {})
-                if change and change.get("key") and change.get("new_value") is not None:
-                    key = change["key"]
-                    val = str(change["new_value"])
-                    # Validate before writing
-                    rejection = self._validate_config_change(key, val)
-                    if rejection:
-                        logger.warning(f"Improvement REJECTED: {key}={val[:80]} — {rejection}")
-                        await self.broadcast({
-                            "type": "config_update_rejected",
-                            "key": key,
-                            "value": val[:100],
-                            "reason": rejection,
-                        })
-                        continue
-                    await set_config(key, val, s)
+                change = imp.get("config_change") or {}
+                if not change or not change.get("key") or change.get("new_value") is None:
+                    discarded_no_change += 1
+                    continue
+                key = change["key"]
+                val = str(change["new_value"])
+                rejection = self._validate_config_change(key, val)
+                if rejection:
+                    rejected_invalid += 1
+                    logger.warning("Improvement REJECTED: %s=%s — %s", key, val[:80], rejection)
                     await self.broadcast({
-                        "type": "config_updated",
-                        "key": key,
-                        "value": val,
-                        "reason": imp.get("improvement", ""),
+                        "type": "config_update_rejected",
+                        "key": key, "value": val[:100], "reason": rejection,
                     })
-                    logger.info(f"System improvement applied: {key} = {val}")
+                    continue
+                await set_config(key, val, s)
+                applied += 1
+                await self.broadcast({
+                    "type": "config_updated",
+                    "key": key, "value": val,
+                    "reason": imp.get("improvement", ""),
+                })
+                logger.info("System improvement applied: %s = %s", key, val)
+        logger.info(
+            "Meeting improvements summary: %d applied, %d narrative-only discarded, %d rejected",
+            applied, discarded_no_change, rejected_invalid,
+        )
 
     # ------------------------------------------------------------------ #
     #  Manual Actions
