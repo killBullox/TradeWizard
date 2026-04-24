@@ -100,14 +100,14 @@ After each review, propose concrete improvements to:
 }
 """
 
-_RULES_PROMPT_EXTENSION = """
-## LAB MODE — AUTO-ADAPTIVE MANDATE
+_CONFIG_CHANGE_WHITELIST_PROMPT = """
+## CONFIG_CHANGE WHITELIST — ALWAYS ACTIVE (production + lab)
 
-You are the meta-learner of an autonomous trading lab. Your primary job is
-to MAKE THE SYSTEM BETTER BY CHANGING ITS OWN PARAMETERS. The system must
-improve week over week without any human touching the code. Every meeting
-you MUST propose concrete `config_change` entries in `system_improvements`
-when the trade data supports it.
+Every entry in `system_improvements` MUST carry a `config_change` with a
+`key` that is on the whitelist below. Any other key name is SILENTLY
+REJECTED by the system validator — the improvement becomes a no-op and
+the meeting produces zero effect. This applies to every meeting type,
+including user-convened EMERGENCY meetings.
 
 ### Tunable parameters you can change (write to these keys):
 - `rm_min_sl_atr_mult`     : SL = max(min_sl_pips, ATR × this). Default 1.0.
@@ -141,6 +141,57 @@ handles per-symbol and per-setup logic at runtime.
 capital contract): `max_risk_usd`, `risk_percent`, `paper_mode`,
 `mt5_login`, `mt5_password`, `mt5_server`, `mt5_bridge_url`,
 `model_mode`.
+
+### Required shape of each system_improvement
+
+```
+{
+  "category": "RISK",
+  "improvement": "SLs too tight — 7/10 losses hit SL within 30 min",
+  "config_change": {"key": "rm_min_sl_atr_mult", "new_value": "1.5"}
+}
+```
+
+🔴 HARD RULES (non-negotiable, all meeting types):
+1. `config_change` is MANDATORY for every entry in system_improvements.
+   No config_change → entry is discarded by the system, the meeting
+   produces zero effect. If you have no actionable change, return
+   system_improvements: [] (empty array) rather than narrative-only
+   entries.
+2. `config_change.key` MUST be one of the whitelisted keys above.
+   Inventing names (e.g. `ATOMIC_REJECTION_SL_MINIMUM`,
+   `KILL_ZONE_MARKET_BAN`, `audusd_tp_pips`, `position_sizing_dynamic_enabled`)
+   is forbidden and produces zero effect — the validator silently
+   rejects unknown keys. If the change you want to express does not
+   map to a whitelisted key, either (a) find the closest mapping
+   (e.g. "minimum SL 20 pips" → `min_sl_pips=20`) OR (b) omit the
+   improvement entirely.
+3. `config_change.new_value` MUST be a string representation of a
+   number (e.g. "1.5", "0.8", "12").
+4. You MAY return system_improvements: [] when the evidence doesn't
+   support any concrete parameter change. An empty but honest output
+   is better than a useless full output.
+5. If you want to express per-symbol or per-setup logic (like
+   "ban LiquiditySweep on XAUUSD" or "minimum SL 50 pips for XAUUSD"),
+   in LAB mode emit a `proposed_rule` (see schema below); in PRODUCTION
+   mode such granular logic is not auto-applied, so either skip it or
+   encode it as the closest global `config_change` that approximates
+   the intent.
+
+Be explicit about WHY based on the trades reviewed. Only the keys listed
+above are accepted — other keys will be rejected by the validator.
+"""
+
+
+_RULES_PROMPT_EXTENSION = """
+## LAB MODE — AUTO-ADAPTIVE MANDATE
+
+You are the meta-learner of an autonomous trading lab. Your primary job is
+to MAKE THE SYSTEM BETTER BY CHANGING ITS OWN PARAMETERS. The system must
+improve week over week without any human touching the code. Every meeting
+you MUST propose concrete `config_change` entries in `system_improvements`
+when the trade data supports it — following the CONFIG_CHANGE WHITELIST
+rules above.
 
 ### How to decide changes (evidence-based):
 
@@ -184,55 +235,24 @@ Anti-pattern (do NOT do this): "15/15 trades rejected → lower rm_min_rr_gate
 and rm_min_sl_atr_mult globally." That only makes the next 15 trades low
 quality. If cells show you WHERE rejections come from, target those cells.
 
-Each `system_improvement` MUST have this exact shape. NO OTHER SHAPE
-IS ACCEPTED. An improvement without a non-empty `config_change` is
-THROWN AWAY because it cannot change anything:
-
-```
-{
-  "category": "RISK",
-  "improvement": "SLs too tight — 7/10 losses hit SL within 30 min",
-  "config_change": {"key": "rm_min_sl_atr_mult", "new_value": "1.5"}
-}
-```
-
-🔴 HARD RULES (non-negotiable):
-1. `config_change` is MANDATORY for every entry in system_improvements.
-   No config_change → entry is discarded by the system, the meeting
-   produces zero effect. If you have no actionable change, return
-   system_improvements: [] (empty array) rather than narrative-only
-   entries.
-2. `config_change.key` MUST be one of the whitelisted keys above.
-   Inventing names is forbidden and wasted effort.
-3. `config_change.new_value` MUST be a string representation of a
-   number (e.g. "1.5", "0.8", "12").
-4. You MAY return system_improvements: [] when the evidence doesn't
-   support any concrete parameter change. An empty but honest output
-   is better than a useless full output.
-5. If you want to express per-symbol or per-setup logic (like
-   "ban LiquiditySweep on XAUUSD"), emit a `proposed_rule` instead
-   (see the proposed_rules schema below). Do NOT try to squeeze it
-   into a config_change.
-6. **proposed_rules is NOT OPTIONAL when the diagnostics table has qualifying
-   cells.** This is the most important rule in this prompt.
-   - For EVERY cell with verdict=WORKING (n≥3, WR≥55%, expectancy≥+0.15R)
-     you MUST emit a proposed_rule of type BOOST with action INCREASE_SIZE
-     (factor 1.25–1.50) scoped to that exact (setup_type, symbol, session).
-   - For EVERY cell with verdict=FAILING (n≥3, WR<40% or expectancy≤-0.10)
-     you MUST emit a proposed_rule of type BLOCK or FILTER scoped to that
-     exact (setup_type, symbol, session). Choose BLOCK if the root cause is
-     structural (pair-setup mismatch); FILTER if the cell fails only under
-     a specific condition (counter-trend, news, low liquidity).
-   - If the topic says "System is stuck" BUT the diagnostics table shows
-     working or failing cells, proposed_rules for those cells take priority
-     over any global loosening via config_change. A system stuck with a
-     2/3 winning cell is NOT stuck — it is starved of that cell. The
-     correct reaction is BOOSTing the winner, not lowering global gates.
-   - Returning proposed_rules=[] when qualifying cells exist is a HARD
-     FAILURE of this meeting.
-
-Be explicit about WHY based on the trades reviewed. Only the keys listed
-above are accepted — other keys will be rejected by the validator.
+🔴 LAB HARD RULE 6 (in addition to the always-on rules above):
+**proposed_rules is NOT OPTIONAL when the diagnostics table has qualifying
+cells.** This is the most important rule in this prompt.
+- For EVERY cell with verdict=WORKING (n≥3, WR≥55%, expectancy≥+0.15R)
+  you MUST emit a proposed_rule of type BOOST with action INCREASE_SIZE
+  (factor 1.25–1.50) scoped to that exact (setup_type, symbol, session).
+- For EVERY cell with verdict=FAILING (n≥3, WR<40% or expectancy≤-0.10)
+  you MUST emit a proposed_rule of type BLOCK or FILTER scoped to that
+  exact (setup_type, symbol, session). Choose BLOCK if the root cause is
+  structural (pair-setup mismatch); FILTER if the cell fails only under
+  a specific condition (counter-trend, news, low liquidity).
+- If the topic says "System is stuck" BUT the diagnostics table shows
+  working or failing cells, proposed_rules for those cells take priority
+  over any global loosening via config_change. A system stuck with a
+  2/3 winning cell is NOT stuck — it is starved of that cell. The
+  correct reaction is BOOSTing the winner, not lowering global gates.
+- Returning proposed_rules=[] when qualifying cells exist is a HARD
+  FAILURE of this meeting.
 
 ---
 
@@ -310,7 +330,11 @@ Leave `proposed_rules` as [] if nothing concrete emerges.
 
 # Compose final prompt — in production mode the rules extension is omitted
 # to save tokens and avoid confusing the agent with unused output fields.
-SYSTEM_PROMPT = _BASE_PROMPT + (_RULES_PROMPT_EXTENSION if LEARNING_RULES_ACTIVE else "")
+SYSTEM_PROMPT = (
+    _BASE_PROMPT
+    + _CONFIG_CHANGE_WHITELIST_PROMPT
+    + (_RULES_PROMPT_EXTENSION if LEARNING_RULES_ACTIVE else "")
+)
 
 
 class JournalistAgent(BaseAgent):
