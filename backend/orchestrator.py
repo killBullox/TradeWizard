@@ -133,6 +133,11 @@ class Orchestrator:
 
         self._analysis_task = asyncio.create_task(self._analysis_loop())
         self._monitor_task  = asyncio.create_task(self._monitor_loop())
+        # Internal keep-alive: independent from external watchdog, runs every
+        # 30 min, detects MT5 session loss (connected=false / account=null on
+        # the bridge) and applies escalating remediation. The user must never
+        # be the one to detect MT5 outages.
+        self._mt5_keepalive_task = asyncio.create_task(self._mt5_keepalive_loop())
         # Lab-only: autonomous tuning loop that analyzes rejects and nudges
         # config parameters when the system is stuck (no trades opening).
         if os.environ.get("SYSTEM_MODE", "production").lower() == "lab":
@@ -742,6 +747,149 @@ class Orchestrator:
     # ------------------------------------------------------------------ #
     #  Trade Monitor Loop  (checks active trades every 60 seconds)
     # ------------------------------------------------------------------ #
+    async def _mt5_keepalive_loop(self):
+        """Continuous MT5 connection health loop with adaptive cadence and
+        escalating auto-heal. The user must NEVER be the one who notices an
+        outage.
+
+        Cadence:
+          - 30 minutes when there are no open trades (idle baseline).
+          - 60 seconds when at least one ACTIVE trade is open — a stale
+            connection while losing money is unacceptable.
+
+        On detected disconnect:
+          1. Immediate broadcast + WhatsApp alert (BEFORE attempting fix)
+             so the user sees it the instant it happens.
+          2. Try `reset` endpoint on the bridge (mt5.shutdown + initialize).
+          3. If still down: kill bridge subprocess and let main.py respawn.
+          4. If still down after escalation: alert every minute until fixed.
+        """
+        import httpx
+        bridge_url = (os.environ.get("MT5_BRIDGE_URL") or "http://localhost:5555").rstrip("/")
+        consecutive_failures = 0
+        last_known_state = None  # True/False/None
+        while self._running:
+            try:
+                # Adaptive cadence: tighten to 60s if open trades exist
+                async with async_session_factory() as s:
+                    open_count = await self._count_open_trades(s)
+                interval = 60 if open_count > 0 else 1800
+
+                # Probe the bridge directly (not /api/health, which depends
+                # on the same probe internally — we want the raw answer).
+                connected = False
+                payload = {}
+                try:
+                    async with httpx.AsyncClient(timeout=8.0) as cli:
+                        r = await cli.get(f"{bridge_url}/health")
+                        if r.status_code == 200:
+                            payload = r.json()
+                            connected = bool(payload.get("connected")) and payload.get("account") not in (None, 0, "")
+                except Exception as exc:
+                    payload = {"error": str(exc)}
+
+                if connected:
+                    if last_known_state is False:
+                        # Recovered — tell the user it's back.
+                        msg = (f"✅ MT5 connection recovered "
+                               f"(account={payload.get('account')}). Open trades: {open_count}.")
+                        logger.info(msg)
+                        await self.broadcast({"type": "mt5_recovered", "message": msg,
+                                              "open_trades": open_count})
+                        await self._notify_keepalive(msg, level="INFO")
+                    consecutive_failures = 0
+                    last_known_state = True
+                else:
+                    consecutive_failures += 1
+                    detail = payload.get("error") or f"connected={payload.get('connected')} account={payload.get('account')}"
+                    msg = (f"⚠️ MT5 disconnected — open trades: {open_count}. "
+                           f"Bridge says: {detail}. Auto-heal attempt #{consecutive_failures}.")
+                    logger.warning(msg)
+                    await self.broadcast({"type": "mt5_disconnected",
+                                          "message": msg,
+                                          "open_trades": open_count,
+                                          "consecutive_failures": consecutive_failures})
+                    # Alert the user IMMEDIATELY on first failure if we have
+                    # money on the table; alert every cycle if persistent.
+                    if open_count > 0 or consecutive_failures == 1 or consecutive_failures % 5 == 0:
+                        await self._notify_keepalive(msg, level="ERROR")
+
+                    # Escalation
+                    if consecutive_failures == 1:
+                        await self._mt5_try_reinit(bridge_url)
+                    elif consecutive_failures == 2:
+                        await self._mt5_try_reinit(bridge_url)
+                    elif consecutive_failures >= 3:
+                        await self._mt5_kill_and_respawn_bridge()
+                    last_known_state = False
+                    # Tighter retry while down regardless of open_count
+                    interval = min(interval, 60)
+            except Exception as exc:
+                logger.error("MT5 keepalive loop iteration error: %s", exc, exc_info=True)
+                interval = 120
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+
+    async def _mt5_try_reinit(self, bridge_url: str) -> bool:
+        """Ask the bridge to drop its MT5 session and re-init. Returns True
+        if it answers `connected=true` afterwards."""
+        import httpx
+        for endpoint in ("/reset", "/reinit", "/reconnect"):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as cli:
+                    r = await cli.post(f"{bridge_url}{endpoint}")
+                    if r.status_code in (200, 201, 202, 204):
+                        logger.info("Bridge %s succeeded", endpoint)
+                        # Give MT5 a moment to relink
+                        await asyncio.sleep(3)
+                        h = await cli.get(f"{bridge_url}/health")
+                        if h.status_code == 200 and h.json().get("connected"):
+                            return True
+            except Exception:
+                pass
+        # Fall back: just probe — sometimes a fresh /health forces a reinit
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as cli:
+                await cli.get(f"{bridge_url}/positions")
+                await asyncio.sleep(2)
+                h = await cli.get(f"{bridge_url}/health")
+                return bool(h.status_code == 200 and h.json().get("connected"))
+        except Exception:
+            return False
+
+    async def _mt5_kill_and_respawn_bridge(self) -> None:
+        """Hard remediation: terminate every python process running the
+        bridge module and let main.py spawn a fresh one. We use taskkill
+        with image filter so we don't touch backend.main.py / TradeMachine."""
+        import subprocess
+        try:
+            # Windows: kill any python.exe whose command line includes
+            # mt5_bridge_server. We do this via wmic; safer than /IM python.exe
+            # which would also kill the backend itself.
+            cmd = (
+                'wmic process where '
+                '"name=\'python.exe\' and commandline like \'%%mt5_bridge_server%%\'" '
+                'call terminate'
+            )
+            subprocess.run(["cmd", "/c", cmd], capture_output=True, timeout=20)
+            logger.warning("Bridge subprocess(es) terminated by keepalive escalation")
+        except Exception as exc:
+            logger.error("Bridge kill failed: %s", exc)
+        # main.py keeps an inner respawn loop already; give it room.
+        await asyncio.sleep(8)
+
+    async def _notify_keepalive(self, message: str, level: str = "INFO") -> None:
+        """Send the keepalive alert through every available channel; never raise."""
+        # The orchestrator's _notify dispatches to whatever bots are wired.
+        # WhatsApp bot has notify_mt5_disconnected and notify_error already.
+        if level == "ERROR":
+            await self._notify("notify_mt5_disconnected")
+            await self._notify("notify_error", message)
+        else:
+            await self._notify("notify_error", message)
+
     async def _monitor_loop(self):
         while self._running:
             try:

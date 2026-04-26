@@ -232,6 +232,29 @@ def health():
             "account": info.login if info else None}
 
 
+@app.post("/reset")
+def reset():
+    """Force a clean re-initialization of the MT5 session. Used by the
+    backend keep-alive when it detects connected=false — instead of
+    waiting for the next implicit _ensure_init, drop the global flag and
+    immediately try to relink. Returns the same shape as /health."""
+    if not MT5_AVAILABLE:
+        return {"status": "ok", "mt5_available": False, "connected": True, "reset": False}
+    global _mt5_initialized
+    with _MT5_LOCK:
+        try:
+            mt5.shutdown()
+        except Exception as exc:
+            logger.warning("mt5.shutdown during /reset raised: %s", exc)
+        _mt5_initialized = False
+        ok = _connect()
+        info = mt5.account_info() if ok else None
+    return {"status": "ok", "mt5_available": True,
+            "connected": info is not None,
+            "account": info.login if info else None,
+            "reset": True, "ok": bool(ok)}
+
+
 @app.get("/account")
 def account():
     if not MT5_AVAILABLE:
