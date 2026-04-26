@@ -768,6 +768,8 @@ class Orchestrator:
         bridge_url = (os.environ.get("MT5_BRIDGE_URL") or "http://localhost:5555").rstrip("/")
         consecutive_failures = 0
         last_known_state = None  # True/False/None
+        ticks = 0
+        logger.info("MT5 keepalive loop started — bridge=%s", bridge_url)
         while self._running:
             try:
                 # Adaptive cadence: tighten to 60s if open trades exist
@@ -788,6 +790,11 @@ class Orchestrator:
                 except Exception as exc:
                     payload = {"error": str(exc)}
 
+                ticks += 1
+                # Heartbeat log every ~6h (so we know the loop is alive)
+                if ticks == 1 or ticks % 12 == 0:
+                    logger.info("MT5 keepalive tick #%d: connected=%s account=%s open_trades=%d",
+                                ticks, connected, payload.get("account"), open_count)
                 if connected:
                     if last_known_state is False:
                         # Recovered — tell the user it's back.
