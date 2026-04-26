@@ -557,12 +557,15 @@ async def health_check():
         _mt5 = get_mt5_direct()
         h = _mt5.health()
         mt5_ok = h.get("connected", False)
-        # In lab mode there's no local bridge subprocess — worker healthiness
-        # is proven by a reachable shared bridge instead.
-        if os.environ.get("SYSTEM_MODE", "production").lower() == "lab":
-            worker_ok = mt5_ok
-        else:
-            worker_ok = _bridge_proc is not None and _bridge_proc.poll() is None
+        # Worker healthiness = the bridge actually answers connected=true.
+        # Previously we required `_bridge_proc` to be a child of THIS backend
+        # process in production, but that broke whenever the bridge was
+        # respawned outside our lifecycle (e.g. by the keepalive's
+        # kill-and-respawn path, or by a separate manual launch). We now
+        # treat any reachable, MT5-logged bridge as a working worker — same
+        # as lab — and let the keepalive loop be the authority on bridge
+        # health.
+        worker_ok = mt5_ok
     except Exception:
         pass
 
