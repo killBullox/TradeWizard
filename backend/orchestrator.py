@@ -1904,6 +1904,119 @@ class Orchestrator:
                     f"or disable overlap_block_enabled.")
         return None
 
+    # Keys whose tightening can silently kill the trade flow even when the
+    # RR-identity holds and overlap windows are fine. We replay these against
+    # the last N closed trades to estimate the post-change rejection rate.
+    _REGRESSION_GUARD_KEYS = frozenset({
+        "rm_max_tp_atr_mult", "rm_min_sl_atr_mult", "rm_min_rr_gate",
+        "rm_min_sl_pips_floor", "min_sl_pips", "rr_ratio",
+    })
+    REGRESSION_MAX_LOSS_RATE = 0.50   # if >50% of historical trades would be
+                                       # rejected with the new config, block.
+    REGRESSION_MIN_SAMPLE   = 5       # need at least this many recent trades
+    REGRESSION_LOOKBACK     = 30      # last N closed trades to replay
+
+    async def _check_regression(self, pending: dict) -> str | None:
+        """Replay the last N closed (non-paper) trades through the sanity-check
+        with the proposed config. If more than REGRESSION_MAX_LOSS_RATE of
+        them would now be rejected at the sanity-check stage, block the
+        change.
+
+        This is the empirical guard the user asked for: 'i parametri nei
+        fatti non devono bloccare i trade'. The math guards (RR identity,
+        temporal) cover structural impossibilities; this one catches
+        gradual strangulation — the config that *technically* satisfies
+        every identity but in practice rejects every real-world setup.
+        """
+        # Build the proposed config: current values + pending overrides
+        keys = self._REGRESSION_GUARD_KEYS
+        async with async_session_factory() as s:
+            current = {}
+            for k in keys:
+                v = await get_config(k, s)
+                try:
+                    current[k] = float(v) if v not in (None, "") else None
+                except (ValueError, TypeError):
+                    current[k] = None
+        proposed = dict(current)
+        for k, v in pending.items():
+            if k in keys:
+                try:
+                    proposed[k] = float(v)
+                except (ValueError, TypeError):
+                    return f"non-numeric proposed value for {k}: {v!r}"
+
+        # Pull recent closed trades (excluding paper, excluding archived)
+        async with async_session_factory() as s:
+            from sqlalchemy import select as _sel
+            q = (_sel(Trade)
+                 .where(Trade.status == "CLOSED")
+                 .where((Trade.is_paper == False) | (Trade.is_paper == None))  # noqa: E712
+                 .where((Trade.archived == False) | (Trade.archived == None))  # noqa: E712
+                 .order_by(Trade.close_time.desc())
+                 .limit(self.REGRESSION_LOOKBACK))
+            rows = (await s.execute(q)).scalars().all()
+        if len(rows) < self.REGRESSION_MIN_SAMPLE:
+            return None  # not enough data to judge
+
+        rr_floor = proposed.get("rm_min_rr_gate") or 1.0
+        rr_target = proposed.get("rr_ratio") or 2.0
+        sl_atr_mult = proposed.get("rm_min_sl_atr_mult") or 1.0
+        tp_atr_mult = proposed.get("rm_max_tp_atr_mult") or 2.0
+        min_sl_pips_proposed = proposed.get("min_sl_pips") or 0
+        floor_pips_proposed = proposed.get("rm_min_sl_pips_floor") or 0
+        friction = 1.5
+
+        rejected = 0
+        for t in rows:
+            entry = float(t.entry_price or 0)
+            sl    = float(t.stop_loss or 0)
+            tp    = float(t.take_profit_1 or 0)
+            sym   = t.symbol or ""
+            if not entry or not sl or not tp:
+                continue
+            pip = 0.01 if "JPY" in sym else (1.0 if sym in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+            sl_pips = abs(entry - sl) / pip
+            tp_pips = abs(entry - tp) / pip
+
+            # Try to recover ATR for that trade from market_context
+            atr_pips = 0
+            try:
+                mc = json.loads(t.market_context or "{}")
+                atr_pips = float(mc.get("atr_pips_h1") or 0)
+            except Exception:
+                pass
+
+            # Reproduce sanity_check's effective_rr formula
+            max_tp1_pips = atr_pips * tp_atr_mult if atr_pips > 0 else 999
+            max_net_rr = (max_tp1_pips - friction) / (sl_pips + friction) if sl_pips > 0 else 0
+            effective_rr = max(rr_floor, min(rr_target, max_net_rr))
+            net_rr = (tp_pips - friction) / (sl_pips + friction) if sl_pips > 0 else 0
+
+            # Min SL floor under proposed config
+            min_required_sl = max(min_sl_pips_proposed, floor_pips_proposed,
+                                   atr_pips * sl_atr_mult * 0.5)
+
+            if sl_pips < min_required_sl - 0.1:
+                rejected += 1
+                continue
+            if max_tp1_pips and tp_pips > max_tp1_pips:
+                rejected += 1
+                continue
+            if net_rr < effective_rr * 0.95:
+                rejected += 1
+                continue
+
+        rate = rejected / len(rows)
+        if rate > self.REGRESSION_MAX_LOSS_RATE:
+            return (f"Regression guard: proposed config would have rejected "
+                    f"{rejected}/{len(rows)} ({rate*100:.0f}%) of recent live "
+                    f"trades — above {self.REGRESSION_MAX_LOSS_RATE*100:.0f}% "
+                    f"limit. Pending: "
+                    f"{ {k:v for k,v in pending.items() if k in keys} }. "
+                    f"Loosen the constraint or wait for evidence.")
+        return None
+
     async def _apply_improvements(self, improvements: list):
         """Apply system config changes proposed by JR — with validation.
         Pre-filter: entries without a valid config_change are counted but
@@ -1973,6 +2086,26 @@ class Orchestrator:
                                       "reason": t_violation})
                 valid = [(k, v, imp) for k, v, imp in valid if k not in self._TEMPORAL_GATE_KEYS]
                 rejected_invalid += len(temporal_pending)
+
+        # 2-ter) Regression guard: replay proposed config against the last
+        #        N real trades. If >50% of them would have been rejected at
+        #        the sanity check stage with the new config, block the
+        #        change. Catches the strangulation pattern that bit prod
+        #        on 2026-04-24/27 (gate climbed 1.2 → 1.5 → 1.7 across
+        #        three consecutive meetings until 0 trades opened).
+        regression_pending = {k: v for k, v, _ in valid if k in self._REGRESSION_GUARD_KEYS}
+        if regression_pending:
+            r_violation = await self._check_regression(regression_pending)
+            if r_violation:
+                logger.warning("Regression guard blocked the meeting batch: %s", r_violation)
+                await self._notify("notify_error",
+                    f"Auto-tuning batch rejected (regression): {r_violation}")
+                await self.broadcast({"type": "config_update_rejected",
+                                      "key": "regression",
+                                      "value": json.dumps(regression_pending),
+                                      "reason": r_violation})
+                valid = [(k, v, imp) for k, v, imp in valid if k not in self._REGRESSION_GUARD_KEYS]
+                rejected_invalid += len(regression_pending)
 
         # 3) Apply what survived.
         async with async_session_factory() as s:
