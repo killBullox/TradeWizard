@@ -1811,6 +1811,99 @@ class Orchestrator:
                     f"Required: tp >= sl * gate * 1.05.")
         return None
 
+    # Keys that gate trade entry by clock time. A change to any of these
+    # must not produce a config where overlap windows cover more than
+    # OVERLAP_KZ_MAX_COVERAGE of any kill zone — otherwise we self-block.
+    _TEMPORAL_GATE_KEYS = frozenset({
+        "overlap_block_enabled", "overlap_windows_utc", "kill_zones",
+    })
+    OVERLAP_KZ_MAX_COVERAGE = 0.50  # 50%
+
+    async def _check_temporal_coverage(self, pending: dict) -> str | None:
+        """Verify that overlap windows do not cover more than 50% of any
+        kill zone after applying `pending`. Returns rejection reason when
+        violated, else None.
+
+        Kill zones are stored in Europe/Rome time, overlap windows in UTC.
+        We project both onto today's date to compute interval intersections,
+        then take the worst-case coverage across all kill zones.
+        """
+        from zoneinfo import ZoneInfo
+        from datetime import time as _t, date as _d
+
+        keys = self._TEMPORAL_GATE_KEYS
+        async with async_session_factory() as s:
+            current = {k: await get_config(k, s) for k in keys}
+
+        # Apply pending values
+        merged = dict(current)
+        for k, v in pending.items():
+            if k in keys:
+                merged[k] = str(v)
+
+        try:
+            block_on = int(float(merged.get("overlap_block_enabled", 0) or 0)) == 1
+        except Exception:
+            block_on = False
+        if not block_on:
+            return None  # block disabled, no coverage to check
+
+        try:
+            ov_windows = json.loads(merged.get("overlap_windows_utc") or "[]")
+        except Exception:
+            return "overlap_windows_utc not valid JSON"
+        try:
+            kz_windows = json.loads(merged.get("kill_zones") or "[]")
+        except Exception:
+            return "kill_zones not valid JSON"
+        if not ov_windows or not kz_windows:
+            return None  # nothing to overlap with
+
+        rome = ZoneInfo("Europe/Rome")
+        utc  = ZoneInfo("UTC")
+        # Use today's date so we pick up the correct DST offset for Rome.
+        ref = datetime.now(utc).date()
+
+        def _to_utc_interval(start_str, end_str, source_tz):
+            sh, sm = map(int, start_str.split(":"))
+            eh, em = map(int, end_str.split(":"))
+            s = datetime.combine(ref, _t(sh, sm), tzinfo=source_tz).astimezone(utc)
+            e = datetime.combine(ref, _t(eh, em), tzinfo=source_tz).astimezone(utc)
+            return s, e
+
+        worst_coverage = 0.0
+        worst_label = ""
+        for kz in kz_windows:
+            try:
+                kz_s, kz_e = _to_utc_interval(kz["start"], kz["end"], rome)
+            except Exception:
+                continue
+            kz_min = (kz_e - kz_s).total_seconds() / 60
+            if kz_min <= 0:
+                continue
+            blocked = 0.0
+            for ov in ov_windows:
+                try:
+                    ov_s, ov_e = _to_utc_interval(ov["start"], ov["end"], utc)
+                except Exception:
+                    continue
+                inter_s = max(ov_s, kz_s)
+                inter_e = min(ov_e, kz_e)
+                if inter_e > inter_s:
+                    blocked += (inter_e - inter_s).total_seconds() / 60
+            cov = blocked / kz_min
+            if cov > worst_coverage:
+                worst_coverage = cov
+                worst_label = f"{kz['start']}-{kz['end']} Rome"
+
+        if worst_coverage > self.OVERLAP_KZ_MAX_COVERAGE:
+            return (f"Temporal self-block detected: overlap_windows_utc would "
+                    f"cover {worst_coverage*100:.0f}% of kill zone "
+                    f"{worst_label} (max allowed {self.OVERLAP_KZ_MAX_COVERAGE*100:.0f}%). "
+                    f"Either reduce overlap_windows_utc, shift them outside the kill zone, "
+                    f"or disable overlap_block_enabled.")
+        return None
+
     async def _apply_improvements(self, improvements: list):
         """Apply system config changes proposed by JR — with validation.
         Pre-filter: entries without a valid config_change are counted but
@@ -1863,6 +1956,23 @@ class Orchestrator:
                 # Drop only the trio entries; non-trio improvements still apply.
                 valid = [(k, v, imp) for k, v, imp in valid if k not in self._RR_IDENTITY_KEYS]
                 rejected_invalid += len(rr_pending)
+
+        # 2-bis) Temporal-coverage guard: prevent overlap windows from
+        #        covering more than half of any kill zone (the bug behind
+        #        the EMERGENCY meeting #132 self-sabotage on 2026-04-26/27).
+        temporal_pending = {k: v for k, v, _ in valid if k in self._TEMPORAL_GATE_KEYS}
+        if temporal_pending:
+            t_violation = await self._check_temporal_coverage(temporal_pending)
+            if t_violation:
+                logger.warning("Temporal guard blocked the meeting batch: %s", t_violation)
+                await self._notify("notify_error",
+                    f"Auto-tuning batch rejected (temporal): {t_violation}")
+                await self.broadcast({"type": "config_update_rejected",
+                                      "key": "temporal_coverage",
+                                      "value": json.dumps(temporal_pending),
+                                      "reason": t_violation})
+                valid = [(k, v, imp) for k, v, imp in valid if k not in self._TEMPORAL_GATE_KEYS]
+                rejected_invalid += len(temporal_pending)
 
         # 3) Apply what survived.
         async with async_session_factory() as s:
