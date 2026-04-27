@@ -1911,24 +1911,67 @@ class Orchestrator:
         "rm_max_tp_atr_mult", "rm_min_sl_atr_mult", "rm_min_rr_gate",
         "rm_min_sl_pips_floor", "min_sl_pips", "rr_ratio",
     })
-    REGRESSION_MAX_LOSS_RATE = 0.50   # if >50% of historical trades would be
-                                       # rejected with the new config, block.
+    REGRESSION_MAX_DELTA    = 0.30   # new config may reject at most 30
+                                       # percentage points more than current
     REGRESSION_MIN_SAMPLE   = 5       # need at least this many recent trades
     REGRESSION_LOOKBACK     = 30      # last N closed trades to replay
 
-    async def _check_regression(self, pending: dict) -> str | None:
-        """Replay the last N closed (non-paper) trades through the sanity-check
-        with the proposed config. If more than REGRESSION_MAX_LOSS_RATE of
-        them would now be rejected at the sanity-check stage, block the
-        change.
+    def _replay_sanity_check(self, trades, cfg) -> int:
+        """Count how many trades from the list would be rejected by the
+        sanity-check formula under config dict `cfg`. Pure function — used
+        by _check_regression for both current and proposed configs."""
+        rr_floor = cfg.get("rm_min_rr_gate") or 1.0
+        rr_target = cfg.get("rr_ratio") or 2.0
+        sl_atr_mult = cfg.get("rm_min_sl_atr_mult") or 1.0
+        tp_atr_mult = cfg.get("rm_max_tp_atr_mult") or 2.0
+        min_sl_pips = cfg.get("min_sl_pips") or 0
+        floor_pips = cfg.get("rm_min_sl_pips_floor") or 0
+        friction = 1.5
 
-        This is the empirical guard the user asked for: 'i parametri nei
-        fatti non devono bloccare i trade'. The math guards (RR identity,
-        temporal) cover structural impossibilities; this one catches
-        gradual strangulation — the config that *technically* satisfies
-        every identity but in practice rejects every real-world setup.
-        """
-        # Build the proposed config: current values + pending overrides
+        rejected = 0
+        for t in trades:
+            entry = float(t.entry_price or 0)
+            sl    = float(t.stop_loss or 0)
+            tp    = float(t.take_profit_1 or 0)
+            sym   = t.symbol or ""
+            if not entry or not sl or not tp:
+                continue
+            pip = 0.01 if "JPY" in sym else (1.0 if sym in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+            sl_pips = abs(entry - sl) / pip
+            tp_pips = abs(entry - tp) / pip
+            atr_pips = 0
+            try:
+                mc = json.loads(t.market_context or "{}")
+                atr_pips = float(mc.get("atr_pips_h1") or 0)
+            except Exception:
+                pass
+            max_tp1_pips = atr_pips * tp_atr_mult if atr_pips > 0 else 999
+            max_net_rr = (max_tp1_pips - friction) / (sl_pips + friction) if sl_pips > 0 else 0
+            effective_rr = max(rr_floor, min(rr_target, max_net_rr))
+            net_rr = (tp_pips - friction) / (sl_pips + friction) if sl_pips > 0 else 0
+            min_required_sl = max(min_sl_pips, floor_pips, atr_pips * sl_atr_mult * 0.5)
+            if sl_pips < min_required_sl - 0.1:
+                rejected += 1; continue
+            if max_tp1_pips and tp_pips > max_tp1_pips:
+                rejected += 1; continue
+            if net_rr < effective_rr * 0.95:
+                rejected += 1; continue
+        return rejected
+
+    async def _check_regression(self, pending: dict) -> str | None:
+        """Compare rejection rate of the proposed config vs the current one
+        on the last N live closed trades. If the delta exceeds
+        REGRESSION_MAX_DELTA, block the change.
+
+        We compare DELTA, not absolute rate, because the sanity-check
+        formula evolves over time — a trade that opened months ago under
+        a softer formula may not pass the current one regardless of
+        config. The guard's job is to catch *new tightening that would
+        starve the system going forward*, not to validate legacy trades.
+
+        This is the empirical guard the user asked for after the
+        2026-04-24/27 strangulation: 'i parametri nei fatti non devono
+        bloccare i trade altrimenti diventa una puttanata.'"""
         keys = self._REGRESSION_GUARD_KEYS
         async with async_session_factory() as s:
             current = {}
@@ -1946,7 +1989,6 @@ class Orchestrator:
                 except (ValueError, TypeError):
                     return f"non-numeric proposed value for {k}: {v!r}"
 
-        # Pull recent closed trades (excluding paper, excluding archived)
         async with async_session_factory() as s:
             from sqlalchemy import select as _sel
             q = (_sel(Trade)
@@ -1957,62 +1999,17 @@ class Orchestrator:
                  .limit(self.REGRESSION_LOOKBACK))
             rows = (await s.execute(q)).scalars().all()
         if len(rows) < self.REGRESSION_MIN_SAMPLE:
-            return None  # not enough data to judge
+            return None
 
-        rr_floor = proposed.get("rm_min_rr_gate") or 1.0
-        rr_target = proposed.get("rr_ratio") or 2.0
-        sl_atr_mult = proposed.get("rm_min_sl_atr_mult") or 1.0
-        tp_atr_mult = proposed.get("rm_max_tp_atr_mult") or 2.0
-        min_sl_pips_proposed = proposed.get("min_sl_pips") or 0
-        floor_pips_proposed = proposed.get("rm_min_sl_pips_floor") or 0
-        friction = 1.5
-
-        rejected = 0
-        for t in rows:
-            entry = float(t.entry_price or 0)
-            sl    = float(t.stop_loss or 0)
-            tp    = float(t.take_profit_1 or 0)
-            sym   = t.symbol or ""
-            if not entry or not sl or not tp:
-                continue
-            pip = 0.01 if "JPY" in sym else (1.0 if sym in ("XAUUSD","US30","NAS100","US500") else 0.0001)
-            sl_pips = abs(entry - sl) / pip
-            tp_pips = abs(entry - tp) / pip
-
-            # Try to recover ATR for that trade from market_context
-            atr_pips = 0
-            try:
-                mc = json.loads(t.market_context or "{}")
-                atr_pips = float(mc.get("atr_pips_h1") or 0)
-            except Exception:
-                pass
-
-            # Reproduce sanity_check's effective_rr formula
-            max_tp1_pips = atr_pips * tp_atr_mult if atr_pips > 0 else 999
-            max_net_rr = (max_tp1_pips - friction) / (sl_pips + friction) if sl_pips > 0 else 0
-            effective_rr = max(rr_floor, min(rr_target, max_net_rr))
-            net_rr = (tp_pips - friction) / (sl_pips + friction) if sl_pips > 0 else 0
-
-            # Min SL floor under proposed config
-            min_required_sl = max(min_sl_pips_proposed, floor_pips_proposed,
-                                   atr_pips * sl_atr_mult * 0.5)
-
-            if sl_pips < min_required_sl - 0.1:
-                rejected += 1
-                continue
-            if max_tp1_pips and tp_pips > max_tp1_pips:
-                rejected += 1
-                continue
-            if net_rr < effective_rr * 0.95:
-                rejected += 1
-                continue
-
-        rate = rejected / len(rows)
-        if rate > self.REGRESSION_MAX_LOSS_RATE:
-            return (f"Regression guard: proposed config would have rejected "
-                    f"{rejected}/{len(rows)} ({rate*100:.0f}%) of recent live "
-                    f"trades — above {self.REGRESSION_MAX_LOSS_RATE*100:.0f}% "
-                    f"limit. Pending: "
+        cur_rej = self._replay_sanity_check(rows, current)
+        new_rej = self._replay_sanity_check(rows, proposed)
+        n = len(rows)
+        delta = (new_rej - cur_rej) / n
+        if delta > self.REGRESSION_MAX_DELTA:
+            return (f"Regression guard: proposed config would reject "
+                    f"{new_rej}/{n} of recent live trades vs {cur_rej}/{n} "
+                    f"under current config (Δ = +{delta*100:.0f}pp, limit "
+                    f"+{self.REGRESSION_MAX_DELTA*100:.0f}pp). Pending: "
                     f"{ {k:v for k,v in pending.items() if k in keys} }. "
                     f"Loosen the constraint or wait for evidence.")
         return None

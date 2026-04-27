@@ -8,29 +8,33 @@ from orchestrator import Orchestrator
 async def main():
     o = Orchestrator()
 
-    # Bad config that strangled prod today (meeting #136 of 2026-04-27 09:14):
+    # Bad config (meeting #136 of today, strangled prod): tightening
+    # gate from 1.2 → 1.7 + adding floor 30 + tp 1.5 should be REJECTED.
     bad = {
         "rm_min_rr_gate": "1.7",
         "rm_min_sl_pips_floor": "30",
         "rm_max_tp_atr_mult": "1.5",
-        "rm_min_sl_atr_mult": "1.5",
     }
     v = await o._check_regression(bad)
-    print("Bad config (today's strangulation):")
+    print("Bad config (delta tightening):")
     print(f"  pending = {bad}")
     print(f"  guard verdict = {'REJECTED -- ' + v if v else 'ACCEPTED'}")
 
-    # Working config (April 24 morning, 10 trades opened):
-    good = {
-        "rm_min_rr_gate": "1.2",
-        "rm_min_sl_pips_floor": "0",
-        "rm_max_tp_atr_mult": "3.0",
-        "rm_min_sl_atr_mult": "1.0",
-        "rr_ratio": "1.3",
+    # Slight loosening — should be ACCEPTED (delta negative or near zero).
+    loosen = {
+        "rm_min_rr_gate": "1.0",
+        "rr_ratio": "1.2",
     }
-    v = await o._check_regression(good)
-    print("\nGood config (apr24 morning):")
-    print(f"  pending = {good}")
+    v = await o._check_regression(loosen)
+    print("\nLoosening config:")
+    print(f"  pending = {loosen}")
+    print(f"  guard verdict = {'REJECTED -- ' + v if v else 'ACCEPTED'}")
+
+    # Same as current — delta = 0, must be ACCEPTED
+    noop = {"rm_min_rr_gate": "1.2"}
+    v = await o._check_regression(noop)
+    print("\nNo-op config:")
+    print(f"  pending = {noop}")
     print(f"  guard verdict = {'REJECTED -- ' + v if v else 'ACCEPTED'}")
 
 asyncio.run(main())
