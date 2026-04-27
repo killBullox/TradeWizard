@@ -139,7 +139,33 @@ including user-convened EMERGENCY meetings.
 - `overlap_block_enabled`  : 0/1. If 1, block new entries during configured
                              session-overlap windows (high-volatility).
                              Default 1.
-- `rr_ratio`, `max_open_trades`, `analysis_interval`: self-evident.
+- `rr_ratio`              : Target RR for Trader's TP placement. Default 2.0.
+                             **LOWER this when you see sanity-check rejections
+                             pattern "Net RR X below required Y" and Y is
+                             roughly equal to current rr_ratio.** Means the
+                             Trader is generating TPs based on ICT structure
+                             that don't reach the configured ratio. Lower to
+                             1.3-1.5 to align with what the structure actually
+                             delivers. The `rm_min_rr_gate` floor still
+                             protects against the worst trades.
+- `max_open_trades`       : Max concurrent ACTIVE trades. Default 4.
+- `analysis_interval`     : Seconds between analysis cycles. Default 900.
+
+### Sanity-check rejection patterns → which key to tune:
+
+The sanity check sits between RM-approved trades and execution. Its
+rejection messages encode which knob to turn:
+
+| Reject message pattern | Likely cause | Tunable to change |
+|---|---|---|
+| "Net RR X below required Y" with Y ≈ rr_ratio | Trader TP < target | LOWER `rr_ratio` (e.g. 2.0 → 1.3) |
+| "Net RR X below required Y" with Y > ATR-limited max RR | Math impossible at current ATR | LOWER `min_sl_pips` (e.g. 20 → 15) so floor doesn't widen SL too much when ATR is small |
+| "SL too tight: X pips (min Y)" | Setup wants tight SL | If `sl_accommodation_enabled=1` widening should kick in; if not, lower `min_sl_pips` |
+| "TP1 too far for intraday" | TP exceeds ATR × rm_max_tp_atr_mult | RAISE `rm_max_tp_atr_mult` |
+| "Cannot achieve min RR X within day trading limit" | RR floor unreachable | RAISE `rm_max_tp_atr_mult` OR LOWER `rm_min_rr_gate` |
+
+When you see ≥5 sanity-check rejections of the same pattern in a window,
+that's the auto-tuning trigger. Pick the matching key from this table.
 
 JSON-valued keys (must be emitted as a JSON string in `new_value`):
 - `overlap_windows_utc`    : Array of {"start":"HH:MM","end":"HH:MM"} UTC
