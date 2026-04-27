@@ -162,6 +162,30 @@ capital contract): `max_risk_usd`, `risk_percent`, `paper_mode`,
 `mt5_login`, `mt5_password`, `mt5_server`, `mt5_bridge_url`,
 `model_mode`.
 
+### ⚠️ MANDATORY RR-feasibility identity (sanity-check law):
+
+Before proposing ANY change to `rm_max_tp_atr_mult`, `rm_min_sl_atr_mult`,
+or `rm_min_rr_gate`, verify the resulting trio satisfies:
+
+    rm_max_tp_atr_mult / rm_min_sl_atr_mult >= rm_min_rr_gate * 1.05
+
+Otherwise the sanity_check rejects 100% of trades by construction
+(observed empirically: lab oscillated between 1.5/2.2/1.5, 2.5/2.2/1.5,
+1.8/2.2/1.5 — all violated the identity, all produced zero trades).
+
+The runtime guards this and rejects the entire batch when violated, so
+proposing a violating combination is wasted output. Always reason about
+the trio together. Examples that REMAIN VALID:
+
+  rm_max_tp_atr_mult=3.0, rm_min_sl_atr_mult=1.5, rm_min_rr_gate=1.5  -> 2.00 ≥ 1.575 ✓
+  rm_max_tp_atr_mult=2.5, rm_min_sl_atr_mult=1.5, rm_min_rr_gate=1.5  -> 1.67 ≥ 1.575 ✓
+  rm_max_tp_atr_mult=2.0, rm_min_sl_atr_mult=1.0, rm_min_rr_gate=1.7  -> 2.00 ≥ 1.785 ✓
+
+Examples that VIOLATE and will be REJECTED:
+
+  rm_max_tp_atr_mult=1.8, rm_min_sl_atr_mult=2.2, rm_min_rr_gate=1.5  -> 0.82 < 1.575 ✗
+  rm_max_tp_atr_mult=2.5, rm_min_sl_atr_mult=1.5, rm_min_rr_gate=1.7  -> 1.67 < 1.785 ✗
+
 ### Required shape of each system_improvement
 
 ```

@@ -247,7 +247,7 @@ class Orchestrator:
         cannot be changed by the meeting — the capital-at-risk contract
         is invariant by design.
         """
-        INTERVAL_SEC = 4 * 3600  # 4 hours
+        INTERVAL_SEC = 30 * 60    # 30 minutes — was 4h, too slow to react
         STUCK_THRESHOLD = 3       # <3 trades (opened+closed) in last window
         # Brief startup delay so boot activity doesn't trigger immediately
         await asyncio.sleep(60)
@@ -1768,39 +1768,110 @@ class Orchestrator:
         # We surface this loudly so it's obvious the proposal had zero effect.
         return f"Key '{key}' is not a recognized tunable parameter (whitelist only). If you want per-symbol/per-setup logic, emit a proposed_rule instead."
 
+    # Keys that participate in the RR-feasibility identity. Any change to
+    # any of these must keep TP_max / SL_min >= RR_gate, otherwise the
+    # sanity check rejects 100% of trades by construction.
+    _RR_IDENTITY_KEYS = frozenset({
+        "rm_max_tp_atr_mult", "rm_min_sl_atr_mult", "rm_min_rr_gate",
+    })
+
+    async def _check_rr_identity(self, pending: dict) -> str | None:
+        """Verify that after applying `pending` overrides the identity
+        TP_max / SL_min >= RR_gate still holds. Returns a rejection reason
+        string when violated, else None.
+
+        This is the guard that prevents the auto-tuner from oscillating
+        into mathematically impossible configurations like
+        rm_max_tp_atr_mult=1.8 / rm_min_sl_atr_mult=2.2 / rm_min_rr_gate=1.5
+        which silently rejects 100% of trades at the sanity_check stage.
+        """
+        keys = ("rm_max_tp_atr_mult", "rm_min_sl_atr_mult", "rm_min_rr_gate")
+        async with async_session_factory() as s:
+            current = {k: float((await get_config(k, s)) or 0.0) for k in keys}
+        proposed = dict(current)
+        for k, v in pending.items():
+            if k in keys:
+                try:
+                    proposed[k] = float(v)
+                except (ValueError, TypeError):
+                    return f"non-numeric proposed value for {k}: {v!r}"
+        sl = proposed["rm_min_sl_atr_mult"]
+        tp = proposed["rm_max_tp_atr_mult"]
+        gate = proposed["rm_min_rr_gate"]
+        if sl <= 0:
+            return f"rm_min_sl_atr_mult must be > 0 (got {sl})"
+        max_rr = tp / sl
+        # Add a small safety margin so the sanity check (which subtracts
+        # friction pips from TP and adds them to SL) doesn't fail at the
+        # boundary. 5% headroom is enough to absorb friction at 20-pip SL.
+        if max_rr < gate * 1.05:
+            return (f"RR identity broken: TP_max/SL_min = {tp}/{sl} = "
+                    f"{max_rr:.2f} < gate*1.05 = {gate*1.05:.2f} — "
+                    f"sanity check would reject 100% of trades. "
+                    f"Required: tp >= sl * gate * 1.05.")
+        return None
+
     async def _apply_improvements(self, improvements: list):
         """Apply system config changes proposed by JR — with validation.
         Pre-filter: entries without a valid config_change are counted but
         discarded without noise. We log a single summary line per meeting
         so it's clear how many of the proposed improvements actually took
-        effect (vs how many were narrative-only)."""
+        effect (vs how many were narrative-only).
+
+        RR-identity guard: when a proposal touches any of the three keys
+        that participate in TP_max/SL_min >= RR_gate, we evaluate the
+        whole batch as a unit — if the resulting config would create a
+        mathematically impossible regime, the entire batch is rejected
+        and the user is notified. This prevents auto-tuning oscillation
+        into 100%-reject territory.
+        """
         applied = 0
         discarded_no_change = 0
         rejected_invalid = 0
+
+        # 1) Pre-validate per-key (whitelist + JSON/numeric typing).
+        valid: list[tuple[str, str, dict]] = []
+        for imp in improvements:
+            change = imp.get("config_change") or {}
+            if not change or not change.get("key") or change.get("new_value") is None:
+                discarded_no_change += 1
+                continue
+            key = change["key"]
+            val = str(change["new_value"])
+            rejection = self._validate_config_change(key, val)
+            if rejection:
+                rejected_invalid += 1
+                logger.warning("Improvement REJECTED: %s=%s — %s", key, val[:80], rejection)
+                await self.broadcast({"type": "config_update_rejected",
+                                      "key": key, "value": val[:100], "reason": rejection})
+                continue
+            valid.append((key, val, imp))
+
+        # 2) RR-identity guard: if any of the batch touches the trio,
+        #    simulate the post-change state and refuse the whole batch
+        #    when the sanity check would block 100% of trades.
+        rr_pending = {k: v for k, v, _ in valid if k in self._RR_IDENTITY_KEYS}
+        if rr_pending:
+            id_violation = await self._check_rr_identity(rr_pending)
+            if id_violation:
+                logger.warning("RR-identity guard blocked the meeting batch: %s", id_violation)
+                await self._notify("notify_error",
+                    f"Auto-tuning batch rejected (RR identity): {id_violation}")
+                await self.broadcast({"type": "config_update_rejected",
+                                      "key": "rr_identity", "value": json.dumps(rr_pending),
+                                      "reason": id_violation})
+                # Drop only the trio entries; non-trio improvements still apply.
+                valid = [(k, v, imp) for k, v, imp in valid if k not in self._RR_IDENTITY_KEYS]
+                rejected_invalid += len(rr_pending)
+
+        # 3) Apply what survived.
         async with async_session_factory() as s:
-            for imp in improvements:
-                change = imp.get("config_change") or {}
-                if not change or not change.get("key") or change.get("new_value") is None:
-                    discarded_no_change += 1
-                    continue
-                key = change["key"]
-                val = str(change["new_value"])
-                rejection = self._validate_config_change(key, val)
-                if rejection:
-                    rejected_invalid += 1
-                    logger.warning("Improvement REJECTED: %s=%s — %s", key, val[:80], rejection)
-                    await self.broadcast({
-                        "type": "config_update_rejected",
-                        "key": key, "value": val[:100], "reason": rejection,
-                    })
-                    continue
+            for key, val, imp in valid:
                 await set_config(key, val, s)
                 applied += 1
-                await self.broadcast({
-                    "type": "config_updated",
-                    "key": key, "value": val,
-                    "reason": imp.get("improvement", ""),
-                })
+                await self.broadcast({"type": "config_updated",
+                                      "key": key, "value": val,
+                                      "reason": imp.get("improvement", "")})
                 logger.info("System improvement applied: %s = %s", key, val)
         logger.info(
             "Meeting improvements summary: %d applied, %d narrative-only discarded, %d rejected",
