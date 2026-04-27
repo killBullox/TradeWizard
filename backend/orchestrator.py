@@ -1911,15 +1911,21 @@ class Orchestrator:
         "rm_max_tp_atr_mult", "rm_min_sl_atr_mult", "rm_min_rr_gate",
         "rm_min_sl_pips_floor", "min_sl_pips", "rr_ratio",
     })
-    REGRESSION_MAX_DELTA    = 0.30   # new config may reject at most 30
-                                       # percentage points more than current
-    REGRESSION_MIN_SAMPLE   = 5       # need at least this many recent trades
-    REGRESSION_LOOKBACK     = 30      # last N closed trades to replay
+    # Synthetic ATR regimes (in pips) used by the regression guard. They
+    # cover from very calm (Asian session, JPY pairs at midnight) to very
+    # volatile (XAU/news). At least half of these must remain "tradable"
+    # under the proposed config — otherwise the system would only ever
+    # accept trades in narrow market conditions.
+    REGRESSION_ATR_REGIMES = (5, 8, 12, 15, 20, 30)
+    REGRESSION_MIN_TRADABLE = 0.50  # at least 50% of regimes must be tradable
 
-    def _replay_sanity_check(self, trades, cfg) -> int:
-        """Count how many trades from the list would be rejected by the
-        sanity-check formula under config dict `cfg`. Pure function — used
-        by _check_regression for both current and proposed configs."""
+    @staticmethod
+    def _atr_regime_tradable(atr_pips: float, cfg: dict) -> bool:
+        """Return True if there exists an (sl_pips, tp_pips) pair satisfying
+        the sanity-check under the given config and ATR. We check the most
+        favourable case: SL at the minimum allowed by the config, TP at
+        the maximum allowed. If even that combination fails, no real-world
+        setup at this ATR could pass — the regime is not tradable."""
         rr_floor = cfg.get("rm_min_rr_gate") or 1.0
         rr_target = cfg.get("rr_ratio") or 2.0
         sl_atr_mult = cfg.get("rm_min_sl_atr_mult") or 1.0
@@ -1928,46 +1934,27 @@ class Orchestrator:
         floor_pips = cfg.get("rm_min_sl_pips_floor") or 0
         friction = 1.5
 
-        rejected = 0
-        for t in trades:
-            entry = float(t.entry_price or 0)
-            sl    = float(t.stop_loss or 0)
-            tp    = float(t.take_profit_1 or 0)
-            sym   = t.symbol or ""
-            if not entry or not sl or not tp:
-                continue
-            pip = 0.01 if "JPY" in sym else (1.0 if sym in ("XAUUSD","US30","NAS100","US500") else 0.0001)
-            sl_pips = abs(entry - sl) / pip
-            tp_pips = abs(entry - tp) / pip
-            atr_pips = 0
-            try:
-                mc = json.loads(t.market_context or "{}")
-                atr_pips = float(mc.get("atr_pips_h1") or 0)
-            except Exception:
-                pass
-            max_tp1_pips = atr_pips * tp_atr_mult if atr_pips > 0 else 999
-            max_net_rr = (max_tp1_pips - friction) / (sl_pips + friction) if sl_pips > 0 else 0
-            effective_rr = max(rr_floor, min(rr_target, max_net_rr))
-            net_rr = (tp_pips - friction) / (sl_pips + friction) if sl_pips > 0 else 0
-            min_required_sl = max(min_sl_pips, floor_pips, atr_pips * sl_atr_mult * 0.5)
-            if sl_pips < min_required_sl - 0.1:
-                rejected += 1; continue
-            if max_tp1_pips and tp_pips > max_tp1_pips:
-                rejected += 1; continue
-            if net_rr < effective_rr * 0.95:
-                rejected += 1; continue
-        return rejected
+        sl_min = max(min_sl_pips, floor_pips, atr_pips * sl_atr_mult * 0.5)
+        tp_max = atr_pips * tp_atr_mult
+        if sl_min <= 0 or tp_max <= 0:
+            return False
+        max_net_rr = (tp_max - friction) / (sl_min + friction)
+        effective_rr = max(rr_floor, min(rr_target, max_net_rr))
+        return max_net_rr >= effective_rr * 0.95
 
     async def _check_regression(self, pending: dict) -> str | None:
-        """Compare rejection rate of the proposed config vs the current one
-        on the last N live closed trades. If the delta exceeds
-        REGRESSION_MAX_DELTA, block the change.
+        """Synthetic feasibility check: simulate a set of representative ATR
+        regimes (calm Asian session through volatile XAU/news) and verify
+        the proposed config leaves at least REGRESSION_MIN_TRADABLE of
+        them tradable. A config that is technically valid (RR identity
+        ok, no temporal clash) but which leaves only edge-case ATR
+        regimes tradable will be rejected.
 
-        We compare DELTA, not absolute rate, because the sanity-check
-        formula evolves over time — a trade that opened months ago under
-        a softer formula may not pass the current one regardless of
-        config. The guard's job is to catch *new tightening that would
-        starve the system going forward*, not to validate legacy trades.
+        Why synthetic and not historical: our own sanity-check formula
+        has evolved over the months (the friction penalty in particular),
+        so legacy trades opened under a different formula are not a fair
+        baseline. The synthetic regimes capture what a config *would
+        permit going forward*, regardless of past formulas.
 
         This is the empirical guard the user asked for after the
         2026-04-24/27 strangulation: 'i parametri nei fatti non devono
@@ -1989,29 +1976,19 @@ class Orchestrator:
                 except (ValueError, TypeError):
                     return f"non-numeric proposed value for {k}: {v!r}"
 
-        async with async_session_factory() as s:
-            from sqlalchemy import select as _sel
-            q = (_sel(Trade)
-                 .where(Trade.status == "CLOSED")
-                 .where((Trade.is_paper == False) | (Trade.is_paper == None))  # noqa: E712
-                 .where((Trade.archived == False) | (Trade.archived == None))  # noqa: E712
-                 .order_by(Trade.close_time.desc())
-                 .limit(self.REGRESSION_LOOKBACK))
-            rows = (await s.execute(q)).scalars().all()
-        if len(rows) < self.REGRESSION_MIN_SAMPLE:
-            return None
-
-        cur_rej = self._replay_sanity_check(rows, current)
-        new_rej = self._replay_sanity_check(rows, proposed)
-        n = len(rows)
-        delta = (new_rej - cur_rej) / n
-        if delta > self.REGRESSION_MAX_DELTA:
-            return (f"Regression guard: proposed config would reject "
-                    f"{new_rej}/{n} of recent live trades vs {cur_rej}/{n} "
-                    f"under current config (Δ = +{delta*100:.0f}pp, limit "
-                    f"+{self.REGRESSION_MAX_DELTA*100:.0f}pp). Pending: "
+        regimes = self.REGRESSION_ATR_REGIMES
+        tradable = [a for a in regimes if self._atr_regime_tradable(a, proposed)]
+        rate = len(tradable) / len(regimes)
+        if rate < self.REGRESSION_MIN_TRADABLE:
+            blocked = [a for a in regimes if a not in tradable]
+            return (f"Regression guard: proposed config would only allow "
+                    f"trades in {len(tradable)}/{len(regimes)} ATR regimes "
+                    f"(tradable={tradable} pip-ATR; blocked={blocked} pip-ATR). "
+                    f"Min required: {self.REGRESSION_MIN_TRADABLE*100:.0f}% of "
+                    f"regimes. Pending: "
                     f"{ {k:v for k,v in pending.items() if k in keys} }. "
-                    f"Loosen the constraint or wait for evidence.")
+                    f"This would strangle the system in normal market "
+                    f"conditions — loosen TP cap or floors.")
         return None
 
     async def _apply_improvements(self, improvements: list):

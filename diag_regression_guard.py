@@ -12,13 +12,10 @@ async def main():
     keys = list(Orchestrator._REGRESSION_GUARD_KEYS)
     async with async_session_factory() as s:
         current = {k: float(await get_config(k, s) or 0) for k in keys}
-        rows = (await s.execute(
-            select(Trade).where(Trade.status == "CLOSED")
-            .order_by(Trade.close_time.desc()).limit(30)
-        )).scalars().all()
     print(f"Current config: {current}")
-    cur_rej = o._replay_sanity_check(rows, current)
-    print(f"Current config would reject {cur_rej}/{len(rows)} of last 30 closed trades\n")
+    regimes = Orchestrator.REGRESSION_ATR_REGIMES
+    tradable_now = [a for a in regimes if Orchestrator._atr_regime_tradable(a, current)]
+    print(f"Current tradable ATR regimes: {tradable_now}/{regimes}\n")
 
     # Bad config (meeting #136 of today, strangled prod): tightening
     # gate from 1.2 → 1.7 + adding floor 30 + tp 1.5 should be REJECTED.
