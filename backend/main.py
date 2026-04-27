@@ -150,9 +150,14 @@ _bridge_watchdog_stop = False
 
 
 def _spawn_bridge():
-    """Spawn (or respawn) the MT5 bridge subprocess."""
+    """Spawn (or respawn) the MT5 bridge subprocess. Skips spawn when an
+    external healthy bridge already owns :5555 — otherwise our Popen would
+    die instantly with bind error and the watchdog would loop."""
     global _bridge_proc
     import subprocess
+    if _bridge_alive_externally():
+        logger.info("Bridge spawn skipped — external healthy bridge already on :5555")
+        return
     bridge_script = os.path.join(os.path.dirname(__file__), "services", "mt5_bridge_server.py")
     _bridge_log = open(os.path.join(_log_dir, "mt5_bridge.log"), "a", encoding="utf-8")
     _bridge_proc = subprocess.Popen(
@@ -163,14 +168,43 @@ def _spawn_bridge():
     logger.info("MT5 bridge subprocess started (PID %d)", _bridge_proc.pid)
 
 
+def _bridge_alive_externally() -> bool:
+    """Return True if some other process is already serving a healthy bridge
+    on :5555 (connected=true, account!=null). When this is the case we MUST
+    NOT respawn — our subprocess would die instantly with Errno 10048
+    (address in use) and loop forever, starving the analysis cycle."""
+    import urllib.request, json as _json
+    try:
+        with urllib.request.urlopen("http://localhost:5555/health", timeout=3) as r:
+            d = _json.loads(r.read().decode("utf-8"))
+            return bool(d.get("connected")) and d.get("account") not in (None, 0, "")
+    except Exception:
+        return False
+
+
 def _bridge_watchdog_loop():
     """Respawn the bridge if it exits. The bridge commits suicide (os._exit 1)
-    when its IPC pipe is wedged beyond recovery (4 failed order_send retries)."""
+    when its IPC pipe is wedged beyond recovery (4 failed order_send retries).
+
+    Important: if an external bridge already owns port 5555 and reports
+    `connected=true`, we treat the work as done and back off — otherwise we
+    enter a tight respawn loop where every Popen dies on bind failure."""
     import time
     while not _bridge_watchdog_stop:
         time.sleep(3)
         if _bridge_proc is not None and _bridge_proc.poll() is not None:
             code = _bridge_proc.returncode
+            if _bridge_alive_externally():
+                # Some other process owns :5555 and it's healthy. Stop trying
+                # to bind; just clear our handle so /api/health falls back
+                # to the bridge-reachability check.
+                logger.info("MT5 bridge exited (code %s) but external healthy "
+                            "bridge already serves :5555 — backing off", code)
+                # Sleep longer between checks while external bridge holds.
+                # If THAT one dies later, we'll spawn ourselves on the next
+                # iteration where _bridge_alive_externally() returns False.
+                time.sleep(27)
+                continue
             logger.warning("MT5 bridge exited with code %s — respawning", code)
             try:
                 _spawn_bridge()
