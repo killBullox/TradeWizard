@@ -61,7 +61,12 @@ async def main():
                 if cc.get("key") and cc.get("new_value") is not None:
                     applied.append(f"{cc['key']}={cc['new_value']}")
             if applied:
-                print(f"  Meeting #{me.id} {str(me.created_at)[:16]} {me.meeting_type:18s} -> {', '.join(applied)}")
+                # Solo i tunable rilevanti — niente rumore
+                relevant = [a for a in applied if any(k in a for k in
+                    ('rm_min_rr_gate','rm_min_sl_atr_mult','rm_max_tp_atr_mult','min_sl_pips','rr_ratio'))]
+                if relevant:
+                    out = " ".join(relevant)
+                    print(f"  Meeting #{me.id} {str(me.created_at)[:16]} {me.meeting_type:18s} -> {out.encode('ascii','replace').decode('ascii')}")
 
 
 asyncio.run(main())
