@@ -1811,12 +1811,41 @@ function _btDateRange() {
   };
 }
 
+// Symbols available for backtest (kept in sync with the chip rendering)
+const _BT_SYMBOLS = ['EURUSD','GBPUSD','USDJPY','XAUUSD','USDCHF','AUDUSD','GBPJPY','NZDUSD','USDCAD'];
+
+function _renderBtSymbols() {
+  const row = document.getElementById('bt-symbols-row');
+  if (!row) return;
+  // Insert chips before the All/None buttons
+  const allBtn = document.getElementById('bt-symbols-all');
+  for (const sym of _BT_SYMBOLS) {
+    if (document.getElementById('bt-sym-chk-' + sym)) continue;
+    const lbl = document.createElement('label');
+    lbl.className = 'bt-symbol-chip';
+    lbl.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border:1px solid var(--border);border-radius:14px;cursor:pointer;font-size:0.8rem;user-select:none';
+    lbl.innerHTML = `<input type="checkbox" id="bt-sym-chk-${sym}" class="bt-sym-chk" value="${sym}" ${sym === 'EURUSD' ? 'checked' : ''} style="margin:0">${sym}`;
+    row.insertBefore(lbl, allBtn);
+  }
+  document.getElementById('bt-symbols-all')?.addEventListener('click',
+    () => document.querySelectorAll('.bt-sym-chk').forEach(el => el.checked = true));
+  document.getElementById('bt-symbols-none')?.addEventListener('click',
+    () => document.querySelectorAll('.bt-sym-chk').forEach(el => el.checked = false));
+}
+_renderBtSymbols();
+
 async function runBacktest() {
   const { bars, date_from, date_to } = _btDateRange();
   const maxRiskVal    = document.getElementById('bt-max-risk-usd')?.value;
   const checkedSetups = [...document.querySelectorAll('.bt-setup-chk:checked')].map(el => el.value);
-  const payload = {
-    symbol:          document.getElementById('bt-symbol')?.value  || 'EURUSD',
+  const symbols       = [...document.querySelectorAll('.bt-sym-chk:checked')].map(el => el.value);
+
+  if (symbols.length === 0) {
+    setBtStatus('error', '❌ Seleziona almeno un simbolo');
+    return;
+  }
+
+  const payloadBase = {
     timeframe:       document.getElementById('bt-tf')?.value      || 'H1',
     strategy:        document.getElementById('bt-strategy')?.value || 'Mixed',
     bars,
@@ -1829,21 +1858,53 @@ async function runBacktest() {
     enabled_setups:  checkedSetups.length === document.querySelectorAll('.bt-setup-chk').length ? null : checkedSetups,
   };
 
-  setBtStatus('running', '⏳ Running…');
   document.getElementById('bt-results').style.display = 'none';
+  clearInterval(btPollTimer);
 
-  try {
-    const resp = await fetchJSON('/api/backtest/run', {
-      method: 'POST',
-      body:   JSON.stringify(payload),
-    });
-    currentBtRunId = resp.run_id;
-    // Poll until DONE
-    clearInterval(btPollTimer);
-    btPollTimer = setInterval(() => pollBtResult(currentBtRunId), 1500);
-  } catch (e) {
-    setBtStatus('error', '❌ ' + e.message);
+  // Run sequentially. Each run is launched, polled to completion, then the
+  // next symbol kicks in. The user sees the latest result in the panel and
+  // the full set in the history table.
+  const total = symbols.length;
+  for (let i = 0; i < symbols.length; i++) {
+    const sym = symbols[i];
+    setBtStatus('running', `⏳ ${i+1}/${total} — Running ${sym}…`);
+    try {
+      const resp = await fetchJSON('/api/backtest/run', {
+        method: 'POST',
+        body:   JSON.stringify({ ...payloadBase, symbol: sym }),
+      });
+      currentBtRunId = resp.run_id;
+      // Poll until done (synchronous-style with await on a promise wrapper)
+      await new Promise((resolve) => {
+        const tick = async () => {
+          try {
+            const run = await fetchJSON(`/api/backtest/${resp.run_id}`);
+            if (run.status === 'DONE') {
+              setBtStatus('ok', `✅ ${i+1}/${total} ${sym} — ${run.total_trades} trades`);
+              renderBtResults(run);
+              refreshBtHistory();
+              resolve();
+            } else if (run.status === 'FAILED') {
+              setBtStatus('error', `❌ ${sym}: ${run.error || 'Unknown error'}`);
+              resolve();
+            } else if (run.status === 'UPDATING_CACHE') {
+              setBtStatus('warn', `⏳ ${i+1}/${total} ${sym} — aggiornamento cache…`);
+              setTimeout(tick, 1500);
+            } else {
+              setTimeout(tick, 1500);
+            }
+          } catch (e) {
+            setBtStatus('error', `❌ Polling error on ${sym}`);
+            resolve();
+          }
+        };
+        tick();
+      });
+    } catch (e) {
+      setBtStatus('error', `❌ ${sym}: ${e.message}`);
+    }
   }
+  setBtStatus('ok', `✅ ${total} simbol${total > 1 ? 'i' : 'o'} completati — vedi history sotto`);
 }
 
 async function pollBtResult(runId) {

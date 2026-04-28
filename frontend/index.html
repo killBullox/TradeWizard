@@ -577,13 +577,19 @@
         <div class="card">
           <div class="card-header"><h3>🔬 Run Backtest</h3></div>
           <div class="bt-form-grid">
-            <div class="form-group">
-              <label>Symbol</label>
-              <select id="bt-symbol" class="form-input">
-                <option>EURUSD</option><option>GBPUSD</option><option>USDJPY</option>
-                <option>XAUUSD</option><option>USDCHF</option><option>AUDUSD</option>
-                <option>GBPJPY</option><option>NZDUSD</option>
-              </select>
+            <div class="form-group" style="grid-column: span 2">
+              <label>Symbols
+                <span style="font-size:0.7rem;color:var(--text-muted);font-weight:normal">
+                  (selezione multipla — 1 backtest per simbolo)
+                </span>
+              </label>
+              <div id="bt-symbols-row" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+                <!-- chips iniettati da JS — _BT_SYMBOLS -->
+                <button type="button" class="btn btn-ghost btn-sm" id="bt-symbols-all"
+                        style="padding:4px 8px;font-size:0.75rem">All</button>
+                <button type="button" class="btn btn-ghost btn-sm" id="bt-symbols-none"
+                        style="padding:4px 8px;font-size:0.75rem">None</button>
+              </div>
             </div>
             <div class="form-group">
               <label>Timeframe</label>
