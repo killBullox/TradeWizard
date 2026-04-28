@@ -665,13 +665,19 @@
 
         <!-- Results stats -->
         <div id="bt-results" style="display:none">
-          <!-- Result-side setup filter (populated dynamically) -->
+          <!-- Result-side filters (populated dynamically) -->
           <div id="bt-result-filter" class="card" style="display:none;margin-bottom:12px">
-            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-              <span style="font-size:0.78rem;font-weight:600;color:var(--text-muted);white-space:nowrap">FILTER RESULTS:</span>
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+              <span style="font-size:0.78rem;font-weight:600;color:var(--text-muted);white-space:nowrap">SETUPS:</span>
               <div class="setup-checks" id="bt-result-filter-checks"></div>
               <button class="btn btn-ghost btn-sm" id="btn-bt-res-all">All</button>
               <button class="btn btn-ghost btn-sm" id="btn-bt-res-none">None</button>
+            </div>
+            <div id="bt-result-symfilter-row" style="display:none;gap:12px;align-items:center;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:8px">
+              <span style="font-size:0.78rem;font-weight:600;color:var(--text-muted);white-space:nowrap">SYMBOLS:</span>
+              <div id="bt-result-symfilter-checks" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+              <button class="btn btn-ghost btn-sm" id="btn-bt-symres-all">All</button>
+              <button class="btn btn-ghost btn-sm" id="btn-bt-symres-none">None</button>
             </div>
           </div>
 

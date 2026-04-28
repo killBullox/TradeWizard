@@ -1103,7 +1103,15 @@ async def refresh_news():
 @app.post("/api/backtest/run")
 async def backtest_run(data: dict):
     try:
-        symbol       = data.get("symbol", "EURUSD").upper()
+        # Accept either `symbols` (list) or `symbol` (single string, legacy)
+        symbols_in = data.get("symbols")
+        if symbols_in:
+            symbols = [str(s).upper().strip() for s in symbols_in if s]
+        else:
+            symbols = [str(data.get("symbol", "EURUSD")).upper().strip()]
+        if not symbols:
+            raise HTTPException(400, "symbols is empty")
+
         timeframe    = data.get("timeframe", "H1")
         strategy     = data.get("strategy", "Mixed")
         bars         = int(data.get("bars", 500))
@@ -1111,27 +1119,28 @@ async def backtest_run(data: dict):
         rr_ratio     = float(data.get("rr_ratio", 2.0))
         balance      = float(data.get("initial_balance", 10000.0))
         max_risk_usd    = float(data["max_risk_usd"]) if data.get("max_risk_usd") else None
-        enabled_setups  = data.get("enabled_setups") or None  # list or None
-        date_from       = data.get("date_from") or None       # ISO date string e.g. "2025-01-01"
+        enabled_setups  = data.get("enabled_setups") or None
+        date_from       = data.get("date_from") or None
         date_to         = data.get("date_to")   or None
 
-        valid_tf = {"M5","M15","M30","H1","H4","D1"}
+        valid_tf = {"M1","M5","M15","M30","H1","H4","D1"}
         valid_st = {"FVG","OrderBlock","Liquidity","Mixed"}
         if timeframe not in valid_tf:
             raise HTTPException(400, f"timeframe must be one of {valid_tf}")
         if strategy not in valid_st:
             raise HTTPException(400, f"strategy must be one of {valid_st}")
 
-        # Read data source config from DB
         async with async_session_factory() as s:
             oanda_key      = await get_config("oanda_api_key", s) or ""
             oanda_practice = (await get_config("oanda_practice", s) or "true") != "false"
             mt5_bridge_url = await get_config("mt5_bridge_url", s) or ""
 
-        # Create DB record
+        # The run record's `symbol` column stores comma-joined symbols when
+        # multi. Single-symbol runs still look identical to the old shape.
+        symbol_label = ",".join(symbols)
         async with async_session_factory() as s:
             run = BacktestRun(
-                symbol=symbol, timeframe=timeframe, strategy=strategy,
+                symbol=symbol_label, timeframe=timeframe, strategy=strategy,
                 bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
             )
             s.add(run)
@@ -1139,14 +1148,13 @@ async def backtest_run(data: dict):
             await s.refresh(run)
             run_id = run.id
 
-        # Execute in background so the HTTP call returns quickly
-        asyncio.create_task(_exec_backtest(
-            run_id, symbol, timeframe, strategy, bars,
+        asyncio.create_task(_exec_backtest_multi(
+            run_id, symbols, timeframe, strategy, bars,
             risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups,
             oanda_key, oanda_practice, mt5_bridge_url,
             date_from=date_from, date_to=date_to,
         ))
-        return {"run_id": run_id, "status": "RUNNING"}
+        return {"run_id": run_id, "status": "RUNNING", "symbols": symbols}
     except HTTPException:
         raise
     except Exception as exc:
@@ -1178,42 +1186,95 @@ async def _maybe_auto_update_cache(run_id, symbol, timeframe, oanda_key, oanda_p
         logger.warning("Auto-update cache skipped (%s) — continuing with existing data", exc)
 
 
-async def _exec_backtest(
-    run_id, symbol, timeframe, strategy, bars,
+async def _exec_backtest_multi(
+    run_id, symbols, timeframe, strategy, bars,
     risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None,
     oanda_api_key="", oanda_practice=True, mt5_bridge_url="",
     date_from=None, date_to=None,
 ):
+    """Run one backtest per symbol and aggregate trades/equity into a
+    single BacktestRun row. Each trade keeps its own `symbol` field so
+    the frontend can filter by symbol just like it filters by setup.
+    """
     try:
-        # Auto-refresh cache if stale before running
-        await _maybe_auto_update_cache(run_id, symbol, timeframe, oanda_api_key, oanda_practice, mt5_bridge_url)
-        result = await run_backtest(
-            symbol=symbol, timeframe=timeframe, strategy=strategy,
-            bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
-            initial_balance=balance, max_risk_usd=max_risk_usd,
-            enabled_setups=enabled_setups, date_from=date_from, date_to=date_to,
-            oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
-            mt5_bridge_url=mt5_bridge_url,
-        )
+        all_trades: list[dict] = []
+        warnings: list[str] = []
+        for sym in symbols:
+            await _maybe_auto_update_cache(run_id, sym, timeframe, oanda_api_key, oanda_practice, mt5_bridge_url)
+            try:
+                res = await run_backtest(
+                    symbol=sym, timeframe=timeframe, strategy=strategy,
+                    bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
+                    initial_balance=balance, max_risk_usd=max_risk_usd,
+                    enabled_setups=enabled_setups, date_from=date_from, date_to=date_to,
+                    oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
+                    mt5_bridge_url=mt5_bridge_url,
+                )
+            except Exception as exc:
+                logger.warning("Backtest %s on %s failed: %s", run_id, sym, exc)
+                warnings.append(f"{sym}: {exc}")
+                continue
+            for t in res.trades:
+                d = t.__dict__.copy() if hasattr(t, "__dict__") else dict(t)
+                d.setdefault("symbol", sym)
+                all_trades.append(d)
+            if res.data_warning:
+                warnings.append(f"{sym}: {res.data_warning}")
+
+        # Sort trades by exit time so the aggregated equity curve makes
+        # chronological sense across symbols.
+        def _sort_key(t):
+            return t.get("exit_time") or t.get("entry_time") or ""
+        all_trades.sort(key=_sort_key)
+
+        # Aggregate stats from the merged trade list (mirrors
+        # frontend calcBtStatsFromTrades but server-side authoritative).
+        wins = sum(1 for t in all_trades if t.get("result") == "WIN")
+        losses = sum(1 for t in all_trades if t.get("result") == "LOSS")
+        n = len(all_trades)
+        win_rate = (wins / n * 100) if n else 0.0
+        total_pnl = sum(float(t.get("pnl_usd") or 0) for t in all_trades)
+        total_pips = sum(float(t.get("pnl_pips") or 0) for t in all_trades)
+        gross_win  = sum(float(t.get("pnl_usd") or 0) for t in all_trades if t.get("result") == "WIN")
+        gross_loss = sum(abs(float(t.get("pnl_usd") or 0)) for t in all_trades if t.get("result") == "LOSS")
+        pf = (gross_win / gross_loss) if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0)
+        rrs = [float(t.get("rr_actual")) for t in all_trades if t.get("rr_actual") is not None]
+        avg_rr = (sum(rrs) / len(rrs)) if rrs else 0.0
+
+        # Equity curve = running sum of pnl from initial balance, in time order
+        equity = [{"bar": 0, "time": "", "equity": balance}]
+        eq = balance
+        peak = balance
+        max_dd_pct = 0.0
+        max_dd_usd = 0.0
+        for i, t in enumerate(all_trades, start=1):
+            eq += float(t.get("pnl_usd") or 0)
+            peak = max(peak, eq)
+            dd_usd = peak - eq
+            dd_pct = (dd_usd / peak * 100) if peak > 0 else 0
+            if dd_usd > max_dd_usd: max_dd_usd = dd_usd
+            if dd_pct > max_dd_pct: max_dd_pct = dd_pct
+            equity.append({"bar": i, "time": _sort_key(t), "equity": round(eq, 2)})
+
         async with async_session_factory() as s:
             run = await s.get(BacktestRun, run_id)
             if run:
                 run.status        = "DONE"
-                run.total_trades  = result.total_trades
-                run.wins          = result.wins
-                run.losses        = result.losses
-                run.win_rate      = result.win_rate
-                run.total_pips    = result.total_pips
-                run.total_return     = result.total_return
-                run.total_pnl_usd    = result.total_pnl_usd
-                run.max_drawdown     = result.max_drawdown
-                run.max_drawdown_usd = result.max_drawdown_usd
-                run.profit_factor = result.profit_factor if result.profit_factor != float("inf") else 999.0
-                run.avg_rr        = result.avg_rr
-                run.sharpe        = result.sharpe
-                run.trades_json   = json.dumps([t.__dict__ for t in result.trades], default=str)
-                run.equity_json   = json.dumps(result.equity)
-                run.data_warning  = result.data_warning or None
+                run.total_trades  = n
+                run.wins          = wins
+                run.losses        = losses
+                run.win_rate      = round(win_rate, 2)
+                run.total_pips    = round(total_pips, 1)
+                run.total_pnl_usd = round(total_pnl, 2)
+                run.total_return  = round((total_pnl / balance * 100) if balance > 0 else 0, 2)
+                run.max_drawdown     = round(max_dd_pct, 2)
+                run.max_drawdown_usd = round(max_dd_usd, 2)
+                run.profit_factor = round(pf, 2)
+                run.avg_rr        = round(avg_rr, 2)
+                run.sharpe        = 0  # not computed for aggregate (per-symbol sharpe doesn't combine cleanly)
+                run.trades_json   = json.dumps(all_trades, default=str)
+                run.equity_json   = json.dumps(equity)
+                run.data_warning  = " | ".join(warnings) if warnings else None
                 run.completed_at  = datetime.utcnow()
                 await s.commit()
     except Exception as exc:
@@ -1224,6 +1285,22 @@ async def _exec_backtest(
                 run.status = "FAILED"
                 run.error  = str(exc)
                 await s.commit()
+
+
+# Legacy single-symbol entrypoint kept for back-compat; routes through the
+# new multi-symbol executor with a one-element list.
+async def _exec_backtest(
+    run_id, symbol, timeframe, strategy, bars,
+    risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None,
+    oanda_api_key="", oanda_practice=True, mt5_bridge_url="",
+    date_from=None, date_to=None,
+):
+    return await _exec_backtest_multi(
+        run_id, [symbol], timeframe, strategy, bars,
+        risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups,
+        oanda_api_key, oanda_practice, mt5_bridge_url,
+        date_from=date_from, date_to=date_to,
+    )
 
 
 @app.get("/api/paper/status")

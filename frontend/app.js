@@ -1845,7 +1845,8 @@ async function runBacktest() {
     return;
   }
 
-  const payloadBase = {
+  const payload = {
+    symbols,
     timeframe:       document.getElementById('bt-tf')?.value      || 'H1',
     strategy:        document.getElementById('bt-strategy')?.value || 'Mixed',
     bars,
@@ -1860,51 +1861,18 @@ async function runBacktest() {
 
   document.getElementById('bt-results').style.display = 'none';
   clearInterval(btPollTimer);
+  setBtStatus('running', `⏳ Running on ${symbols.length} symbol${symbols.length>1?'s':''} — aggregato unico…`);
 
-  // Run sequentially. Each run is launched, polled to completion, then the
-  // next symbol kicks in. The user sees the latest result in the panel and
-  // the full set in the history table.
-  const total = symbols.length;
-  for (let i = 0; i < symbols.length; i++) {
-    const sym = symbols[i];
-    setBtStatus('running', `⏳ ${i+1}/${total} — Running ${sym}…`);
-    try {
-      const resp = await fetchJSON('/api/backtest/run', {
-        method: 'POST',
-        body:   JSON.stringify({ ...payloadBase, symbol: sym }),
-      });
-      currentBtRunId = resp.run_id;
-      // Poll until done (synchronous-style with await on a promise wrapper)
-      await new Promise((resolve) => {
-        const tick = async () => {
-          try {
-            const run = await fetchJSON(`/api/backtest/${resp.run_id}`);
-            if (run.status === 'DONE') {
-              setBtStatus('ok', `✅ ${i+1}/${total} ${sym} — ${run.total_trades} trades`);
-              renderBtResults(run);
-              refreshBtHistory();
-              resolve();
-            } else if (run.status === 'FAILED') {
-              setBtStatus('error', `❌ ${sym}: ${run.error || 'Unknown error'}`);
-              resolve();
-            } else if (run.status === 'UPDATING_CACHE') {
-              setBtStatus('warn', `⏳ ${i+1}/${total} ${sym} — aggiornamento cache…`);
-              setTimeout(tick, 1500);
-            } else {
-              setTimeout(tick, 1500);
-            }
-          } catch (e) {
-            setBtStatus('error', `❌ Polling error on ${sym}`);
-            resolve();
-          }
-        };
-        tick();
-      });
-    } catch (e) {
-      setBtStatus('error', `❌ ${sym}: ${e.message}`);
-    }
+  try {
+    const resp = await fetchJSON('/api/backtest/run', {
+      method: 'POST',
+      body:   JSON.stringify(payload),
+    });
+    currentBtRunId = resp.run_id;
+    btPollTimer = setInterval(() => pollBtResult(currentBtRunId), 1500);
+  } catch (e) {
+    setBtStatus('error', '❌ ' + e.message);
   }
-  setBtStatus('ok', `✅ ${total} simbol${total > 1 ? 'i' : 'o'} completati — vedi history sotto`);
 }
 
 async function pollBtResult(runId) {
@@ -2041,11 +2009,18 @@ const _SETUP_LABELS = {
 
 function _applyBtResultFilter() {
   if (!_currentBtRun) return;
-  const checks = [...document.querySelectorAll('.bt-res-chk')];
-  const checked = checks.filter(c=>c.checked).map(c=>c.value);
-  const trades = checked.length === checks.length
-    ? _currentBtRun.trades
-    : _currentBtRun.trades.filter(t => checked.includes(t.setup));
+  const setupChecks = [...document.querySelectorAll('.bt-res-chk')];
+  const setupChecked = setupChecks.filter(c=>c.checked).map(c=>c.value);
+  const symChecks = [...document.querySelectorAll('.bt-symres-chk')];
+  const symChecked = symChecks.filter(c=>c.checked).map(c=>c.value);
+
+  let trades = _currentBtRun.trades;
+  if (setupChecks.length > 0 && setupChecked.length < setupChecks.length) {
+    trades = trades.filter(t => setupChecked.includes(t.setup));
+  }
+  if (symChecks.length > 0 && symChecked.length < symChecks.length) {
+    trades = trades.filter(t => symChecked.includes(t.symbol));
+  }
 
   const initBal = _currentBtRun.equity?.[0]?.equity || 10000;
   const stats   = calcBtStatsFromTrades(trades, initBal);
@@ -2062,24 +2037,58 @@ function setupBtResultFilter(run) {
   const container = document.getElementById('bt-result-filter-checks');
   if (!filterEl || !container) return;
 
-  const setups = [...new Set((run.trades||[]).map(t=>t.setup).filter(Boolean))].sort();
-  if (setups.length < 2) { filterEl.style.display = 'none'; return; }
+  const setups  = [...new Set((run.trades||[]).map(t=>t.setup ).filter(Boolean))].sort();
+  const symbols = [...new Set((run.trades||[]).map(t=>t.symbol).filter(Boolean))].sort();
+  const showSetups  = setups.length  >= 2;
+  const showSymbols = symbols.length >= 2;
 
+  if (!showSetups && !showSymbols) { filterEl.style.display = 'none'; return; }
   filterEl.style.display = 'block';
-  container.innerHTML = setups.map(s =>
-    `<label class="check-pill"><input type="checkbox" class="bt-res-chk" value="${s}" checked> ${_SETUP_LABELS[s]||s}</label>`
-  ).join('');
-  container.querySelectorAll('.bt-res-chk').forEach(cb =>
-    cb.addEventListener('change', _applyBtResultFilter)
-  );
-  document.getElementById('btn-bt-res-all')?.addEventListener('click', () => {
-    container.querySelectorAll('.bt-res-chk').forEach(c => c.checked = true);
-    _applyBtResultFilter();
-  });
-  document.getElementById('btn-bt-res-none')?.addEventListener('click', () => {
-    container.querySelectorAll('.bt-res-chk').forEach(c => c.checked = false);
-    _applyBtResultFilter();
-  });
+
+  // Setup filter
+  if (showSetups) {
+    container.innerHTML = setups.map(s =>
+      `<label class="check-pill"><input type="checkbox" class="bt-res-chk" value="${s}" checked> ${_SETUP_LABELS[s]||s}</label>`
+    ).join('');
+    container.querySelectorAll('.bt-res-chk').forEach(cb =>
+      cb.addEventListener('change', _applyBtResultFilter)
+    );
+    document.getElementById('btn-bt-res-all')?.addEventListener('click', () => {
+      container.querySelectorAll('.bt-res-chk').forEach(c => c.checked = true);
+      _applyBtResultFilter();
+    });
+    document.getElementById('btn-bt-res-none')?.addEventListener('click', () => {
+      container.querySelectorAll('.bt-res-chk').forEach(c => c.checked = false);
+      _applyBtResultFilter();
+    });
+  } else {
+    container.innerHTML = '';
+  }
+
+  // Symbol filter (only when run covered multiple symbols)
+  const symRow = document.getElementById('bt-result-symfilter-row');
+  const symContainer = document.getElementById('bt-result-symfilter-checks');
+  if (symRow && symContainer) {
+    if (showSymbols) {
+      symRow.style.display = 'flex';
+      symContainer.innerHTML = symbols.map(s =>
+        `<label class="check-pill"><input type="checkbox" class="bt-symres-chk" value="${s}" checked> ${s}</label>`
+      ).join('');
+      symContainer.querySelectorAll('.bt-symres-chk').forEach(cb =>
+        cb.addEventListener('change', _applyBtResultFilter)
+      );
+      document.getElementById('btn-bt-symres-all')?.addEventListener('click', () => {
+        symContainer.querySelectorAll('.bt-symres-chk').forEach(c => c.checked = true);
+        _applyBtResultFilter();
+      });
+      document.getElementById('btn-bt-symres-none')?.addEventListener('click', () => {
+        symContainer.querySelectorAll('.bt-symres-chk').forEach(c => c.checked = false);
+        _applyBtResultFilter();
+      });
+    } else {
+      symRow.style.display = 'none';
+    }
+  }
 }
 
 function renderBtResults(run) {
