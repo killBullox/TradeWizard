@@ -50,6 +50,10 @@ logger = logging.getLogger(__name__)
 
 # In-memory build/update progress tracker  key = "SYMBOL_TF"
 _build_tasks: dict[str, dict] = {}
+# In-memory per-run progress for multi-symbol backtests. The frontend polls
+# /api/backtest/<id> and reads `progress` to render '3/9 EURUSD - fetching M1'
+# instead of a generic spinner. Cleaned up on DONE / FAILED.
+_backtest_progress: dict[int, dict] = {}
 
 # ------------------------------------------------------------------ #
 #  WebSocket Connection Manager
@@ -1203,11 +1207,21 @@ async def _exec_backtest_multi(
     single BacktestRun row. Each trade keeps its own `symbol` field so
     the frontend can filter by symbol just like it filters by setup.
     """
+    def _set_progress(i: int, sym: str, phase: str):
+        """Publish what the backtest is currently doing so the frontend
+        can show '3/9 EURUSD — fetching M1' instead of the generic spinner."""
+        _backtest_progress[run_id] = {
+            "i": i, "total": len(symbols),
+            "current_symbol": sym, "phase": phase,
+        }
+
     try:
         all_trades: list[dict] = []
         warnings: list[str] = []
-        for sym in symbols:
+        for idx, sym in enumerate(symbols, start=1):
+            _set_progress(idx, sym, "checking_cache")
             await _maybe_auto_update_cache(run_id, sym, timeframe, oanda_api_key, oanda_practice, mt5_bridge_url)
+            _set_progress(idx, sym, "running_backtest")
             try:
                 res = await run_backtest(
                     symbol=sym, timeframe=timeframe, strategy=strategy,
@@ -1232,6 +1246,9 @@ async def _exec_backtest_multi(
 
         # Sort trades by exit time so the aggregated equity curve makes
         # chronological sense across symbols.
+        _backtest_progress[run_id] = {"i": len(symbols), "total": len(symbols),
+                                       "current_symbol": "", "phase": "aggregating"}
+
         def _sort_key(t):
             return t.get("exit_time") or t.get("entry_time") or ""
         all_trades.sort(key=_sort_key)
@@ -1286,6 +1303,7 @@ async def _exec_backtest_multi(
                 run.data_warning  = " | ".join(warnings) if warnings else None
                 run.completed_at  = datetime.utcnow()
                 await s.commit()
+        _backtest_progress.pop(run_id, None)
     except Exception as exc:
         logger.error("Backtest %s failed: %s", run_id, exc, exc_info=True)
         async with async_session_factory() as s:
@@ -1294,6 +1312,7 @@ async def _exec_backtest_multi(
                 run.status = "FAILED"
                 run.error  = str(exc)
                 await s.commit()
+        _backtest_progress.pop(run_id, None)
 
 
 # Legacy single-symbol entrypoint kept for back-compat; routes through the
@@ -2192,6 +2211,9 @@ async def get_backtest(run_id: int):
             d["equity"] = json.loads(run.equity_json)
         except Exception:
             d["equity"] = []
+    # Live multi-symbol progress (only present while RUNNING)
+    if run_id in _backtest_progress:
+        d["progress"] = _backtest_progress[run_id]
     return d
 
 

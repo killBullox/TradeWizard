@@ -1895,6 +1895,17 @@ async function pollBtResult(runId) {
       setBtStatus('error', '❌ ' + (run.error || 'Unknown error'));
     } else if (run.status === 'UPDATING_CACHE') {
       setBtStatus('warn', '⏳ Cache dati non aggiornata — aggiornamento in corso...');
+    } else if (run.progress) {
+      // Multi-symbol live progress: '3/9 EURUSD — fetching M1...'
+      const PHASES = {
+        checking_cache:   'verifico cache',
+        running_backtest: 'simulazione',
+        aggregating:      'aggrego trade',
+      };
+      const p = run.progress;
+      const phase = PHASES[p.phase] || p.phase;
+      const sym   = p.current_symbol || '';
+      setBtStatus('running', `⏳ ${p.i}/${p.total} ${sym} — ${phase}…`);
     }
   } catch (e) {
     clearInterval(btPollTimer);
