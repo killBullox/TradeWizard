@@ -805,9 +805,14 @@ class Backtester:
 
     async def run(self) -> BacktestResult:
         from services.oanda_data import build_m1_index
+        import time as _t
+        t_start = _t.time()
+        timings: dict[str, float] = {}
 
         # ── 1. Fetch candles — local DB cache first, then MT5/OANDA/yfinance ──
         raw = None
+        cache_hit = False
+        t0 = _t.time()
         try:
             from services.ohlcv_cache import get_cached_candles
             cached = await get_cached_candles(
@@ -819,10 +824,13 @@ class Backtester:
             if len(cached) >= 50:
                 raw = {"symbol": self.symbol, "timeframe": self.timeframe,
                        "candles": cached, "indicators": {}}
+                cache_hit = True
         except Exception as _ce:
             pass  # cache unavailable → fall through to API
+        timings["cache_check_h1"] = _t.time() - t0
 
         if raw is None:
+            t0 = _t.time()
             if self.mt5_bridge_url:
                 from services.mt5_data import fetch_ohlcv as _mt5_fetch
                 raw = await _mt5_fetch(self.symbol, self.timeframe, self.bars,
@@ -832,9 +840,9 @@ class Backtester:
                 raw = await _oanda_fetch(self.symbol, self.timeframe, self.bars,
                                          api_key=self.oanda_api_key,
                                          practice=self.oanda_practice)
+            timings["api_fetch_h1"] = _t.time() - t0
             # Persist what we just fetched so the next backtest on the same
-            # symbol/timeframe hits the cache instead of the bridge. Avoids
-            # the "every backtest re-fetches everything" cost the user noticed.
+            # symbol/timeframe hits the cache instead of the bridge.
             try:
                 from services.ohlcv_cache import upsert_candles
                 fetched = raw.get("candles") if isinstance(raw, dict) else []
@@ -876,6 +884,7 @@ class Backtester:
 
             # Try local M1 cache first
             m1_raw = None
+            t0 = _t.time()
             try:
                 from services.ohlcv_cache import get_cached_candles as _get_m1
                 m1_raw = await _get_m1(
@@ -890,9 +899,11 @@ class Backtester:
                     m1_raw = None
             except Exception:
                 pass
+            timings["cache_check_m1"] = _t.time() - t0
 
             # Fall back to API if cache miss
             if not m1_raw:
+                t0 = _t.time()
                 if self.mt5_bridge_url:
                     from services.mt5_data import fetch_m1_for_period as _m1_fetch
                     m1_raw = await _m1_fetch(self.symbol, first_dt, last_dt,
@@ -906,6 +917,7 @@ class Backtester:
                     m1_source = "OANDA"
                 else:
                     m1_raw = []
+                timings["api_fetch_m1"] = _t.time() - t0
 
             if m1_raw:
                 self.m1_index = build_m1_index(m1_raw)
@@ -924,7 +936,14 @@ class Backtester:
         except Exception as exc:
             logger.warning("M1 fetch failed (%s): %s", m1_source, exc)
 
+        t0 = _t.time()
         result = self._simulate(candles)
+        timings["simulate"] = _t.time() - t0
+        timings["total"] = _t.time() - t_start
+        # Pretty timings
+        readable = ", ".join(f"{k}={v*1000:.0f}ms" for k, v in timings.items() if v > 0.005)
+        logger.info("Backtest %s %s timings (%d bars, cache_hit=%s): %s",
+                    self.symbol, self.timeframe, len(candles), cache_hit, readable)
 
         # ── 3. Set data_warning if no precise timestamps ───────────────────────
         if not self.m1_index:
