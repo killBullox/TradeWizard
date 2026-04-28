@@ -2223,9 +2223,24 @@ async def _do_build_cache(symbol, timeframe, n_bars, oanda_key, oanda_practice, 
     _build_tasks[key] = {"done": 0, "total": n_bars, "status": "running", "error": None, "inserted": 0}
     try:
         if mt5_bridge_url:
-            from services.mt5_data import fetch_ohlcv as _fetch
-            raw     = await _fetch(symbol, timeframe, n_bars, bridge_url=mt5_bridge_url)
-            candles = raw.get("candles", [])
+            # /candles caps at 50k bars per call. For M1/M5 with long history
+            # we use the date-range endpoint chunked across the period.
+            BRIDGE_CALL_CAP = 50000
+            tf_minutes = {"M1": 1, "M5": 5, "M15": 15, "M30": 30,
+                          "H1": 60, "H4": 240, "D1": 1440}.get(timeframe.upper(), 60)
+            if n_bars > BRIDGE_CALL_CAP:
+                from datetime import timezone, timedelta as _td
+                from services.mt5_data import fetch_range
+                # Compute how far back we need to go. n_bars wall-clock minutes,
+                # then add 40% slack for forex weekend gaps so we still land on
+                # roughly n_bars actual trading bars.
+                end_dt   = datetime.now(timezone.utc).replace(tzinfo=None)
+                start_dt = end_dt - _td(minutes=int(n_bars * tf_minutes * 1.4))
+                candles = await fetch_range(symbol, timeframe, start_dt, end_dt, mt5_bridge_url)
+            else:
+                from services.mt5_data import fetch_ohlcv as _fetch
+                raw     = await _fetch(symbol, timeframe, n_bars, bridge_url=mt5_bridge_url)
+                candles = raw.get("candles", [])
         else:
             from services.oanda_data import OandaClient
             client  = OandaClient(oanda_key, oanda_practice)

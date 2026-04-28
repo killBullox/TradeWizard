@@ -56,24 +56,28 @@ async def fetch_ohlcv(symbol: str, timeframe: str = "H1", limit: int = 500,
         return await _oanda(symbol, timeframe, limit)
 
 
-async def fetch_m1_for_period(symbol: str, start_dt: datetime, end_dt: datetime,
-                               bridge_url: str = "") -> list[dict]:
-    """
-    Fetch M1 candles for start_dt → end_dt from the MT5 bridge.
-    Returns [] if bridge unreachable (backtester falls back to OHLC estimation).
-    """
+async def fetch_range(symbol: str, timeframe: str,
+                       start_dt: datetime, end_dt: datetime,
+                       bridge_url: str = "",
+                       chunk_hours: int | None = None) -> list[dict]:
+    """Fetch candles between two datetimes for any timeframe, chunked to
+    avoid huge single requests. Used to build large M1/M5 caches that
+    exceed the bridge's per-call cap (50k bars on /candles)."""
     bridge_url = (bridge_url or _DEFAULT_BRIDGE).rstrip("/")
+    if chunk_hours is None:
+        # Aim for ~5k bars per chunk to keep responses small
+        per_bar_min = {"M1": 1, "M5": 5, "M15": 15, "M30": 30,
+                       "H1": 60, "H4": 240, "D1": 1440}.get(timeframe.upper(), 60)
+        chunk_hours = max(1, int(5000 * per_bar_min / 60))
 
     all_candles: list[dict] = []
-    chunk_hours = 24          # fetch 1 day at a time to avoid huge responses
     current = start_dt
-
     while current < end_dt:
         chunk_end = min(current + timedelta(hours=chunk_hours), end_dt)
         try:
             data = await _get(f"{bridge_url}/candles/range", {
                 "symbol":    symbol,
-                "timeframe": "M1",
+                "timeframe": timeframe,
                 "from_ts":   current.strftime("%Y-%m-%dT%H:%M:%S"),
                 "to_ts":     chunk_end.strftime("%Y-%m-%dT%H:%M:%S"),
             })
@@ -81,13 +85,20 @@ async def fetch_m1_for_period(symbol: str, start_dt: datetime, end_dt: datetime,
             all_candles.extend(chunk)
             current = chunk_end
         except Exception as exc:
-            log.warning("M1 range fetch failed (%s → %s): %s", current, chunk_end, exc)
+            log.warning("%s range fetch failed (%s → %s): %s",
+                        timeframe, current, chunk_end, exc)
             break
 
-    log.info("MT5 bridge M1: %d candles for %s [%s → %s]",
-             len(all_candles), symbol,
+    log.info("MT5 bridge %s: %d candles for %s [%s → %s]",
+             timeframe, len(all_candles), symbol,
              start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d"))
     return all_candles
+
+
+async def fetch_m1_for_period(symbol: str, start_dt: datetime, end_dt: datetime,
+                               bridge_url: str = "") -> list[dict]:
+    """Backward-compatible wrapper around fetch_range for M1."""
+    return await fetch_range(symbol, "M1", start_dt, end_dt, bridge_url)
 
 
 async def check_bridge(bridge_url: str = "") -> dict:
