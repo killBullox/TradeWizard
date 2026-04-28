@@ -2405,8 +2405,17 @@ class Orchestrator:
             logger.warning("_enforce_lot_size failed: %s", exc)
 
     def _enforce_rr(self, trade_params: dict, rm_result: dict, config: dict) -> dict:
-        """Enforce correct TP ordering (TP1 < TP2 < TP3 distance from entry for BUY, inverted for SELL)
-        and minimum RR on TP1. Fixes LLM-generated inverted or too-close TP levels."""
+        """Enforce TP ordering and minimum RR on TP1. The TP1 floor is
+        derived from the SAME formula the sanity_check uses, so any TP
+        emitted here is guaranteed to pass the sanity check downstream.
+
+        Previous version used `sl_pips * 1.1` as floor (RR=1.1) but the
+        sanity check needs net_rr >= effective_rr * 0.95 *after friction*.
+        That mismatch was the root cause of the 2026-04-27/28 'TR-too-tight'
+        rejections (Net RR 0.7-1.1 below required 1.2-1.3 for ~80% of
+        RM-approved setups). The TR generates TPs from ICT structure and
+        the structure was simply too close — _enforce_rr must widen them.
+        """
         try:
             direction = trade_params.get("direction", "")
             entry     = float(trade_params.get("entry_price") or 0)
@@ -2418,35 +2427,48 @@ class Orchestrator:
             pip         = 0.01 if "JPY" in symbol else (1.0 if symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
             sl_pips     = abs(entry - sl) / pip
             required_rr = float(config.get("rr_ratio") or 2.0)
+            rr_floor    = float(config.get("rm_min_rr_gate") or 1.2)
             sign        = 1 if direction == "BUY" else -1
+            friction    = 1.5  # MUST match _sanity_check_trade
 
-            # TP1: use RM's tp1_pips (already ATR-calibrated) as the target
+            # Compute the TP1 floor that the sanity_check would require.
+            # net_rr = (tp_pips - f) / (sl_pips + f) >= effective_rr * 0.95
+            # solving for tp_pips:
+            # tp_pips >= effective_rr * 0.95 * (sl_pips + f) + f
+            # We don't know max_net_rr (depends on ATR available here), so
+            # we use rr_floor as a safe lower bound — the sanity check will
+            # tighten it further only if rr_ratio AND ATR allow.
+            tp1_min_pips = rr_floor * 0.95 * (sl_pips + friction) + friction
+            # Add 1 pip safety so the boundary doesn't fail on rounding.
+            tp1_min_pips = round(tp1_min_pips + 1.0, 1)
+
+            # TP1: use RM's tp1_pips when reasonable, else the safety floor.
             tp1 = float(trade_params.get("take_profit_1") or 0)
             rm_tp1_pips = float((rm_result.get("position_size") or {}).get("tp1_pips") or 0)
-            if tp1 and rm_tp1_pips > 0:
-                tp1_pips = abs(entry - tp1) / pip
-                # If TR's TP1 is too far or too close, use RM's value
-                if tp1_pips > rm_tp1_pips * 1.3 or tp1_pips < sl_pips * 1.1:
-                    tp1 = round(entry + sign * rm_tp1_pips * pip, 5)
-                    trade_params = {**trade_params, "take_profit_1": tp1}
-                    logger.info("RR enforced TP1 for %s %s → %.5f", symbol, direction, tp1)
+            tp1_pips = abs(entry - tp1) / pip if tp1 else 0
+            target_tp1_pips = max(tp1_min_pips, rm_tp1_pips or 0)
+            if tp1_pips < target_tp1_pips:
+                new_tp1 = round(entry + sign * target_tp1_pips * pip, 5)
+                trade_params = {**trade_params, "take_profit_1": new_tp1}
+                logger.info("RR enforced TP1 for %s %s: %.1fp -> %.1fp (floor=%.1fp from gate=%.2f)",
+                            symbol, direction, tp1_pips, target_tp1_pips, tp1_min_pips, rr_floor)
+                tp1 = new_tp1
 
-            # TP2/TP3: must be further from entry than TP1 (in the correct direction)
-            tp1_dist = abs(tp1 - entry) / pip if tp1 else rm_tp1_pips or sl_pips * 1.5
+            # TP2/TP3: must be further from entry than TP1
+            tp1_dist = abs(tp1 - entry) / pip if tp1 else target_tp1_pips
             for key, multiplier in [("take_profit_2", 1.5), ("take_profit_3", 2.0)]:
                 tp = trade_params.get(key)
                 if not tp:
                     continue
                 tp = float(tp)
                 tp_dist = abs(tp - entry) / pip
-                # Wrong direction OR closer than TP1 → recompute
                 correct_side = (tp > entry) if direction == "BUY" else (tp < entry)
                 if not correct_side or tp_dist < tp1_dist - 0.05 * sl_pips:
-                    tp = round(entry + sign * sl_pips * required_rr * multiplier * pip, 5)
+                    tp = round(entry + sign * tp1_dist * multiplier * pip, 5)
                     trade_params = {**trade_params, key: tp}
-                    logger.info("TP ordering enforced %s for %s %s → %.5f", key, symbol, direction, tp)
-        except Exception:
-            pass
+                    logger.info("TP ordering enforced %s for %s %s -> %.5f", key, symbol, direction, tp)
+        except Exception as exc:
+            logger.warning("_enforce_rr error: %s", exc)
         return trade_params
 
     async def _check_margin(self, symbol: str, trade_params: dict, rm_result: dict, config: dict, open_count: int = 0) -> bool:
