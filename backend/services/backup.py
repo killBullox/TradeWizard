@@ -120,7 +120,10 @@ def _cleanup_old_backups() -> int:
         return 0
 
     removed = 0
-    cutoff = datetime.now().date()
+    # Use Rome date so the cleanup window matches the day-foldering above
+    # (run_backup names folders with Rome's calendar date). Avoid
+    # datetime.now() naked — its tz depends on the host machine.
+    cutoff = datetime.now(ZoneInfo("Europe/Rome")).date()
     from datetime import timedelta
     cutoff_date = cutoff - timedelta(days=RETENTION_DAYS)
 

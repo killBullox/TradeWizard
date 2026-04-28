@@ -1664,7 +1664,10 @@ class Orchestrator:
                     agenda=topic[:500],
                     summary=json.dumps(conclusions, default=str),
                     improvements=json.dumps(improvements, default=str),
-                    created_at=datetime.now(ZoneInfo("Europe/Rome")),
+                    # MUST be UTC naive — every other DB column uses datetime.utcnow
+                    # as default. Mixing Rome timestamps here breaks "created since X UTC"
+                    # queries and produced spurious offsets across the system.
+                    created_at=datetime.utcnow(),
                 )
                 s.add(meeting)
                 await s.flush()  # get meeting.id
@@ -1686,7 +1689,8 @@ class Orchestrator:
                         "improvements_count": len(improvements),
                         "rounds": self._active_meeting.get("round", 1) if self._active_meeting else 1,
                     }, default=str),
-                    created_at=datetime.now(ZoneInfo("Europe/Rome")),
+                    # UTC naive — same reason as Meeting above.
+                    created_at=datetime.utcnow(),
                 )
                 s.add(journal)
                 await s.commit()
