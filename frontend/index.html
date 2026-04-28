@@ -17,8 +17,8 @@
         production: { http: '', ws: '' },        // same-origin (backend serves frontend)
         lab:        { http: 'http://' + location.hostname + ':8001',
                       ws:   'ws://'   + location.hostname + ':8001' },
-        br:         { http: 'http://' + location.hostname + ':8002',
-                      ws:   'ws://'   + location.hostname + ':8002' },
+        br:         { http: 'http://' + location.hostname + ':8003',
+                      ws:   'ws://'   + location.hostname + ':8003' },
       };
       window._TW_MODE = localStorage.getItem('tw_mode') || DEFAULT_MODE;
       window._TW_BACKENDS = BACKENDS;
@@ -498,7 +498,7 @@
             <span style="font-size:0.78rem;color:var(--text-muted);font-weight:normal">
               Strategia deterministica del backtester, eseguita su MT5 paper in tempo reale.
               Niente LLM, niente API, niente learning.
-              <strong style="color:#f59e0b">Disponibile solo se sei sul backend BR (porta 8002).</strong>
+              <strong style="color:#f59e0b">Disponibile solo se sei sul backend BR (porta 8003).</strong>
             </span>
           </div>
           <div id="br-unavailable" style="display:none;padding:16px;text-align:center;color:var(--text-muted)">
