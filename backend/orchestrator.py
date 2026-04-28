@@ -2432,13 +2432,14 @@ class Orchestrator:
             friction    = 1.5  # MUST match _sanity_check_trade
 
             # Compute the TP1 floor that the sanity_check would require.
-            # net_rr = (tp_pips - f) / (sl_pips + f) >= effective_rr * 0.95
-            # solving for tp_pips:
-            # tp_pips >= effective_rr * 0.95 * (sl_pips + f) + f
-            # We don't know max_net_rr (depends on ATR available here), so
-            # we use rr_floor as a safe lower bound — the sanity check will
-            # tighten it further only if rr_ratio AND ATR allow.
-            tp1_min_pips = rr_floor * 0.95 * (sl_pips + friction) + friction
+            # The sanity check uses effective_rr = max(rr_floor, min(rr_ratio,
+            # max_net_rr_from_ATR)). At the TP1 we are about to set, the
+            # worst case (highest effective_rr) is min(rr_ratio, max_net_rr)
+            # which can be as high as rr_ratio itself — so we floor against
+            # max(rr_floor, rr_ratio). This guarantees the TP we emit will
+            # pass the sanity check regardless of ATR.
+            sanity_required = max(rr_floor, required_rr)
+            tp1_min_pips = sanity_required * 0.95 * (sl_pips + friction) + friction
             # Add 1 pip safety so the boundary doesn't fail on rounding.
             tp1_min_pips = round(tp1_min_pips + 1.0, 1)
 
