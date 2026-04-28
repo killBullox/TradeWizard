@@ -753,7 +753,7 @@ _SPREAD_PIPS = {
     "US30": 2.5, "NAS100": 1.5, "US500": 0.8,
 }
 _DEFAULT_SPREAD_PIPS = 1.5
-_SLIPPAGE_PIPS_DEFAULT = 0.5    # adverse slippage per round-trip
+_SLIPPAGE_PIPS_DEFAULT = 0.2    # adverse slippage per round-trip (forex majors retail)
 _COMMISSION_PER_LOT_USD = 7.0   # round-trip per standard lot
 
 
