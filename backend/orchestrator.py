@@ -1040,8 +1040,12 @@ class Orchestrator:
                 # ── HARD CHECK: Max trade duration (day trading constraint) ──
                 if trade.open_time:
                     from zoneinfo import ZoneInfo as _ZI
-                    now = datetime.now(_ZI("Europe/Rome"))
-                    open_time = trade.open_time.replace(tzinfo=_ZI("Europe/Rome")) if trade.open_time.tzinfo is None else trade.open_time
+                    # The DB stores open_time as datetime.utcnow() — UTC naive.
+                    # Mark it with UTC tzinfo (NOT Europe/Rome — that double-counts
+                    # the 2h DST offset and was force-closing trades after 1h
+                    # of real wall-clock time on 2026-04-28).
+                    now = datetime.now(_ZI("UTC"))
+                    open_time = trade.open_time.replace(tzinfo=_ZI("UTC")) if trade.open_time.tzinfo is None else trade.open_time
                     hours_open = (now - open_time).total_seconds() / 3600
                     max_hours = float(config.get("max_trade_duration_hours", "8") if hasattr(self, '_last_config') else "8")
                     try:
