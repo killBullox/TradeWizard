@@ -17,6 +17,8 @@
         production: { http: '', ws: '' },        // same-origin (backend serves frontend)
         lab:        { http: 'http://' + location.hostname + ':8001',
                       ws:   'ws://'   + location.hostname + ':8001' },
+        br:         { http: 'http://' + location.hostname + ':8002',
+                      ws:   'ws://'   + location.hostname + ':8002' },
       };
       window._TW_MODE = localStorage.getItem('tw_mode') || DEFAULT_MODE;
       window._TW_BACKENDS = BACKENDS;
@@ -74,6 +76,7 @@
     }
     .tw-mode-btn.active { background: #2563eb; color: #fff; }
     .tw-mode-btn.lab.active { background: #d97706; }
+    .tw-mode-btn.br.active  { background: #059669; }
   </style>
 </head>
 <body>
@@ -102,13 +105,17 @@
         <button onclick="dismissAlerts(event)" title="Dismiss alerts"
                 style="position:absolute;top:-6px;left:-6px;width:18px;height:18px;border-radius:50%;background:#ef4444;color:#fff;border:none;font-size:0.7rem;font-weight:700;cursor:pointer;line-height:1;padding:0">✕</button>
       </div>
-      <div class="tw-mode-switcher" id="tw-mode-switcher" title="Backend: Production (real MT5) or Lab (paper + learning rules)">
+      <div class="tw-mode-switcher" id="tw-mode-switcher" title="Backend: Production (real MT5) / Lab (paper + LLM learning) / BR (paper + deterministic backtest strategy)">
         <button class="tw-mode-btn" id="tw-mode-prod" onclick="twSwitchMode('production')">⚡ Production</button>
         <button class="tw-mode-btn lab" id="tw-mode-lab" onclick="twSwitchMode('lab')">🧪 Lab</button>
+        <button class="tw-mode-btn br" id="tw-mode-br" onclick="twSwitchMode('br')">📊 BR</button>
       </div>
       <script>
         // Highlight the active mode
-        document.getElementById('tw-mode-' + (window._TW_MODE === 'lab' ? 'lab' : 'prod')).classList.add('active');
+        const _twActive = window._TW_MODE === 'lab' ? 'lab'
+                       : window._TW_MODE === 'br'  ? 'br'
+                       : 'prod';
+        document.getElementById('tw-mode-' + _twActive).classList.add('active');
       </script>
       <div id="rejection-indicator" style="display:none;cursor:pointer;position:relative" onclick="showRejections()" title="Trade rifiutati — clicca per dettagli">
         <span style="display:inline-flex;align-items:center;gap:5px;background:rgba(239,68,68,0.15);color:#ef4444;padding:4px 12px;border-radius:6px;font-size:0.82rem;font-weight:700">
@@ -217,6 +224,7 @@
         <button class="tab" data-tab="analytics">📡 Analytics</button>
         <button class="tab" data-tab="charts">📊 Charts</button>
         <button class="tab" data-tab="backtest">🔬 Backtest</button>
+        <button class="tab" data-tab="br">📊 BR</button>
         <button class="tab" data-tab="paper">📄 Paper</button>
         <button class="tab" data-tab="news">📰 News</button>
         <button class="tab" data-tab="settings">⚙️ Settings</button>
@@ -478,6 +486,94 @@
             <div class="overlay-item"><span class="ol-swatch" style="background:#3b82f6"></span>Active Entry</div>
             <div class="overlay-item"><span class="ol-swatch" style="background:#ef4444"></span>Active SL</div>
             <div class="overlay-item"><span class="ol-swatch" style="background:#10b981"></span>Active TP</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- BR (Backtest-to-Reality) Tab -->
+      <div class="tab-content" id="tab-br">
+        <div class="card">
+          <div class="card-header">
+            <h3>📊 Backtest-to-Reality</h3>
+            <span style="font-size:0.78rem;color:var(--text-muted);font-weight:normal">
+              Strategia deterministica del backtester, eseguita su MT5 paper in tempo reale.
+              Niente LLM, niente API, niente learning.
+              <strong style="color:#f59e0b">Disponibile solo se sei sul backend BR (porta 8002).</strong>
+            </span>
+          </div>
+          <div id="br-unavailable" style="display:none;padding:16px;text-align:center;color:var(--text-muted)">
+            ⚠️ Sei sul backend <span id="br-currentmode"></span>. Per usare BR clicca <strong>📊 BR</strong> in alto a destra.
+          </div>
+          <div id="br-panel" style="display:none">
+            <!-- Status row -->
+            <div style="display:flex;align-items:center;gap:18px;margin-bottom:16px;flex-wrap:wrap">
+              <div>
+                <div style="font-size:0.7rem;color:var(--text-muted)">STATUS</div>
+                <div id="br-running-pill" style="font-size:1.05rem;font-weight:700">— </div>
+              </div>
+              <button class="btn btn-primary" id="btn-br-start">▶ Start BR</button>
+              <button class="btn btn-ghost" id="btn-br-stop">■ Stop BR</button>
+              <button class="btn btn-ghost btn-sm" id="btn-br-refresh">↻ Refresh</button>
+            </div>
+
+            <!-- Configuration -->
+            <div class="bt-form-grid" style="margin-bottom:8px">
+              <div class="form-group" style="grid-column:span 2">
+                <label>Symbols</label>
+                <div id="br-symbols-row" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+                  <button type="button" class="btn btn-ghost btn-sm" id="br-symbols-all" style="padding:4px 8px;font-size:0.75rem">All</button>
+                  <button type="button" class="btn btn-ghost btn-sm" id="br-symbols-none" style="padding:4px 8px;font-size:0.75rem">None</button>
+                </div>
+              </div>
+              <div class="form-group" style="grid-column:span 2">
+                <label>Setups (FVG / OrderBlock / Liquidity / Break, BULL+BEAR)</label>
+                <div id="br-setups-row" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center"></div>
+              </div>
+              <div class="form-group">
+                <label>Risk per trade ($)</label>
+                <input type="number" id="br-risk" class="form-input" min="1" step="10" />
+              </div>
+              <div class="form-group">
+                <label>R:R ratio</label>
+                <input type="number" id="br-rr" class="form-input" min="1" step="0.1" />
+              </div>
+              <div class="form-group">
+                <label>Slippage (pip)</label>
+                <input type="number" id="br-slippage" class="form-input" min="0" step="0.1" />
+              </div>
+              <div class="form-group">
+                <label>Commission ($/lot RT)</label>
+                <input type="number" id="br-commission" class="form-input" min="0" step="0.5" />
+              </div>
+              <div class="form-group">
+                <label>Max hold (h)</label>
+                <input type="number" id="br-max-hold" class="form-input" min="1" step="1" />
+              </div>
+              <div class="form-group">
+                <label>Tick interval (s)</label>
+                <input type="number" id="br-tick" class="form-input" min="60" step="60" />
+              </div>
+            </div>
+            <button class="btn btn-primary btn-sm" id="btn-br-save">💾 Save config</button>
+            <span id="br-save-status" style="margin-left:10px;font-size:0.8rem"></span>
+          </div>
+        </div>
+
+        <!-- Live summary + trades -->
+        <div id="br-results" style="display:none">
+          <div class="stats-row" id="br-stats-row" style="margin-top:12px"></div>
+          <div class="card" style="margin-top:12px">
+            <div class="card-header"><h3>📋 Trades</h3></div>
+            <div class="table-wrapper">
+              <table class="table">
+                <thead><tr>
+                  <th>ID</th><th>Symbol</th><th>Setup</th><th>Dir</th><th>Status</th>
+                  <th>Entry</th><th>SL</th><th>TP</th><th>Close</th>
+                  <th>P&amp;L</th><th>Result</th><th>Open</th><th>Close T.</th>
+                </tr></thead>
+                <tbody id="br-trades-tbody"></tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>

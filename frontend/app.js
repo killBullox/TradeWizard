@@ -3340,3 +3340,155 @@ async function removeBrokerAccount(id, label) {
   tick();
   setInterval(tick, 1000);
 })();
+
+
+// ── BR (Backtest-to-Reality) tab ────────────────────────────────────────
+const _BR_SETUPS = [
+  ['FVG_BULL','FVG ↑'],['FVG_BEAR','FVG ↓'],
+  ['OB_BULL','OB ↑'],  ['OB_BEAR','OB ↓'],
+  ['LIQ_BULL','Liq ↑'],['LIQ_BEAR','Liq ↓'],
+  ['BREAK_BULL','BRK ↑'],['BREAK_BEAR','BRK ↓'],
+];
+
+function _renderBrChips() {
+  const symRow = document.getElementById('br-symbols-row');
+  if (symRow) {
+    const allBtn = document.getElementById('br-symbols-all');
+    for (const sym of _BT_SYMBOLS) {
+      if (document.getElementById('br-sym-chk-' + sym)) continue;
+      const lbl = document.createElement('label');
+      lbl.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border:1px solid var(--border);border-radius:14px;cursor:pointer;font-size:0.8rem;user-select:none';
+      lbl.innerHTML = '<input type="checkbox" id="br-sym-chk-' + sym + '" class="br-sym-chk" value="' + sym + '" style="margin:0">' + sym;
+      symRow.insertBefore(lbl, allBtn);
+    }
+    document.getElementById('br-symbols-all')?.addEventListener('click',
+      () => document.querySelectorAll('.br-sym-chk').forEach(c => c.checked = true));
+    document.getElementById('br-symbols-none')?.addEventListener('click',
+      () => document.querySelectorAll('.br-sym-chk').forEach(c => c.checked = false));
+  }
+  const setupRow = document.getElementById('br-setups-row');
+  if (setupRow && setupRow.children.length === 0) {
+    for (const [val, label] of _BR_SETUPS) {
+      const lbl = document.createElement('label');
+      lbl.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border:1px solid var(--border);border-radius:14px;cursor:pointer;font-size:0.8rem;user-select:none';
+      lbl.innerHTML = '<input type="checkbox" class="br-setup-chk" value="' + val + '" style="margin:0">' + label;
+      setupRow.appendChild(lbl);
+    }
+  }
+}
+
+async function _brLoadStatus() {
+  let data;
+  try { data = await fetchJSON('/api/br/status'); } catch (e) { data = null; }
+  const panel = document.getElementById('br-panel');
+  const unav  = document.getElementById('br-unavailable');
+  if (!data || !data.available) {
+    if (panel) panel.style.display = 'none';
+    if (unav) {
+      unav.style.display = 'block';
+      const cur = document.getElementById('br-currentmode');
+      if (cur) cur.textContent = (data && data.mode || window._TW_MODE || 'production').toUpperCase();
+    }
+    return;
+  }
+  panel.style.display = 'block';
+  unav.style.display  = 'none';
+  const pill = document.getElementById('br-running-pill');
+  if (pill) {
+    pill.textContent = data.running ? '🟢 RUNNING' : '⏸ STOPPED';
+    pill.style.color = data.running ? '#10b981' : '#9ca3af';
+  }
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el && (el.value === '' || document.activeElement !== el)) el.value = v;
+  };
+  setVal('br-risk', data.risk_usd);
+  setVal('br-rr', data.rr_ratio);
+  setVal('br-slippage', data.slippage_pips);
+  setVal('br-commission', data.commission_per_lot_usd);
+  setVal('br-max-hold', data.max_hold_hours);
+  setVal('br-tick', data.tick_seconds);
+  document.querySelectorAll('.br-sym-chk').forEach(cb => cb.checked = (data.symbols||[]).includes(cb.value));
+  document.querySelectorAll('.br-setup-chk').forEach(cb => cb.checked = (data.enabled_setups||[]).includes(cb.value));
+}
+
+async function _brLoadSummary() {
+  let summ; try { summ = await fetchJSON('/api/br/summary'); } catch { return; }
+  const resultsEl = document.getElementById('br-results');
+  if (!resultsEl) return;
+  resultsEl.style.display = 'block';
+  const row = document.getElementById('br-stats-row');
+  if (row) {
+    const pnlColor = summ.total_pnl_usd >= 0 ? '#10b981' : '#ef4444';
+    row.innerHTML =
+      '<div class="stat-card"><div class="stat-value">' + summ.total_trades + '</div><div class="stat-label">Trades</div></div>' +
+      '<div class="stat-card"><div class="stat-value">' + summ.win_rate + '%</div><div class="stat-label">Win Rate</div></div>' +
+      '<div class="stat-card"><div class="stat-value">' + summ.total_pips + '</div><div class="stat-label">Pips</div></div>' +
+      '<div class="stat-card"><div class="stat-value" style="color:' + pnlColor + '">$' + summ.total_pnl_usd + '</div><div class="stat-label">P&L</div></div>' +
+      '<div class="stat-card"><div class="stat-value">' + summ.open + '</div><div class="stat-label">Open</div></div>';
+  }
+  let trades; try { trades = await fetchJSON('/api/br/trades?limit=100'); } catch { trades = []; }
+  const tbody = document.getElementById('br-trades-tbody');
+  if (!tbody) return;
+  if (trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="13" class="empty-state">Nessun trade BR</td></tr>';
+    return;
+  }
+  tbody.innerHTML = trades.map(t => {
+    const pnl = t.pnl_usd != null ? '$' + t.pnl_usd : '-';
+    const pnlColor = (t.pnl_usd || 0) >= 0 ? '#10b981' : '#ef4444';
+    const setup = (t.ict_setup || '').replace('BR/', '');
+    return '<tr>' +
+      '<td>' + t.id + '</td>' +
+      '<td>' + t.symbol + '</td>' +
+      '<td>' + setup + '</td>' +
+      '<td>' + t.direction + '</td>' +
+      '<td>' + t.status + '</td>' +
+      '<td>' + (t.entry_price != null ? Number(t.entry_price).toFixed(5) : '-') + '</td>' +
+      '<td>' + (t.stop_loss != null ? Number(t.stop_loss).toFixed(5) : '-') + '</td>' +
+      '<td>' + (t.take_profit_1 != null ? Number(t.take_profit_1).toFixed(5) : '-') + '</td>' +
+      '<td>' + (t.close_price != null ? Number(t.close_price).toFixed(5) : '-') + '</td>' +
+      '<td style="color:' + pnlColor + '">' + pnl + '</td>' +
+      '<td>' + (t.result || '-') + '</td>' +
+      '<td style="font-size:0.75rem">' + (t.open_time || '').slice(0, 16) + '</td>' +
+      '<td style="font-size:0.75rem">' + (t.close_time || '').slice(0, 16) + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
+async function _brSaveConfig() {
+  const symbols = [...document.querySelectorAll('.br-sym-chk:checked')].map(el => el.value);
+  const setups  = [...document.querySelectorAll('.br-setup-chk:checked')].map(el => el.value);
+  const payload = {
+    symbols,
+    enabled_setups: setups,
+    risk_usd: parseFloat(document.getElementById('br-risk').value),
+    rr_ratio: parseFloat(document.getElementById('br-rr').value),
+    slippage_pips: parseFloat(document.getElementById('br-slippage').value),
+    commission_per_lot_usd: parseFloat(document.getElementById('br-commission').value),
+    max_hold_hours: parseInt(document.getElementById('br-max-hold').value, 10),
+    tick_seconds: parseInt(document.getElementById('br-tick').value, 10),
+  };
+  const status = document.getElementById('br-save-status');
+  try {
+    await fetchJSON('/api/br/config', { method: 'PUT', body: JSON.stringify(payload) });
+    if (status) { status.textContent = '✅ saved'; status.style.color = '#10b981'; }
+  } catch (e) {
+    if (status) { status.textContent = '❌ ' + e.message; status.style.color = '#ef4444'; }
+  }
+}
+
+async function _brStart() { try { await fetchJSON('/api/br/start', {method:'POST'}); } catch(e){} _brLoadStatus(); _brLoadSummary(); }
+async function _brStop()  { try { await fetchJSON('/api/br/stop',  {method:'POST'}); } catch(e){} _brLoadStatus(); _brLoadSummary(); }
+
+document.getElementById('btn-br-start')?.addEventListener('click', _brStart);
+document.getElementById('btn-br-stop')?.addEventListener('click', _brStop);
+document.getElementById('btn-br-save')?.addEventListener('click', _brSaveConfig);
+document.getElementById('btn-br-refresh')?.addEventListener('click', () => { _brLoadStatus(); _brLoadSummary(); });
+
+document.querySelector('.tab[data-tab="br"]')?.addEventListener('click', () => {
+  _renderBrChips();
+  _brLoadStatus();
+  _brLoadSummary();
+});
+_renderBrChips();

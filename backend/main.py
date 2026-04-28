@@ -143,6 +143,7 @@ def _format_activity(mtype: str, msg: dict) -> str:
 
 manager = ConnectionManager()
 orchestrator: Orchestrator | None = None
+br_engine = None  # services.br_engine.BREngine — only set when SYSTEM_MODE=br
 
 
 # ------------------------------------------------------------------ #
@@ -369,8 +370,24 @@ async def lifespan(app: FastAPI):
         if mt5_path:
             os.environ["MT5_PATH"] = mt5_path
     _start_mt5_direct()
-    orchestrator = Orchestrator(broadcast_fn=manager.broadcast)
-    await orchestrator.start()
+    if _SYSTEM_MODE == "br":
+        # BR mode: deterministic backtest-to-reality engine, no LLM, no
+        # multi-agent orchestrator. Uses ICTAnalyzer from the backtester.
+        from services.br_engine import BREngine
+        global br_engine
+        br_engine = BREngine(broadcast_fn=manager.broadcast)
+        # Auto-start if br_running was true at last shutdown
+        async with async_session_factory() as _s:
+            run_flag = (await get_config("br_running", _s)) == "true"
+        if run_flag:
+            await br_engine.start()
+            logger.info("BR engine auto-started (br_running=true)")
+        else:
+            logger.info("BR engine ready (idle — call /api/br/start to run)")
+        orchestrator = None  # explicit: BR doesn't use the multi-agent orchestrator
+    else:
+        orchestrator = Orchestrator(broadcast_fn=manager.broadcast)
+        await orchestrator.start()
     app.state.start_time = datetime.utcnow()
 
     # Save settings backup after successful startup
@@ -384,6 +401,8 @@ async def lifespan(app: FastAPI):
 
     if orchestrator:
         await orchestrator.stop()
+    if br_engine and br_engine.running:
+        await br_engine.stop()
     # Stop MT5 bridge subprocess
     try:
         from services.mt5_direct import get_mt5_direct
@@ -1875,12 +1894,15 @@ async def get_alerts(limit: int = 50):
 
 @app.get("/api/system-mode")
 async def get_system_mode():
-    """Tells the frontend which instance it is talking to (production vs lab)."""
+    """Tells the frontend which instance it is talking to (production / lab / br)."""
     import os as _os
-    return {
-        "mode": _os.getenv("SYSTEM_MODE", "production").lower(),
-        "db_file": "tradewizard_lab.db" if _os.getenv("SYSTEM_MODE", "production").lower() == "lab" else "tradewizard.db",
-    }
+    mode = _os.getenv("SYSTEM_MODE", "production").lower()
+    db_file = (
+        "tradewizard_lab.db" if mode == "lab" else
+        "tradewizard_br.db"  if mode == "br"  else
+        "tradewizard.db"
+    )
+    return {"mode": mode, "db_file": db_file}
 
 
 # ─── Learning Rules API ────────────────────────────────────────────────
@@ -2215,6 +2237,123 @@ async def get_backtest(run_id: int):
     if run_id in _backtest_progress:
         d["progress"] = _backtest_progress[run_id]
     return d
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# BR (Backtest-to-Reality) endpoints
+# ──────────────────────────────────────────────────────────────────────────
+
+def _require_br():
+    if _SYSTEM_MODE != "br" or br_engine is None:
+        raise HTTPException(400, "BR endpoints only available when SYSTEM_MODE=br")
+
+
+@app.get("/api/br/status")
+async def br_status():
+    if _SYSTEM_MODE != "br":
+        return {"mode": _SYSTEM_MODE, "available": False}
+    return {
+        "mode": "br",
+        "available": True,
+        "running": br_engine.running if br_engine else False,
+        "symbols": br_engine.symbols if br_engine else [],
+        "enabled_setups": sorted(br_engine.enabled_setups) if br_engine else [],
+        "risk_usd": br_engine.risk_usd if br_engine else 0,
+        "rr_ratio": br_engine.rr_ratio if br_engine else 0,
+        "tick_seconds": br_engine.tick_seconds if br_engine else 0,
+        "max_hold_hours": br_engine.max_hold_hours if br_engine else 0,
+        "slippage_pips": br_engine.slippage_pips if br_engine else 0,
+        "commission_per_lot_usd": br_engine.commission_per_lot_usd if br_engine else 0,
+    }
+
+
+@app.post("/api/br/start")
+async def br_start():
+    _require_br()
+    await br_engine.start()
+    return {"running": True}
+
+
+@app.post("/api/br/stop")
+async def br_stop():
+    _require_br()
+    await br_engine.stop()
+    return {"running": False}
+
+
+@app.put("/api/br/config")
+async def br_update_config(data: dict):
+    _require_br()
+    async with async_session_factory() as s:
+        # Whitelist of editable BR config keys + their format
+        if "symbols" in data:
+            await set_config("br_enabled_symbols", json.dumps(data["symbols"]), s)
+        if "enabled_setups" in data:
+            await set_config("br_enabled_setups", json.dumps(data["enabled_setups"]), s)
+        for num_key in ("risk_usd", "rr_ratio", "slippage_pips",
+                         "commission_per_lot_usd", "max_hold_hours", "tick_seconds"):
+            if num_key in data and data[num_key] is not None and data[num_key] != "":
+                await set_config(f"br_{num_key}", str(data[num_key]), s)
+    # Push to live engine without requiring a restart
+    if br_engine:
+        await br_engine.load_config()
+    return {"updated": True}
+
+
+@app.get("/api/br/trades")
+async def br_trades(limit: int = 200):
+    _require_br()
+    async with async_session_factory() as s:
+        rows = await s.execute(
+            select(Trade).where(
+                (Trade.ict_setup.like("BR/%")) | (Trade.ict_setup.like("BR/%"))
+            ).order_by(desc(Trade.created_at)).limit(limit)
+        )
+        trades = rows.scalars().all()
+    return [_trade_to_dict(t) for t in trades]
+
+
+@app.get("/api/br/summary")
+async def br_summary():
+    _require_br()
+    from sqlalchemy import select as _sel, and_
+    async with async_session_factory() as s:
+        rows = await s.execute(
+            _sel(Trade).where(Trade.ict_setup.like("BR/%"))
+        )
+        ts = rows.scalars().all()
+    closed = [t for t in ts if t.status == "CLOSED"]
+    wins  = sum(1 for t in closed if (t.result or "").upper() == "WIN")
+    losses = sum(1 for t in closed if (t.result or "").upper() == "LOSS")
+    pnl = sum(float(t.pnl_usd or 0) for t in closed)
+    pips = sum(float(t.pnl_pips or 0) for t in closed)
+    by_symbol = {}
+    by_setup  = {}
+    for t in closed:
+        by_symbol.setdefault(t.symbol, {"n": 0, "wins": 0, "pnl": 0.0})
+        by_symbol[t.symbol]["n"] += 1
+        if (t.result or "").upper() == "WIN":
+            by_symbol[t.symbol]["wins"] += 1
+        by_symbol[t.symbol]["pnl"] += float(t.pnl_usd or 0)
+        setup_label = (t.ict_setup or "").replace("BR/", "")
+        by_setup.setdefault(setup_label, {"n": 0, "wins": 0, "pnl": 0.0})
+        by_setup[setup_label]["n"] += 1
+        if (t.result or "").upper() == "WIN":
+            by_setup[setup_label]["wins"] += 1
+        by_setup[setup_label]["pnl"] += float(t.pnl_usd or 0)
+    return {
+        "total_trades": len(closed),
+        "wins": wins, "losses": losses,
+        "win_rate": round(wins / len(closed) * 100, 2) if closed else 0,
+        "total_pnl_usd": round(pnl, 2),
+        "total_pips": round(pips, 1),
+        "open": len([t for t in ts if t.status == "ACTIVE"]),
+        "by_symbol": by_symbol,
+        "by_setup": by_setup,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────
 
 
 def _bt_to_dict(r: BacktestRun) -> dict:

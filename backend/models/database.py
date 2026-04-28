@@ -19,7 +19,11 @@ import os as _os
 # SYSTEM_MODE selects DB and behavior. Default "production" (real MT5, fase 1 only).
 # "lab" uses a separate DB, paper-mode, and activates all 4 phases.
 SYSTEM_MODE = _os.getenv("SYSTEM_MODE", "production").lower()
-_DB_NAME = "tradewizard_lab.db" if SYSTEM_MODE == "lab" else "tradewizard.db"
+_DB_NAME = (
+    "tradewizard_lab.db" if SYSTEM_MODE == "lab" else
+    "tradewizard_br.db"  if SYSTEM_MODE == "br"  else
+    "tradewizard.db"
+)
 DATABASE_URL = f"sqlite+aiosqlite:///./{_DB_NAME}"
 
 engine = create_async_engine(DATABASE_URL, echo=False)
