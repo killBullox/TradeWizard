@@ -290,6 +290,32 @@ def positions():
     ]
 
 
+_TF_MAP = {
+    "M1": mt5.TIMEFRAME_M1 if MT5_AVAILABLE else None,
+    "M5": mt5.TIMEFRAME_M5 if MT5_AVAILABLE else None,
+    "M15": mt5.TIMEFRAME_M15 if MT5_AVAILABLE else None,
+    "M30": mt5.TIMEFRAME_M30 if MT5_AVAILABLE else None,
+    "H1": mt5.TIMEFRAME_H1 if MT5_AVAILABLE else None,
+    "H4": mt5.TIMEFRAME_H4 if MT5_AVAILABLE else None,
+    "D1": mt5.TIMEFRAME_D1 if MT5_AVAILABLE else None,
+    "W1": mt5.TIMEFRAME_W1 if MT5_AVAILABLE else None,
+} if MT5_AVAILABLE else {}
+
+
+def _serialize_rates(rates) -> list[dict]:
+    if rates is None or len(rates) == 0:
+        return []
+    out = []
+    for r in rates:
+        ts = datetime.utcfromtimestamp(int(r[0])).strftime("%Y-%m-%dT%H:%M:%S")
+        out.append({
+            "time": ts, "open": round(float(r[1]), 6),
+            "high": round(float(r[2]), 6), "low": round(float(r[3]), 6),
+            "close": round(float(r[4]), 6), "volume": int(r[5]),
+        })
+    return out
+
+
 @app.get("/candles")
 def candles(symbol: str = Query(...), timeframe: str = Query("H1"), count: int = Query(500)):
     if not MT5_AVAILABLE:
@@ -298,24 +324,37 @@ def candles(symbol: str = Query(...), timeframe: str = Query("H1"), count: int =
         sym = _normalize_symbol(symbol)
         if not sym:
             return []
-        tf_map = {
-            "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
-            "M30": mt5.TIMEFRAME_M30, "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4,
-            "D1": mt5.TIMEFRAME_D1, "W1": mt5.TIMEFRAME_W1,
-        }
-        tf_id = tf_map.get(timeframe.upper(), mt5.TIMEFRAME_H1)
+        tf_id = _TF_MAP.get(timeframe.upper(), mt5.TIMEFRAME_H1)
         rates = mt5.copy_rates_from_pos(sym, tf_id, 0, min(count, 50000))
-    if rates is None or len(rates) == 0:
-        return []
-    result = []
-    for r in rates:
-        ts = datetime.utcfromtimestamp(int(r[0])).strftime("%Y-%m-%dT%H:%M:%S")
-        result.append({
-            "time": ts, "open": round(float(r[1]), 6),
-            "high": round(float(r[2]), 6), "low": round(float(r[3]), 6),
-            "close": round(float(r[4]), 6), "volume": int(r[5]),
-        })
-    return result
+    return _serialize_rates(rates)
+
+
+@app.get("/candles/range")
+def candles_range(symbol: str = Query(...), timeframe: str = Query("M1"),
+                  from_ts: str = Query(...), to_ts: str = Query(...)):
+    """Fetch candles between two ISO datetimes. Used by the backtester to
+    pull M1 bars for precise intra-H1-candle entry/exit timestamps. The
+    backtester was calling this endpoint and getting silent 404s, falling
+    back to H1-resolution timestamps and the 'M1 not available' warning.
+    Now wired through mt5.copy_rates_range."""
+    if not MT5_AVAILABLE:
+        return {"candles": [], "error": "mt5_unavailable"}
+    try:
+        # Accept ISO with or without T separator, with or without trailing Z
+        def _parse(s: str) -> datetime:
+            s = s.replace("Z", "").replace("T", " ")
+            return datetime.fromisoformat(s)
+        dt_from = _parse(from_ts)
+        dt_to   = _parse(to_ts)
+    except Exception as exc:
+        return {"candles": [], "error": f"bad timestamp: {exc}"}
+    with _MT5_LOCK:
+        sym = _normalize_symbol(symbol)
+        if not sym:
+            return {"candles": [], "error": f"unknown symbol: {symbol}"}
+        tf_id = _TF_MAP.get(timeframe.upper(), mt5.TIMEFRAME_M1)
+        rates = mt5.copy_rates_range(sym, tf_id, dt_from, dt_to)
+    return {"candles": _serialize_rates(rates), "count": len(rates) if rates is not None else 0}
 
 
 @app.get("/tick")
