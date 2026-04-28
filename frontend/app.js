@@ -2348,7 +2348,88 @@ function _updateCacheProgress(done, total) {
   }
 }
 
+// Symbols available in the data cache UI (mirrored on backtest)
+const _CACHE_SYMBOLS = _BT_SYMBOLS;
+
+function _renderCacheSymbols() {
+  const row = document.getElementById('cache-symbols-row');
+  if (!row) return;
+  const allBtn = document.getElementById('cache-symbols-all');
+  for (const sym of _CACHE_SYMBOLS) {
+    if (document.getElementById('cache-sym-chk-' + sym)) continue;
+    const lbl = document.createElement('label');
+    lbl.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:4px 10px;border:1px solid var(--border);border-radius:14px;cursor:pointer;font-size:0.8rem;user-select:none';
+    lbl.innerHTML = `<input type="checkbox" id="cache-sym-chk-${sym}" class="cache-sym-chk" value="${sym}" ${sym === 'EURUSD' ? 'checked' : ''} style="margin:0">${sym}`;
+    row.insertBefore(lbl, allBtn);
+  }
+  document.getElementById('cache-symbols-all')?.addEventListener('click',
+    () => document.querySelectorAll('.cache-sym-chk').forEach(el => el.checked = true));
+  document.getElementById('cache-symbols-none')?.addEventListener('click',
+    () => document.querySelectorAll('.cache-sym-chk').forEach(el => el.checked = false));
+}
+_renderCacheSymbols();
+
+async function _buildOneCache(sym, tf, dur, indexLabel) {
+  const bars = (_DURATION_BARS[dur] || {})[tf] || 8760;
+  _showCacheProgress(`${indexLabel}Building ${sym} ${tf} (${bars.toLocaleString()} bars)…`);
+  _updateCacheProgress(0, bars);
+
+  const key   = `${sym}_${tf}`;
+  const keyM1 = `${sym}_M1`;
+
+  await fetchJSON('/api/ohlcv/build', { method: 'POST', body: JSON.stringify({ symbol: sym, timeframe: tf, bars }) });
+
+  // Wait for the H1 phase, then for the auto M1 phase
+  const waitFor = (trackKey, label, idleRetries = 5) => new Promise((resolve) => {
+    const run = async (retries) => {
+      const p = await fetchJSON(`/api/ohlcv/progress/${trackKey}`).catch(() => null);
+      if (!p || p.status === 'idle') {
+        if (retries > 0) setTimeout(() => run(retries - 1), 1200);
+        else             resolve();
+        return;
+      }
+      _showCacheProgress(label);
+      _updateCacheProgress(p.done || 0, p.total || 0);
+      const bar = document.getElementById('cache-progress-bar');
+      if (bar) bar.classList.remove('cache-bar-pulse');
+      if      (p.status === 'done')  { refreshCacheStatus(); resolve(); }
+      else if (p.status === 'error') { _hideCacheProgress(); alert(`Error (${trackKey}): ${p.error}`); resolve(); }
+      else    setTimeout(() => run(0), 1000);
+    };
+    setTimeout(() => run(idleRetries), 800);
+  });
+
+  await waitFor(key,   `${indexLabel}Building ${sym} ${tf}…`);
+  if (tf !== 'M1') await waitFor(keyM1, `${indexLabel}Building ${sym} M1 precision data…`);
+}
+
 async function cacheBuild() {
+  const tf   = document.getElementById('cache-tf')?.value || 'H1';
+  const dur  = document.getElementById('cache-duration')?.value || '1y';
+  const symbols = [...document.querySelectorAll('.cache-sym-chk:checked')].map(el => el.value);
+
+  if (symbols.length === 0) {
+    alert('Seleziona almeno un simbolo da cachare.');
+    return;
+  }
+
+  if (!_cachePollTimer) _cachePollTimer = setInterval(refreshCacheStatus, 1500);
+
+  // Run sequentially so we don't hammer the bridge with 9 parallel ranges
+  for (let i = 0; i < symbols.length; i++) {
+    const idx = symbols.length > 1 ? `[${i+1}/${symbols.length}] ` : '';
+    try {
+      await _buildOneCache(symbols[i], tf, dur, idx);
+    } catch (e) {
+      console.error('Cache build failed', symbols[i], e);
+    }
+  }
+  _hideCacheProgress();
+  refreshCacheStatus();
+}
+
+// Legacy single-symbol path kept as fallback for existing callers
+async function cacheBuildLegacy() {
   const sym  = document.getElementById('cache-symbol')?.value || 'EURUSD';
   const tf   = document.getElementById('cache-tf')?.value || 'H1';
   const dur  = document.getElementById('cache-duration')?.value || '1y';

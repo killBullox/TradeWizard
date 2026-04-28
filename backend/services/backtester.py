@@ -805,6 +805,19 @@ class Backtester:
                 raw = await _oanda_fetch(self.symbol, self.timeframe, self.bars,
                                          api_key=self.oanda_api_key,
                                          practice=self.oanda_practice)
+            # Persist what we just fetched so the next backtest on the same
+            # symbol/timeframe hits the cache instead of the bridge. Avoids
+            # the "every backtest re-fetches everything" cost the user noticed.
+            try:
+                from services.ohlcv_cache import upsert_candles
+                fetched = raw.get("candles") if isinstance(raw, dict) else []
+                if fetched:
+                    n = await upsert_candles(self.symbol, self.timeframe, fetched)
+                    logger.info("Backtest cache populated: %s %s -> %d new bars",
+                                self.symbol, self.timeframe, n)
+            except Exception as exc:
+                logger.warning("Backtest cache populate failed (%s %s): %s",
+                               self.symbol, self.timeframe, exc)
 
         candles = [Candle(**c) for c in raw.get("candles", [])]
 
@@ -871,6 +884,14 @@ class Backtester:
                 self.m1_index = build_m1_index(m1_raw)
                 logger.info("M1 index: %d hour buckets from %s for %s",
                             len(self.m1_index), m1_source, self.symbol)
+                # Auto-cache M1 too — only if we just fetched it from the API
+                if m1_source in ("MT5", "OANDA"):
+                    try:
+                        from services.ohlcv_cache import upsert_candles
+                        n = await upsert_candles(self.symbol, "M1", m1_raw)
+                        logger.info("Backtest cache populated: %s M1 -> %d new bars", self.symbol, n)
+                    except Exception as exc:
+                        logger.warning("Backtest M1 cache populate failed (%s): %s", self.symbol, exc)
             else:
                 logger.warning("M1 data empty from %s — timestamps will be H1 resolution", m1_source or "no source")
         except Exception as exc:
