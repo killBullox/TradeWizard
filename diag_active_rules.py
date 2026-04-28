@@ -24,7 +24,7 @@ async def main():
         print(f"#{r.id} {r.status:9s} {r.rule_type:12s} setup={r.setup_type!r} sym={r.symbol!r} sess={r.session!r}")
         print(f"   cond: {cond}")
         print(f"   action: {act}")
-        print(f"   conf={r.confidence} n={r.sample_size}  applications={r.applications_count}  accuracy={r.accuracy}")
+        print(f"   conf={r.confidence} n={r.sample_size}  status={r.status}")
         print(f"   created={str(r.created_at)[:16]}  desc={(r.description or '')[:80]}")
         print()
 
