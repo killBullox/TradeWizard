@@ -3491,4 +3491,24 @@ document.querySelector('.tab[data-tab="br"]')?.addEventListener('click', () => {
   _brLoadStatus();
   _brLoadSummary();
 });
-_renderBrChips();
+
+// Bootstrap: render chips and load status as soon as the page is ready.
+// If the user is already on the BR backend, the panel renders without needing
+// a click. Auto-refresh every 10s while the tab is visible.
+function _brBootstrap() {
+  _renderBrChips();
+  _brLoadStatus();
+  _brLoadSummary();
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _brBootstrap);
+} else {
+  _brBootstrap();
+}
+setInterval(() => {
+  const tab = document.getElementById('tab-br');
+  if (tab && tab.style.display !== 'none' && tab.classList.contains('active')) {
+    _brLoadStatus();
+    _brLoadSummary();
+  }
+}, 10000);
