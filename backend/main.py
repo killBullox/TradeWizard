@@ -1122,6 +1122,10 @@ async def backtest_run(data: dict):
         enabled_setups  = data.get("enabled_setups") or None
         date_from       = data.get("date_from") or None
         date_to         = data.get("date_to")   or None
+        # Realistic-cost knobs — None means "use per-symbol defaults"
+        spread_pips     = float(data["spread_pips"]) if data.get("spread_pips") not in (None, "") else None
+        slippage_pips   = float(data["slippage_pips"]) if data.get("slippage_pips") not in (None, "") else None
+        commission_per_lot_usd = float(data["commission_per_lot_usd"]) if data.get("commission_per_lot_usd") not in (None, "") else None
 
         valid_tf = {"M1","M5","M15","M30","H1","H4","D1"}
         valid_st = {"FVG","OrderBlock","Liquidity","Mixed"}
@@ -1153,6 +1157,8 @@ async def backtest_run(data: dict):
             risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups,
             oanda_key, oanda_practice, mt5_bridge_url,
             date_from=date_from, date_to=date_to,
+            spread_pips=spread_pips, slippage_pips=slippage_pips,
+            commission_per_lot_usd=commission_per_lot_usd,
         ))
         return {"run_id": run_id, "status": "RUNNING", "symbols": symbols}
     except HTTPException:
@@ -1191,6 +1197,7 @@ async def _exec_backtest_multi(
     risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None,
     oanda_api_key="", oanda_practice=True, mt5_bridge_url="",
     date_from=None, date_to=None,
+    spread_pips=None, slippage_pips=None, commission_per_lot_usd=None,
 ):
     """Run one backtest per symbol and aggregate trades/equity into a
     single BacktestRun row. Each trade keeps its own `symbol` field so
@@ -1209,6 +1216,8 @@ async def _exec_backtest_multi(
                     enabled_setups=enabled_setups, date_from=date_from, date_to=date_to,
                     oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
                     mt5_bridge_url=mt5_bridge_url,
+                    spread_pips=spread_pips, slippage_pips=slippage_pips,
+                    commission_per_lot_usd=commission_per_lot_usd,
                 )
             except Exception as exc:
                 logger.warning("Backtest %s on %s failed: %s", run_id, sym, exc)

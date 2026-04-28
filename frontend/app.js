@@ -1845,6 +1845,10 @@ async function runBacktest() {
     return;
   }
 
+  const spreadVal     = document.getElementById('bt-spread-pips')?.value;
+  const slippageVal   = document.getElementById('bt-slippage-pips')?.value;
+  const commissionVal = document.getElementById('bt-commission')?.value;
+
   const payload = {
     symbols,
     timeframe:       document.getElementById('bt-tf')?.value      || 'H1',
@@ -1856,6 +1860,9 @@ async function runBacktest() {
     rr_ratio:        parseFloat(document.getElementById('bt-rr')?.value    || 2.0),
     initial_balance: parseFloat(document.getElementById('bt-balance')?.value || 10000),
     max_risk_usd:    maxRiskVal ? parseFloat(maxRiskVal) : null,
+    spread_pips:            spreadVal     !== '' && spreadVal     != null ? parseFloat(spreadVal)     : null,
+    slippage_pips:          slippageVal   !== '' && slippageVal   != null ? parseFloat(slippageVal)   : null,
+    commission_per_lot_usd: commissionVal !== '' && commissionVal != null ? parseFloat(commissionVal) : null,
     enabled_setups:  checkedSetups.length === document.querySelectorAll('.bt-setup-chk').length ? null : checkedSetups,
   };
 

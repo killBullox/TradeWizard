@@ -635,6 +635,20 @@
               <label>Max Risk per trade ($)</label>
               <input type="number" id="bt-max-risk-usd" class="form-input" placeholder="No cap" min="1" step="10" />
             </div>
+            <div class="form-group">
+              <label>Spread (pip)
+                <span style="font-size:0.7rem;color:var(--text-muted);font-weight:normal">(empty = per-symbol default)</span>
+              </label>
+              <input type="number" id="bt-spread-pips" class="form-input" placeholder="auto" min="0" step="0.1" />
+            </div>
+            <div class="form-group">
+              <label>Slippage (pip)</label>
+              <input type="number" id="bt-slippage-pips" class="form-input" placeholder="0.5" value="0.5" min="0" step="0.1" />
+            </div>
+            <div class="form-group">
+              <label>Commission ($/lot round-trip)</label>
+              <input type="number" id="bt-commission" class="form-input" placeholder="7.0" value="7.0" min="0" step="0.5" />
+            </div>
           </div>
           <!-- Custom date range row (shown only when "custom" selected) -->
           <div id="bt-date-custom-row" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px">

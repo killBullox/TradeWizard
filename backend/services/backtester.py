@@ -741,13 +741,32 @@ class ICTAnalyzer:
 
 # ── Backtesting engine ────────────────────────────────────────────────────────
 
+# Realistic trading costs by symbol — average bid/ask spread in pips and
+# typical adverse slippage on entry+exit. Tuned on AvaTrade and ICMarkets
+# retail spreads as of 2026; adjust per broker. Commission is per LOT
+# round-trip in USD (so 0.1 lot pays 0.7 USD on a $7/lot broker).
+_SPREAD_PIPS = {
+    "EURUSD": 0.7, "GBPUSD": 0.9, "USDJPY": 0.8, "USDCHF": 1.4,
+    "AUDUSD": 1.0, "NZDUSD": 1.6, "USDCAD": 1.5,
+    "EURJPY": 1.2, "GBPJPY": 2.0, "EURGBP": 1.0,
+    "XAUUSD": 30.0,  # gold spread is in 0.01 pips, ~30 cents bid/ask
+    "US30": 2.5, "NAS100": 1.5, "US500": 0.8,
+}
+_DEFAULT_SPREAD_PIPS = 1.5
+_SLIPPAGE_PIPS_DEFAULT = 0.5    # adverse slippage per round-trip
+_COMMISSION_PER_LOT_USD = 7.0   # round-trip per standard lot
+
+
 class Backtester:
     def __init__(self, symbol, timeframe, strategy="Mixed", bars=500,
                  risk_percent=1.0, rr_ratio=2.0, initial_balance=10_000.0,
                  max_risk_usd=None, enabled_setups=None,
                  date_from: str = None, date_to: str = None,
                  oanda_api_key: str = "", oanda_practice: bool = True,
-                 mt5_bridge_url: str = ""):
+                 mt5_bridge_url: str = "",
+                 spread_pips: float | None = None,
+                 slippage_pips: float | None = None,
+                 commission_per_lot_usd: float | None = None):
         self.symbol          = symbol
         self.timeframe       = timeframe
         self.strategy        = strategy
@@ -763,6 +782,14 @@ class Backtester:
         self.oanda_api_key   = oanda_api_key or os.getenv("OANDA_API_KEY", "")
         self.oanda_practice  = oanda_practice
         self.m1_index: dict[str, list[dict]] = {}   # hour_key → [m1 candles]
+        # Cost model — user-supplied or per-symbol defaults
+        self.spread_pips = (spread_pips if spread_pips is not None
+                            else _SPREAD_PIPS.get(symbol, _DEFAULT_SPREAD_PIPS))
+        self.slippage_pips = (slippage_pips if slippage_pips is not None
+                              else _SLIPPAGE_PIPS_DEFAULT)
+        self.commission_per_lot_usd = (commission_per_lot_usd
+                                       if commission_per_lot_usd is not None
+                                       else _COMMISSION_PER_LOT_USD)
 
         self.pip             = (0.01 if "JPY" in symbol else
                                 1.0  if symbol in ("XAUUSD","US30","NAS100","US500") else
@@ -1119,14 +1146,31 @@ class Backtester:
         trade.exit_price = round(exit_price, 5)
         trade.result     = result
         entry = trade.entry_price
-        pips  = ((exit_price - entry) if trade.direction == "BUY" else (entry - exit_price)) / self.pip
-        trade.pnl_pips = round(pips, 1)
-        pnl_usd        = pips * self.pip_value * trade.lot_size
+        gross_pips = ((exit_price - entry) if trade.direction == "BUY" else (entry - exit_price)) / self.pip
+        # Apply realistic friction:
+        #   - spread eats both entry and exit fills (round-trip)
+        #   - slippage is the average adverse fill on top
+        # Result: net pips lower than the geometric distance the candle
+        # achieved. This is the same gap a real broker introduces between
+        # "price touched the level" and "your order filled at the level".
+        friction_pips = self.spread_pips + self.slippage_pips
+        net_pips = gross_pips - friction_pips
+        trade.pnl_pips = round(net_pips, 1)
+        pnl_usd  = net_pips * self.pip_value * trade.lot_size
+        # Round-trip commission (per lot)
+        pnl_usd -= self.commission_per_lot_usd * trade.lot_size
         trade.pnl_usd  = round(pnl_usd, 2)
         trade.pnl_pct  = round(pnl_usd / max(balance, 1) * 100, 3)
         sl_dist = abs(entry - trade.stop_loss) / self.pip
         if sl_dist > 0:
-            trade.rr_actual = round(abs(pips) / sl_dist * (1 if result == "WIN" else -1), 2)
+            # rr_actual now reflects net pips after friction so it lines
+            # up with the dollar P&L instead of the gross geometric move
+            trade.rr_actual = round(abs(net_pips) / sl_dist * (1 if pnl_usd > 0 else -1), 2)
+        # Reclassify edge-case where friction turned a touched-TP into a
+        # net loss: the trade hit TP geometrically but cost more in
+        # spread+commission than the move was worth.
+        if pnl_usd <= 0 and result == "WIN":
+            trade.result = "LOSS"
         return trade
 
 
@@ -1137,7 +1181,9 @@ async def run_backtest(symbol, timeframe="H1", strategy="Mixed",
                        initial_balance=10_000.0, max_risk_usd=None,
                        enabled_setups=None, date_from=None, date_to=None,
                        oanda_api_key: str = "", oanda_practice: bool = True,
-                       mt5_bridge_url: str = "") -> BacktestResult:
+                       mt5_bridge_url: str = "",
+                       spread_pips=None, slippage_pips=None,
+                       commission_per_lot_usd=None) -> BacktestResult:
     return await Backtester(
         symbol=symbol, timeframe=timeframe, strategy=strategy,
         bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
@@ -1145,4 +1191,6 @@ async def run_backtest(symbol, timeframe="H1", strategy="Mixed",
         enabled_setups=enabled_setups, date_from=date_from, date_to=date_to,
         oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
         mt5_bridge_url=mt5_bridge_url,
+        spread_pips=spread_pips, slippage_pips=slippage_pips,
+        commission_per_lot_usd=commission_per_lot_usd,
     ).run()
