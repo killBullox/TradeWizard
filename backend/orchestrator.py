@@ -280,6 +280,9 @@ class Orchestrator:
         """Collect rejected trades + rejection reasons from the last 4h and
         run a meeting whose agenda is exclusively: 'unblock the system by
         adjusting tunable parameters'."""
+        if await self._meetings_frozen():
+            logger.info("AUTO_TUNING meeting skipped — meeting_freeze_until in effect")
+            return
         from datetime import timedelta as _td
         cutoff = datetime.utcnow() - _td(hours=4)
         async with async_session_factory() as s:
@@ -1460,7 +1463,32 @@ class Orchestrator:
     #  Meeting & Self-Improvement
     # ------------------------------------------------------------------ #
 
+    async def _meetings_frozen(self) -> bool:
+        """When `meeting_freeze_until` is a future ISO UTC timestamp, all
+        scheduled/automatic meetings are blocked. User-convened EMERGENCY
+        meetings still go through (they bypass run_meeting).
+
+        Why: with too many meetings per day (8/day in late April) the
+        config never stabilises long enough to gather evidence on any
+        change. A 24-48h freeze lets a single config run, accumulate
+        trades, and only THEN review.
+        """
+        try:
+            async with async_session_factory() as s:
+                raw = await get_config("meeting_freeze_until", s)
+            if not raw:
+                return False
+            until = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=ZoneInfo("UTC"))
+            return datetime.now(ZoneInfo("UTC")) < until
+        except Exception:
+            return False
+
     async def run_meeting(self, meeting_type: str = "POST_TRADE", trades: list | None = None):
+        if await self._meetings_frozen():
+            logger.info("Meeting %s skipped — meeting_freeze_until still in effect", meeting_type)
+            return
         async with async_session_factory() as s:
             config = await self._load_config(s)
             perf_raw = await get_config("system_performance", s)

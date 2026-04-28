@@ -22,9 +22,15 @@ from typing import Optional
 log = logging.getLogger("learning_rules")
 
 
-# Minimum thresholds for automatic lifecycle transitions
+# Minimum thresholds for automatic lifecycle transitions.
+# Raised after 2026-04-28 audit: sample=5 was too low — real-world (setup ×
+# symbol × session) cells accumulate 1-2 trades per week, so rules became
+# ACTIVE on n=1 and never had enough subsequent data to be CONFIRMED. The
+# system ended up with 22 ACTIVE rules from single losing trades, all
+# blocking trade flow. Threshold doubled to 10 so a rule has to survive
+# more than one anecdotal observation before it gates real money.
 AUTO_ACTIVATE_MIN_CONFIDENCE = 0.5
-AUTO_ACTIVATE_MIN_SAMPLE = 5
+AUTO_ACTIVATE_MIN_SAMPLE = 10
 CONFIRM_MIN_APPLICATIONS = 5
 CONFIRM_MIN_ACCURACY = 0.60
 DEPRECATE_MIN_APPLICATIONS = 10
