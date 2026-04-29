@@ -247,23 +247,40 @@ class BREngine:
             logger.warning("BR %s: bad sig_bar %d", symbol, sig_bar)
             return
 
-        # Already processed?
-        if self._last_signal_bar.get(symbol) == sig_bar_time:
+        # Cold start: the very first time we see a symbol, just memorize
+        # the current latest signal bar and DO NOT trade. From the next
+        # tick onward we'll only fire when ICTAnalyzer produces a signal
+        # on a NEWER bar than the one we memorized.
+        # Why: ICTAnalyzer rejects swings within w bars of the series end
+        # (`sh`/`sl` use range(s+w, n-w)). FVG/OB/Liquidity confirmations
+        # need 5-7 H1 candles of lookforward. So the "most recent" signal
+        # the analyzer ever returns is structurally already several hours
+        # old. The previous 2.5h freshness cutoff filtered out 100% of
+        # signals and BR never opened a trade. Removed.
+        last_known = self._last_signal_bar.get(symbol)
+        if last_known is None:
+            logger.info("BR %s: cold-start memo at %s (no trade — first observation)",
+                        symbol, sig_bar_time)
+            self._last_signal_bar[symbol] = sig_bar_time
+            return
+        if last_known == sig_bar_time:
             logger.debug("BR %s: signal at %s already processed", symbol, sig_bar_time)
             return
-
-        # Skip stale signals (more than 2 hours old) — BR fires on the
-        # bar that just closed, not on every history bar.
+        # Sanity bound: don't open trades on signals older than max_hold
+        # (would be force-closed at next monitor tick anyway).
         try:
             sig_dt = datetime.fromisoformat(sig_bar_time.replace("Z", ""))
             age_h = (datetime.utcnow() - sig_dt).total_seconds() / 3600
-            if age_h > 2.5:
-                logger.info("BR %s: signal at %s is %.1fh old (>2.5h) — skip+memo",
-                            symbol, sig_bar_time, age_h)
+            if age_h > self.max_hold_hours:
+                logger.info("BR %s: new signal at %s is %.1fh old (>%dh max_hold) — memo only",
+                            symbol, sig_bar_time, age_h, self.max_hold_hours)
                 self._last_signal_bar[symbol] = sig_bar_time
                 return
+            logger.info("BR %s: NEW signal at %s (%.1fh old, prev=%s) — opening trade",
+                        symbol, sig_bar_time, age_h, last_known)
         except Exception:
-            pass
+            logger.info("BR %s: NEW signal at %s (prev=%s) — opening trade",
+                        symbol, sig_bar_time, last_known)
 
         # Already an open BR trade on this symbol? Skip — same as backtester
         # which runs one position at a time.
