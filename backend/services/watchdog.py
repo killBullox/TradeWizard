@@ -196,17 +196,30 @@ async def check_analysis_freshness() -> tuple[bool, str]:
 
     cur_min = now_rome.hour * 60 + now_rome.minute
     in_kz = False
+    minutes_since_kz_open = None
     for w in kill_zones:
         try:
             sh, sm = map(int, w["start"].split(":"))
             eh, em = map(int, w["end"].split(":"))
-            if sh * 60 + sm <= cur_min < eh * 60 + em:
+            kz_start = sh * 60 + sm
+            kz_end   = eh * 60 + em
+            if kz_start <= cur_min < kz_end:
                 in_kz = True
+                minutes_since_kz_open = cur_min - kz_start
                 break
         except Exception:
             continue
     if not in_kz:
         return True, "Outside kill zone — analysis freshness not required"
+    # Grace period: at the boundary where a new kill zone opens, last_analysis
+    # is still stale from the previous (closed) kill zone. The orchestrator
+    # needs a few minutes to run its first cycle. Without this grace the
+    # watchdog spam-restarts the backend at every kill zone open
+    # (observed 2026-04-29 14:12 Rome = 12 min into NY open).
+    KZ_OPEN_GRACE_MIN = 15
+    if minutes_since_kz_open is not None and minutes_since_kz_open < KZ_OPEN_GRACE_MIN:
+        return True, (f"Kill zone just opened {minutes_since_kz_open}min ago "
+                      f"(grace {KZ_OPEN_GRACE_MIN}min) — analysis freshness not required yet")
 
     try:
         async with httpx.AsyncClient(timeout=5) as client:
