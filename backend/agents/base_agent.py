@@ -27,8 +27,17 @@ class BaseAgent:
     model: str = MODEL_ANALYST   # override per-agent to MODEL_STANDARD to save cost
 
     def __init__(self, broadcast_fn: Optional[Callable[[dict], Awaitable[None]]] = None):
+        # Hard timeout on Anthropic API calls. Default SDK timeout is 600s,
+        # which is long enough to hang the entire orchestrator event loop.
+        # Observed 2026-04-29 14:55-15:19 Rome: a Journalist post-trade call
+        # never returned, the analysis_loop froze for 24 minutes until the
+        # watchdog restarted prod. With 90s the call raises APITimeoutError
+        # well before the watchdog's 25-min freshness window — the caller
+        # catches it, logs, and continues to the next cycle.
         self.client = anthropic.AsyncAnthropic(
-            api_key=os.environ.get("ANTHROPIC_API_KEY", "")
+            api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+            timeout=90.0,
+            max_retries=1,
         )
         self.broadcast = broadcast_fn or self._noop_broadcast
         self._conversation_history: list[dict] = []
