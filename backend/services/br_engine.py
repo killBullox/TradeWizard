@@ -175,21 +175,33 @@ class BREngine:
     async def _loop(self):
         # Brief startup delay so config + bridge are ready
         await asyncio.sleep(5)
+        tick = 0
         while self._running:
+            tick += 1
+            logger.info("BR scan tick #%d starting (%d symbols, setups=%s)",
+                        tick, len(self.symbols), sorted(self.enabled_setups))
             try:
                 await self.load_config()  # pick up live changes
                 for sym in self.symbols:
                     if not self._running:
                         break
-                    await self._scan_symbol(sym)
+                    try:
+                        await self._scan_symbol(sym)
+                    except Exception as exc_inner:
+                        logger.warning("BR _scan_symbol %s raised: %s",
+                                       sym, exc_inner, exc_info=True)
             except asyncio.CancelledError:
+                logger.info("BR scan loop cancelled")
                 break
             except Exception as exc:
                 logger.error("BR scan loop error: %s", exc, exc_info=True)
+            logger.info("BR scan tick #%d done — sleeping %ds", tick, self.tick_seconds)
             try:
                 await asyncio.sleep(self.tick_seconds)
             except asyncio.CancelledError:
+                logger.info("BR scan loop sleep cancelled — stopping")
                 break
+        logger.info("BR scan loop exited (tick=%d, running=%s)", tick, self._running)
 
     async def _scan_symbol(self, symbol: str):
         from services.backtester import ICTAnalyzer, Candle
@@ -204,7 +216,9 @@ class BREngine:
             logger.warning("BR fetch %s failed: %s", symbol, exc)
             return
         if len(candles_raw) < 60:
+            logger.info("BR %s: only %d candles, need >=60 — skip", symbol, len(candles_raw))
             return
+        logger.debug("BR %s: %d candles fetched", symbol, len(candles_raw))
 
         # Persist to cache so the backtester can replay BR runs
         try:
@@ -216,20 +230,26 @@ class BREngine:
         analyzer = ICTAnalyzer(candles, symbol, "H1", "Mixed")
         signals = analyzer.build_signals()
         if not signals:
+            logger.info("BR %s: 0 signals from ICTAnalyzer", symbol)
             return
+        logger.info("BR %s: %d signals (last on bar %d type=%s)",
+                    symbol, len(signals), signals[-1].get("bar"), signals[-1].get("type"))
 
         # Only consider the latest signal bar — earlier ones are history.
         last_sig = signals[-1]
         sig_type = last_sig.get("type", "")
         if sig_type not in self.enabled_setups:
+            logger.info("BR %s: last signal %s NOT in enabled setups", symbol, sig_type)
             return
         sig_bar = last_sig["bar"]
         sig_bar_time = candles[sig_bar].time if 0 <= sig_bar < len(candles) else None
         if not sig_bar_time:
+            logger.warning("BR %s: bad sig_bar %d", symbol, sig_bar)
             return
 
         # Already processed?
         if self._last_signal_bar.get(symbol) == sig_bar_time:
+            logger.debug("BR %s: signal at %s already processed", symbol, sig_bar_time)
             return
 
         # Skip stale signals (more than 2 hours old) — BR fires on the
@@ -238,6 +258,8 @@ class BREngine:
             sig_dt = datetime.fromisoformat(sig_bar_time.replace("Z", ""))
             age_h = (datetime.utcnow() - sig_dt).total_seconds() / 3600
             if age_h > 2.5:
+                logger.info("BR %s: signal at %s is %.1fh old (>2.5h) — skip+memo",
+                            symbol, sig_bar_time, age_h)
                 self._last_signal_bar[symbol] = sig_bar_time
                 return
         except Exception:
@@ -246,6 +268,7 @@ class BREngine:
         # Already an open BR trade on this symbol? Skip — same as backtester
         # which runs one position at a time.
         if await self._has_open_trade(symbol):
+            logger.info("BR %s: open trade exists — skip new signal", symbol)
             return
 
         # Build trade params from the signal (mirrors _make_pending /
