@@ -156,14 +156,56 @@ async def check_lab_backend() -> tuple[bool, str]:
 
 
 async def check_analysis_freshness() -> tuple[bool, str]:
-    """During kill zone (5-19 Rome), last_analysis must be < 25 min old."""
+    """During an active kill zone (read from backend config in Rome time),
+    last_analysis must be < 25 min old. Outside kill zones the backend
+    legitimately skips analysis cycles (the orchestrator's analysis_loop
+    logs 'Outside Kill Zone — skipping analysis cycle'), so freshness is
+    not required.
+
+    Previously this hardcoded 5 <= hour < 19. That assumed a single
+    daily kill zone, but the real config has TWO separate windows
+    (06:30-11:00 London + 14:00-17:00 NY in Rome time). The hardcoded
+    window flagged a 'failure' between 11:00-14:00 every day and again
+    pre-06:30 + post-17:00, triggering spurious RESTARTING events that
+    bounced a perfectly healthy backend. Bug observed 2026-04-29 06:27
+    Rome: 4 restart cycles fired before the 06:30 London open
+    naturally refreshed last_analysis."""
     from datetime import datetime as _dt
+    import json as _json
     try:
         from zoneinfo import ZoneInfo
         now_rome = _dt.now(ZoneInfo("Europe/Rome"))
     except Exception:
         now_rome = _dt.utcnow()
-    if not (5 <= now_rome.hour < 19):
+
+    # Pull kill_zones from the backend's own config — the same source the
+    # orchestrator reads. Falls back to a wide default only if unreachable.
+    kill_zones = [{"start": "06:30", "end": "11:00"}, {"start": "14:00", "end": "17:00"}]
+    try:
+        async with httpx.AsyncClient(timeout=5) as cli:
+            r = await cli.get(f"{BACKEND_URL}/api/config")
+            if r.status_code == 200:
+                cfg = r.json()
+                raw = cfg.get("kill_zones")
+                if raw:
+                    parsed = _json.loads(raw) if isinstance(raw, str) else raw
+                    if isinstance(parsed, list) and parsed:
+                        kill_zones = parsed
+    except Exception:
+        pass
+
+    cur_min = now_rome.hour * 60 + now_rome.minute
+    in_kz = False
+    for w in kill_zones:
+        try:
+            sh, sm = map(int, w["start"].split(":"))
+            eh, em = map(int, w["end"].split(":"))
+            if sh * 60 + sm <= cur_min < eh * 60 + em:
+                in_kz = True
+                break
+        except Exception:
+            continue
+    if not in_kz:
         return True, "Outside kill zone — analysis freshness not required"
 
     try:
