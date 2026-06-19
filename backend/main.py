@@ -1,0 +1,2757 @@
+"""
+TradeWizard — Multi-Agent ICT Forex Trading System
+FastAPI backend with WebSocket for real-time agent communication.
+"""
+
+import sys
+import os
+# Ensure the backend directory is on sys.path regardless of where uvicorn is launched from
+sys.path.insert(0, os.path.dirname(__file__))
+
+import json
+import logging
+import asyncio
+import os
+import shutil
+from datetime import datetime
+from contextlib import asynccontextmanager
+from typing import Set
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import select, desc, delete
+
+load_dotenv()
+
+from models.database import (
+    async_session_factory, init_db, Trade, AgentLog,
+    JournalEntry, Meeting, SystemConfig, set_config, get_config,
+    BacktestRun, OhlcvBar, StrategyMemory, MT5Account,
+)
+from orchestrator import Orchestrator
+from services.forex_data import fetch_ohlcv
+from services.backtester import run_backtest
+from services.analytics import compute_analytics
+
+_log_dir = os.path.join(os.path.dirname(__file__), "..", "logs")
+os.makedirs(_log_dir, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(os.path.join(_log_dir, "tradewizard.log"), encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+# In-memory build/update progress tracker  key = "SYMBOL_TF"
+_build_tasks: dict[str, dict] = {}
+# In-memory per-run progress for multi-symbol backtests. The frontend polls
+# /api/backtest/<id> and reads `progress` to render '3/9 EURUSD - fetching M1'
+# instead of a generic spinner. Cleaned up on DONE / FAILED.
+_backtest_progress: dict[int, dict] = {}
+
+# ------------------------------------------------------------------ #
+#  WebSocket Connection Manager
+# ------------------------------------------------------------------ #
+class ConnectionManager:
+    def __init__(self):
+        self.active: Set[WebSocket] = set()
+        self._lock = asyncio.Lock()
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        async with self._lock:
+            self.active.add(ws)
+        logger.info(f"WS client connected (total: {len(self.active)})")
+
+    async def disconnect(self, ws: WebSocket):
+        async with self._lock:
+            self.active.discard(ws)
+
+    # Broadcast types that we also persist to the Activity Log DB.
+    # Internal / verbose events (agent_thinking, heartbeat tick, etc.) are skipped.
+    _PERSIST_TYPES = {
+        "system_started", "system_stopped", "trade_opened", "trade_closed",
+        "trade_rejected", "trade_sent", "sl_trailed", "tp_hit", "partial_close",
+        "meeting_started", "meeting_completed", "meeting_verdict",
+        "config_updated", "news_block", "error", "rule_block",
+    }
+
+    async def broadcast(self, message: dict):
+        # Persist to DB if it's a meaningful activity event
+        try:
+            mtype = message.get("type", "")
+            if mtype in self._PERSIST_TYPES:
+                level = {
+                    "trade_opened": "success", "trade_closed": "success",
+                    "trade_rejected": "warning", "news_block": "warning",
+                    "error": "error", "rule_block": "warning",
+                }.get(mtype, "info")
+                # Craft a human-readable message from the event
+                sym = message.get("symbol", "")
+                msg_text = message.get("message") or _format_activity(mtype, message)
+                await log_activity(msg_text, level=level, source=mtype, data=message)
+        except Exception:
+            pass
+
+        if not self.active:
+            return
+        data = json.dumps(message, default=str)
+        disconnected = set()
+        for ws in list(self.active):
+            try:
+                await ws.send_text(data)
+            except Exception:
+                disconnected.add(ws)
+        async with self._lock:
+            self.active -= disconnected
+
+
+def _format_activity(mtype: str, msg: dict) -> str:
+    sym = msg.get("symbol", "")
+    if mtype == "trade_opened":
+        return f"Trade #{msg.get('trade_id')} aperto {sym} {msg.get('direction')}"
+    if mtype == "trade_closed":
+        pnl = msg.get("pnl_usd", 0)
+        return f"Trade #{msg.get('trade_id')} chiuso {sym} {msg.get('result')} P&L ${pnl}"
+    if mtype == "trade_rejected":
+        return f"Trade {sym} rifiutato da {msg.get('agent')}: {msg.get('reason')}"
+    if mtype == "sl_trailed":
+        return f"SL trailed #{msg.get('trade_id')} {sym} → {msg.get('new_sl')}"
+    if mtype == "partial_close":
+        return f"Partial close #{msg.get('trade_id')} {msg.get('percent')}%"
+    if mtype == "tp_hit":
+        return f"TP hit #{msg.get('trade_id')} {sym}"
+    if mtype == "meeting_started":
+        return f"Meeting {msg.get('meeting_type')} avviato"
+    if mtype == "meeting_completed":
+        n = len(msg.get("improvements", []))
+        return f"Meeting {msg.get('meeting_type')} completato ({n} improvements)"
+    if mtype == "news_block":
+        return f"NEWS BLOCK {sym}: {msg.get('message','')}"
+    if mtype == "rule_block":
+        return f"Rule block {sym}: {msg.get('reason','')}"
+    if mtype == "error":
+        return f"Errore: {msg.get('message','')}"
+    return mtype
+
+
+manager = ConnectionManager()
+orchestrator: Orchestrator | None = None
+br_engine = None  # services.br_engine.BREngine — only set when SYSTEM_MODE=br
+
+
+# ------------------------------------------------------------------ #
+#  App Lifecycle
+# ------------------------------------------------------------------ #
+_bridge_proc = None
+_bridge_watchdog_thread = None
+_bridge_watchdog_stop = False
+
+
+def _spawn_bridge():
+    """Spawn (or respawn) the MT5 bridge subprocess. Skips spawn when an
+    external healthy bridge already owns :5555 — otherwise our Popen would
+    die instantly with bind error and the watchdog would loop."""
+    global _bridge_proc
+    import subprocess
+    if _bridge_alive_externally():
+        logger.info("Bridge spawn skipped — external healthy bridge already on :5555")
+        return
+    bridge_script = os.path.join(os.path.dirname(__file__), "services", "mt5_bridge_server.py")
+    _bridge_log = open(os.path.join(_log_dir, "mt5_bridge.log"), "a", encoding="utf-8")
+    _bridge_proc = subprocess.Popen(
+        [sys.executable, bridge_script],
+        stdout=subprocess.DEVNULL,
+        stderr=_bridge_log,
+    )
+    logger.info("MT5 bridge subprocess started (PID %d)", _bridge_proc.pid)
+
+
+def _bridge_alive_externally() -> bool:
+    """Return True if some other process is already serving a healthy bridge
+    on :5555 (connected=true, account!=null). When this is the case we MUST
+    NOT respawn — our subprocess would die instantly with Errno 10048
+    (address in use) and loop forever, starving the analysis cycle."""
+    import urllib.request, json as _json
+    try:
+        with urllib.request.urlopen("http://localhost:5555/health", timeout=3) as r:
+            d = _json.loads(r.read().decode("utf-8"))
+            return bool(d.get("connected")) and d.get("account") not in (None, 0, "")
+    except Exception:
+        return False
+
+
+def _bridge_watchdog_loop():
+    """Respawn the bridge if it exits. The bridge commits suicide (os._exit 1)
+    when its IPC pipe is wedged beyond recovery (4 failed order_send retries).
+
+    Important: if an external bridge already owns port 5555 and reports
+    `connected=true`, we treat the work as done and back off — otherwise we
+    enter a tight respawn loop where every Popen dies on bind failure."""
+    import time
+    while not _bridge_watchdog_stop:
+        time.sleep(3)
+        if _bridge_proc is not None and _bridge_proc.poll() is not None:
+            code = _bridge_proc.returncode
+            if _bridge_alive_externally():
+                # Some other process owns :5555 and it's healthy. Stop trying
+                # to bind; just clear our handle so /api/health falls back
+                # to the bridge-reachability check.
+                logger.info("MT5 bridge exited (code %s) but external healthy "
+                            "bridge already serves :5555 — backing off", code)
+                # Sleep longer between checks while external bridge holds.
+                # If THAT one dies later, we'll spawn ourselves on the next
+                # iteration where _bridge_alive_externally() returns False.
+                time.sleep(27)
+                continue
+            logger.warning("MT5 bridge exited with code %s — respawning", code)
+            try:
+                _spawn_bridge()
+                time.sleep(3)
+                from services.mt5_direct import get_mt5_direct
+                mt5 = get_mt5_direct()
+                mt5.connected = False  # force reconnect on next call
+                mt5.connect()
+            except Exception as exc:
+                logger.error("Bridge respawn failed: %s", exc)
+
+
+def _start_mt5_direct():
+    """Start the MT5 bridge subprocess, then connect the client, then arm watchdog.
+    In lab mode the bridge is NOT started — lab uses the production bridge on
+    port 5555 (shared, read-only) and operates in paper mode."""
+    global _bridge_watchdog_thread
+    import time, threading
+    import os as _os
+    if _os.getenv("SYSTEM_MODE", "production").lower() == "lab":
+        logger.info("Lab mode: skipping bridge spawn, using production bridge read-only")
+        try:
+            from services.mt5_direct import get_mt5_direct
+            mt5 = get_mt5_direct()
+            mt5.connect()
+        except Exception:
+            logger.warning("Lab: could not connect to production bridge (non-fatal)")
+        return
+    try:
+        _spawn_bridge()
+        # Wait for bridge to be ready
+        time.sleep(3)
+        from services.mt5_direct import get_mt5_direct
+        mt5 = get_mt5_direct()
+        if mt5.connect():
+            logger.info("MT5 bridge connection established")
+        else:
+            logger.warning("MT5 bridge not responding yet — will retry on first trade")
+        # Arm watchdog to respawn on exit
+        _bridge_watchdog_thread = threading.Thread(target=_bridge_watchdog_loop, daemon=True)
+        _bridge_watchdog_thread.start()
+    except Exception as exc:
+        logger.warning("Could not start MT5 bridge: %s", exc)
+
+
+_SYSTEM_MODE = os.getenv("SYSTEM_MODE", "production").lower()
+# Separate backup file per mode — prod and lab must NOT share state.
+# Otherwise lab's boot restores paper_mode=false from prod backup and
+# opens real trades. (Root cause of 2026-04-21 incident.)
+_BACKUP_FILE = "settings_backup_lab.json" if _SYSTEM_MODE == "lab" else "settings_backup.json"
+_SETTINGS_BACKUP = os.path.join(os.path.dirname(__file__), "..", _BACKUP_FILE)
+
+
+async def _restore_settings_from_backup():
+    """If DB settings are missing/default, restore from backup file or .env.
+    Lab mode: ALWAYS force paper_mode=true before anything else."""
+    backup_path = _SETTINGS_BACKUP
+    backup_data = {}
+    if os.path.exists(backup_path):
+        try:
+            with open(backup_path, "r") as f:
+                backup_data = json.load(f)
+            logger.info("Settings backup found at %s with %d keys", _BACKUP_FILE, len(backup_data))
+        except Exception:
+            pass
+
+    async with async_session_factory() as s:
+        # HARD INVARIANT: lab must operate in paper mode. This runs before
+        # any other restore so even if the backup contains paper_mode=false,
+        # the lab DB is immediately corrected. An extra guard in orchestrator
+        # still prevents real order execution if this ever gets bypassed.
+        if _SYSTEM_MODE == "lab":
+            await set_config("paper_mode", "true", s)
+            logger.info("Lab mode: paper_mode forced to true (ignoring backup)")
+
+        # Restore MT5 credentials: .env takes priority, then backup
+        env_fallbacks = {
+            "mt5_login":      os.getenv("MT5_LOGIN", ""),
+            "mt5_password":   os.getenv("MT5_PASSWORD", ""),
+            "mt5_server":     os.getenv("MT5_SERVER", ""),
+            "mt5_bridge_url": os.getenv("MT5_BRIDGE_URL", "http://localhost:5002"),
+        }
+        for key, env_val in env_fallbacks.items():
+            current = await get_config(key, s)
+            if not current or current.strip() == "":
+                # Try backup first, then env
+                restore_val = backup_data.get(key) or env_val
+                if restore_val:
+                    await set_config(key, restore_val, s)
+                    logger.info("Restored setting '%s' from %s",
+                                key, "backup" if backup_data.get(key) else ".env")
+
+        # Restore paper_mode from backup ONLY in production mode. In lab mode
+        # paper_mode was already forced to true above.
+        if _SYSTEM_MODE != "lab":
+            paper_val = await get_config("paper_mode", s)
+            if paper_val == "true" and backup_data.get("paper_mode") == "false":
+                await set_config("paper_mode", "false", s)
+                logger.info("Restored paper_mode=false from backup")
+
+        # Restore other important settings from backup
+        restore_keys = [
+            "risk_percent", "rr_ratio", "max_open_trades", "account_balance",
+            "max_risk_usd", "enabled_pairs", "analysis_interval", "kill_zones",
+            "ict_strategies", "min_sl_pips", "model_mode",
+            "news_block_minutes_before", "news_block_minutes_after",
+        ]
+        for key in restore_keys:
+            current = await get_config(key, s)
+            backup_val = backup_data.get(key)
+            if backup_val and current != backup_val:
+                # Only restore if the DB has the default value (meaning it was reset)
+                # We check by comparing with known defaults
+                pass  # Don't auto-overwrite — backup is there for manual recovery
+
+        await s.commit()
+
+
+async def _save_settings_backup():
+    """Save all current settings to a JSON backup file."""
+    try:
+        async with async_session_factory() as s:
+            result = await s.execute(select(SystemConfig))
+            rows = result.scalars().all()
+            data = {r.key: r.value for r in rows}
+        with open(_SETTINGS_BACKUP, "w") as f:
+            json.dump(data, f, indent=2)
+        logger.info("Settings backup saved (%d keys)", len(data))
+    except Exception as exc:
+        logger.warning("Failed to save settings backup: %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global orchestrator
+    await init_db()
+
+    # Restore settings from backup/.env if DB was reset
+    await _restore_settings_from_backup()
+
+    # Set default MT5 bridge URL if not already configured
+    async with async_session_factory() as s:
+        existing = await get_config("mt5_bridge_url", s)
+        if not existing:
+            await set_config("mt5_bridge_url", "http://localhost:5002", s)
+            await s.commit()
+        mt5_login    = await get_config("mt5_login",    s) or ""
+        mt5_password = await get_config("mt5_password", s) or ""
+        mt5_server   = await get_config("mt5_server",   s) or ""
+    # Pass credentials to bridge via env vars
+    if mt5_login:
+        os.environ.setdefault("MT5_LOGIN",    mt5_login)
+        os.environ.setdefault("MT5_PASSWORD", mt5_password)
+        os.environ.setdefault("MT5_SERVER",   mt5_server)
+    # MT5 terminal path (for multi-terminal setup)
+    async with async_session_factory() as s:
+        mt5_path = await get_config("mt5_path", s) or os.getenv("MT5_PATH", "")
+        if mt5_path:
+            os.environ["MT5_PATH"] = mt5_path
+    _start_mt5_direct()
+    if _SYSTEM_MODE == "br":
+        # BR mode: deterministic backtest-to-reality engine, no LLM, no
+        # multi-agent orchestrator. Uses ICTAnalyzer from the backtester.
+        from services.br_engine import BREngine
+        global br_engine
+        br_engine = BREngine(broadcast_fn=manager.broadcast)
+        # Auto-start if br_running was true at last shutdown
+        async with async_session_factory() as _s:
+            run_flag = (await get_config("br_running", _s)) == "true"
+        if run_flag:
+            await br_engine.start()
+            logger.info("BR engine auto-started (br_running=true)")
+        else:
+            logger.info("BR engine ready (idle — call /api/br/start to run)")
+        orchestrator = None  # explicit: BR doesn't use the multi-agent orchestrator
+    else:
+        orchestrator = Orchestrator(broadcast_fn=manager.broadcast)
+        await orchestrator.start()
+    app.state.start_time = datetime.utcnow()
+
+    # Save settings backup after successful startup
+    await _save_settings_backup()
+
+    logger.info("TradeWizard system started ✅")
+    yield
+
+    # Save settings backup before shutdown
+    await _save_settings_backup()
+
+    if orchestrator:
+        await orchestrator.stop()
+    if br_engine and br_engine.running:
+        await br_engine.stop()
+    # Stop MT5 bridge subprocess
+    try:
+        from services.mt5_direct import get_mt5_direct
+        get_mt5_direct().disconnect()
+    except Exception:
+        pass
+    # Disarm watchdog before terminating the bridge so it doesn't try to respawn
+    global _bridge_watchdog_stop
+    _bridge_watchdog_stop = True
+    if _bridge_proc and _bridge_proc.poll() is None:
+        try:
+            _bridge_proc.terminate()
+            _bridge_proc.wait(timeout=5)
+            logger.info("MT5 bridge subprocess stopped")
+        except Exception:
+            _bridge_proc.kill()
+    logger.info("MT5 disconnected")
+    logger.info("TradeWizard system stopped")
+
+
+app = FastAPI(
+    title="TradeWizard",
+    description="Multi-Agent ICT Forex Trading System",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Serve static frontend files — no-cache headers so browser always gets latest
+frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
+if os.path.exists(frontend_dir):
+    from fastapi.responses import FileResponse
+    from fastapi import Response
+
+    @app.get("/static/{file_path:path}")
+    async def static_files(file_path: str, response: Response):
+        full = os.path.join(frontend_dir, file_path)
+        if not os.path.exists(full):
+            raise HTTPException(404, "Not found")
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        return FileResponse(full)
+
+    @app.get("/compare")
+    async def compare_page(response: Response):
+        """Side-by-side dashboard comparing Production (8000) vs Lab (8001)."""
+        full = os.path.join(frontend_dir, "compare.html")
+        if not os.path.exists(full):
+            raise HTTPException(404, "compare.html missing")
+        response.headers["Cache-Control"] = "no-store"
+        return FileResponse(full)
+
+
+# ------------------------------------------------------------------ #
+#  WebSocket Endpoint
+# ------------------------------------------------------------------ #
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await manager.connect(ws)
+    # Send current status immediately
+    if orchestrator:
+        status = await orchestrator.get_status()
+        await ws.send_text(json.dumps({"type": "init", "status": status}, default=str))
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+                await handle_ws_command(ws, msg)
+            except json.JSONDecodeError:
+                pass
+    except WebSocketDisconnect:
+        await manager.disconnect(ws)
+
+
+async def handle_ws_command(ws: WebSocket, msg: dict):
+    cmd = msg.get("command")
+    if cmd == "analyze":
+        symbol = msg.get("symbol")
+        asyncio.create_task(orchestrator.trigger_analysis(symbol))
+    elif cmd == "close_trade":
+        tid = msg.get("trade_id")
+        if tid:
+            asyncio.create_task(orchestrator.close_trade_manually(int(tid)))
+    elif cmd == "run_meeting":
+        meeting_type = msg.get("meeting_type", "POST_TRADE")
+        asyncio.create_task(orchestrator.run_meeting(meeting_type))
+    elif cmd == "meeting_message":
+        text = msg.get("message", "").strip()
+        if text and orchestrator and orchestrator._active_meeting:
+            orchestrator.send_meeting_message(text)
+    elif cmd == "meeting_approve":
+        if orchestrator and orchestrator._active_meeting:
+            orchestrator.approve_meeting_close()
+    elif cmd == "ping":
+        await ws.send_text(json.dumps({"type": "pong", "ts": datetime.utcnow().isoformat()}))
+
+
+# ------------------------------------------------------------------ #
+#  REST API Endpoints
+# ------------------------------------------------------------------ #
+@app.get("/mt5-setup", response_class=HTMLResponse)
+async def mt5_setup_page():
+    async with async_session_factory() as s:
+        current_url = await get_config("mt5_bridge_url", s) or ""
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>MT5 Bridge Setup</title>
+<style>
+  body {{ font-family: sans-serif; max-width: 600px; margin: 60px auto; padding: 20px; background:#1a1a2e; color:#eee; }}
+  h2 {{ color:#a78bfa; }}
+  input {{ width:100%; padding:10px; font-size:16px; background:#2d2d44; border:1px solid #555; color:#eee; border-radius:6px; box-sizing:border-box; margin:10px 0; }}
+  button {{ padding:12px 28px; background:#7c3aed; color:#fff; border:none; border-radius:6px; font-size:16px; cursor:pointer; }}
+  button:hover {{ background:#6d28d9; }}
+  .ok {{ color:#4ade80; margin-top:12px; display:none; }}
+  .info {{ color:#94a3b8; font-size:0.85rem; margin-bottom:20px; }}
+</style>
+</head><body>
+<h2>⚙️ MT5 Bridge URL</h2>
+<p class="info">Inserisci l'URL del bridge MT5 Python che gira sul PC Windows con MetaTrader 5 aperto.<br>
+Esempio: <code>http://192.168.1.10:5001</code> oppure <code>http://localhost:5001</code></p>
+<input type="text" id="url" value="{current_url}" placeholder="http://192.168.1.10:5001" />
+<br>
+<button onclick="save()">💾 Salva</button>
+<p class="ok" id="ok">✅ Salvato!</p>
+<br><br>
+<a href="/" style="color:#a78bfa">← Torna all'app</a>
+<script>
+async function save() {{
+  const val = document.getElementById('url').value.trim();
+  await fetch('/api/config/mt5_bridge_url', {{method:'PUT', headers:{{'Content-Type':'application/json'}}, body:JSON.stringify({{value:val}})}});
+  document.getElementById('ok').style.display='block';
+  setTimeout(()=>document.getElementById('ok').style.display='none', 3000);
+}}
+</script>
+</body></html>"""
+
+
+_MT5_STATUS_DIV = (
+    '<div class="status-indicator" id="mt5-status" style="margin-left:16px">'
+    '<span class="dot disconnected" id="mt5-dot"></span>'
+    '<span id="mt5-label">MT5 &#8212;</span>'
+    '</div>'
+)
+_MT5_STATUS_JS = (
+    '<script>'
+    'async function checkMt5Status(){'
+    'var dot=document.getElementById("mt5-dot");'
+    'var lbl=document.getElementById("mt5-label");'
+    'if(!dot||!lbl)return;'
+    'try{'
+    'var r=await fetch("/api/mt5/health");'
+    'var d=await r.json();'
+    'if(d.connected){dot.className="dot connected";lbl.textContent="MT5 \u2713";}'
+    'else{dot.className="dot connecting";lbl.textContent="MT5 \u2014 no MT5";}'
+    '}catch(e){dot.className="dot disconnected";lbl.textContent="MT5 \u2014";}'
+    '}'
+    'checkMt5Status();setInterval(checkMt5Status,15000);'
+    '</script>'
+)
+
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    import re, time
+    index = os.path.join(frontend_dir, "index.html")
+    if os.path.exists(index):
+        with open(index, "r", encoding="utf-8", errors="replace") as f:
+            html = f.read()
+        v = str(int(time.time()))
+        html = re.sub(r'src="/static/app\.js[^"]*"',    f'src="/static/app.js?v={v}"',    html)
+        html = re.sub(r'href="/static/styles\.css[^"]*"', f'href="/static/styles.css?v={v}"', html)
+        html = re.sub(r'src="/static/charts\.js[^"]*"', f'src="/static/charts.js?v={v}"', html)
+        # Inject MT5 status dot next to WS dot (server-side — never edit HTML on disk)
+        html = re.sub(
+            r'(<div class="status-indicator" id="ws-status">.*?</div>)',
+            r'\1' + _MT5_STATUS_DIV,
+            html, flags=re.DOTALL
+        )
+        # Inject MT5 polling JS (idempotent)
+        if 'checkMt5Status' not in html:
+            html = html.replace('</body>', _MT5_STATUS_JS + '</body>')
+        return HTMLResponse(content=html, headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        })
+    return HTMLResponse(content='{"message":"TradeWizard API"}')
+
+
+@app.get("/api/health")
+async def health_check():
+    """Comprehensive health check for watchdog and monitoring."""
+    import psutil
+    now = datetime.utcnow()
+    start = getattr(app.state, "start_time", now)
+    uptime = (now - start).total_seconds()
+
+    # MT5 bridge status
+    mt5_ok = False
+    worker_ok = False
+    try:
+        from services.mt5_direct import get_mt5_direct
+        _mt5 = get_mt5_direct()
+        h = _mt5.health()
+        mt5_ok = h.get("connected", False)
+        # Worker healthiness = the bridge actually answers connected=true.
+        # Previously we required `_bridge_proc` to be a child of THIS backend
+        # process in production, but that broke whenever the bridge was
+        # respawned outside our lifecycle (e.g. by the keepalive's
+        # kill-and-respawn path, or by a separate manual launch). We now
+        # treat any reachable, MT5-logged bridge as a working worker — same
+        # as lab — and let the keepalive loop be the authority on bridge
+        # health.
+        worker_ok = mt5_ok
+    except Exception:
+        pass
+
+    # Last analysis time
+    last_analysis = None
+    try:
+        async with async_session_factory() as s:
+            from sqlalchemy import desc as _desc
+            result = await s.execute(
+                select(AgentLog).where(AgentLog.action == "ANALYSIS")
+                .order_by(_desc(AgentLog.timestamp)).limit(1)
+            )
+            row = result.scalar_one_or_none()
+            if row:
+                last_analysis = row.timestamp.isoformat()
+    except Exception:
+        pass
+
+    # Open trades count
+    open_trades = 0
+    try:
+        async with async_session_factory() as s:
+            result = await s.execute(select(Trade).where(Trade.status == "ACTIVE"))
+            open_trades = len(result.scalars().all())
+    except Exception:
+        pass
+
+    # System resources
+    mem = psutil.Process().memory_info()
+    disk = shutil.disk_usage(os.path.dirname(__file__))
+
+    # Determine overall status
+    status = "healthy"
+    if not orchestrator or not orchestrator._running:
+        status = "critical"
+    elif not mt5_ok:
+        status = "degraded"
+
+    return {
+        "status": status,
+        "uptime_seconds": int(uptime),
+        "backend_running": bool(orchestrator and orchestrator._running),
+        "mt5_connected": mt5_ok,
+        "mt5_worker": worker_ok,
+        "last_analysis": last_analysis,
+        "open_trades": open_trades,
+        "memory_mb": round(mem.rss / 1024 / 1024, 1),
+        "disk_free_gb": round(disk.free / 1024**3, 1),
+        "active_meeting": bool(orchestrator and orchestrator._active_meeting),
+        "timestamp": now.isoformat(),
+    }
+
+
+@app.get("/api/status")
+async def get_status():
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    return await orchestrator.get_status()
+
+
+@app.get("/api/trades")
+async def list_trades(status: str | None = None, limit: int = 50, include_archived: bool = False):
+    async with async_session_factory() as s:
+        q = select(Trade).order_by(desc(Trade.created_at)).limit(limit)
+        if status:
+            q = q.where(Trade.status == status.upper())
+        if not include_archived:
+            q = q.where((Trade.archived == False) | (Trade.archived == None))
+        result = await s.execute(q)
+        trades = result.scalars().all()
+        return [_trade_to_dict(t) for t in trades]
+
+
+# NOTE: must be defined BEFORE /api/trades/{trade_id} to avoid 422 on "live_pnl"
+@app.get("/api/trades/live_pnl")
+async def trades_live_pnl():
+    """Return current price + unrealized PNL for all active trades.
+
+    SOURCE OF TRUTH: MT5 positions. We use price_open, price_current, and
+    profit directly from the broker — the DB entry_price can be out of sync
+    if a trade was opened before the fill-price sync was added, or if LIMIT
+    orders were overridden to MARKET at a different price.
+    """
+    async with async_session_factory() as s:
+        result = await s.execute(select(Trade).where(Trade.status == "ACTIVE"))
+        active = result.scalars().all()
+    if not active:
+        return []
+
+    # Fetch live MT5 positions in one call
+    live_by_ticket: dict[int, dict] = {}
+    try:
+        from services.mt5_direct import get_mt5_direct
+        mt5 = get_mt5_direct()
+        for p in (mt5.get_positions() or []):
+            tk = p.get("ticket")
+            if tk:
+                live_by_ticket[int(tk)] = p
+    except Exception:
+        pass
+
+    out = []
+    for t in active:
+        tw_tickets = [int(x.strip()) for x in (t.mt5_ticket or "").split(",") if x.strip().isdigit()]
+        mt5_positions = [live_by_ticket[tk] for tk in tw_tickets if tk in live_by_ticket]
+
+        if mt5_positions:
+            # MT5 is the source of truth
+            total_vol = sum(float(p.get("volume", 0)) for p in mt5_positions) or 1
+            avg_entry = sum(float(p.get("volume", 0)) * float(p.get("price_open", 0))
+                             for p in mt5_positions) / total_vol
+            cp = float(mt5_positions[0].get("price_current", 0))
+            pnl_usd = round(sum(float(p.get("profit", 0)) for p in mt5_positions), 2)
+            pip = 0.01 if "JPY" in t.symbol else (1.0 if t.symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+            pnl_pips = None
+            if cp and avg_entry:
+                pnl_pips = round(((cp - avg_entry) if t.direction == "BUY" else (avg_entry - cp)) / pip, 1)
+            out.append({
+                "trade_id": t.id,
+                "symbol": t.symbol,
+                "entry_price": round(avg_entry, 6),  # REAL fill from MT5
+                "current_price": cp,
+                "pnl_pips": pnl_pips,
+                "pnl_usd": pnl_usd,
+                "source": "mt5",
+            })
+        else:
+            # Fallback: paper trade OR position not found in MT5.
+            # Compute from DB + fresh tick.
+            from services.forex_data import fetch_ohlcv
+            try:
+                data = await fetch_ohlcv(t.symbol, "H1", 2)
+                cp = float(data.get("indicators", {}).get("current_price") or 0)
+            except Exception:
+                cp = 0.0
+            pip = 0.01 if "JPY" in t.symbol else (1.0 if t.symbol in ("XAUUSD","US30","NAS100","US500") else 0.0001)
+            _pip_usd = {"XAUUSD":100.0,"US30":5.0,"NAS100":20.0,"US500":50.0,
+                        "USDJPY":6.5,"EURJPY":6.5,"GBPJPY":6.5,"AUDJPY":6.5,
+                        "USDCHF":11.0,"USDCAD":7.25}
+            pip_usd = _pip_usd.get(t.symbol, 10.0)
+            if cp and t.entry_price:
+                pnl_pips = ((cp - t.entry_price) if t.direction == "BUY" else (t.entry_price - cp)) / pip
+                pnl_usd = round(pnl_pips * pip_usd * (t.lot_size or 0.01), 2)
+                pnl_pips = round(pnl_pips, 1)
+            else:
+                pnl_pips = pnl_usd = None
+            out.append({
+                "trade_id": t.id,
+                "symbol": t.symbol,
+                "entry_price": t.entry_price,
+                "current_price": cp,
+                "pnl_pips": pnl_pips,
+                "pnl_usd": pnl_usd,
+                "source": "db+tick",
+            })
+    return out
+
+
+@app.get("/api/trades/{trade_id}")
+async def get_trade(trade_id: int):
+    async with async_session_factory() as s:
+        trade = await s.get(Trade, trade_id)
+        if not trade:
+            raise HTTPException(404, "Trade not found")
+        return _trade_to_dict(trade)
+
+
+@app.post("/api/trades/{trade_id}/close")
+async def close_trade(trade_id: int):
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    return await orchestrator.close_trade_manually(trade_id)
+
+
+@app.post("/api/trades/{trade_id}/lock-profit")
+async def lock_profit(trade_id: int):
+    """Move SL to entry + 3 pips to lock in profit."""
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    return await orchestrator.lock_profit(trade_id)
+
+
+@app.post("/api/trades/{trade_id}/modify-tp")
+async def modify_tp(trade_id: int, data: dict):
+    """Update TP1/TP2/TP3 for an active trade."""
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    return await orchestrator.modify_tps(
+        trade_id,
+        tp1=data.get("tp1"),
+        tp2=data.get("tp2"),
+        tp3=data.get("tp3"),
+    )
+
+
+@app.get("/api/journal")
+async def get_journal(trade_id: int | None = None, limit: int = 50):
+    async with async_session_factory() as s:
+        q = select(JournalEntry).order_by(desc(JournalEntry.created_at)).limit(limit)
+        if trade_id:
+            q = q.where(JournalEntry.trade_id == trade_id)
+        result = await s.execute(q)
+        entries = result.scalars().all()
+        return [_journal_to_dict(e) for e in entries]
+
+
+@app.get("/api/meetings")
+async def get_meetings(limit: int = 20):
+    async with async_session_factory() as s:
+        result = await s.execute(
+            select(Meeting).order_by(desc(Meeting.created_at)).limit(limit)
+        )
+        meetings = result.scalars().all()
+        return [_meeting_to_dict(m) for m in meetings]
+
+
+@app.post("/api/meetings/trigger")
+async def trigger_meeting(data: dict):
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    meeting_type = data.get("type", "POST_TRADE")
+    asyncio.create_task(orchestrator.run_meeting(meeting_type))
+    return {"status": "Meeting scheduled", "type": meeting_type}
+
+
+@app.post("/api/lab/force-tuning")
+async def force_auto_tuning():
+    """Manually trigger an AUTO_TUNING meeting in the lab. Lab only.
+    Synchronously awaits the meeting so caller can inspect the result
+    (applied config changes) via the meetings endpoint afterward."""
+    import os as _os, traceback as _tb
+    if _os.getenv("SYSTEM_MODE", "production").lower() != "lab":
+        raise HTTPException(403, "AUTO_TUNING can only be forced on the lab backend")
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    try:
+        await orchestrator._run_auto_tuning_meeting()
+    except Exception as exc:
+        logger.error("force-tuning failed: %s\n%s", exc, _tb.format_exc())
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    # Read back the current config so caller sees the effect immediately
+    async with async_session_factory() as s:
+        from models.database import SystemConfig
+        rows = (await s.execute(select(SystemConfig).where(
+            SystemConfig.key.in_([
+                "rm_min_sl_atr_mult", "rm_max_tp_atr_mult", "rm_min_rr_gate",
+                "rm_sl_cap_atr_mult", "max_trade_duration_hours", "min_sl_pips",
+            ])
+        ))).scalars().all()
+    return {"status": "done", "current_tunables": {r.key: r.value for r in rows}}
+
+
+@app.post("/api/meetings/emergency")
+async def trigger_emergency_meeting(data: dict):
+    """User-convened interactive emergency meeting."""
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    topic = data.get("topic", "").strip()
+    if not topic:
+        raise HTTPException(400, "Topic is required")
+    if orchestrator._active_meeting:
+        raise HTTPException(409, "A meeting is already in progress")
+    asyncio.create_task(orchestrator.start_interactive_meeting(topic))
+    return {"status": "Interactive emergency meeting started", "topic": topic}
+
+
+@app.get("/api/logs")
+async def get_logs(agent: str | None = None, limit: int = 100):
+    async with async_session_factory() as s:
+        q = select(AgentLog).order_by(desc(AgentLog.timestamp)).limit(limit)
+        if agent:
+            q = q.where(AgentLog.agent_name == agent.upper())
+        result = await s.execute(q)
+        logs = result.scalars().all()
+        return [_log_to_dict(l) for l in logs]
+
+
+@app.get("/api/config")
+async def get_config_all():
+    async with async_session_factory() as s:
+        result = await s.execute(select(SystemConfig))
+        rows = result.scalars().all()
+        return {r.key: r.value for r in rows}
+
+
+@app.get("/api/debug")
+async def debug_info(limit: int = 20):
+    """Full diagnostic info for remote debugging — recent logs, rejections, config, trades."""
+    result = {}
+    async with async_session_factory() as s:
+        # Recent agent logs
+        logs = await s.execute(
+            select(AgentLog).order_by(desc(AgentLog.timestamp)).limit(limit)
+        )
+        result["recent_logs"] = [
+            {"time": str(l.timestamp)[:19], "agent": l.agent_name, "action": l.action,
+             "message": (l.message or "")[:300], "data_preview": (l.data or "")[:500]}
+            for l in logs.scalars().all()
+        ]
+
+        # Recent rejections
+        rejections = await s.execute(
+            select(AgentLog).where(AgentLog.action.in_(["REJECTED", "ERROR"]))
+            .order_by(desc(AgentLog.timestamp)).limit(10)
+        )
+        result["rejections"] = [
+            {"time": str(r.timestamp)[:19], "agent": r.agent_name, "action": r.action,
+             "message": (r.message or "")[:500]}
+            for r in rejections.scalars().all()
+        ]
+
+        # Active trades
+        trades = await s.execute(select(Trade).where(Trade.status == "ACTIVE"))
+        result["active_trades"] = [
+            {"id": t.id, "symbol": t.symbol, "direction": t.direction,
+             "entry": t.entry_price, "sl": t.stop_loss, "tp1": t.take_profit_1,
+             "lot": t.lot_size, "ticket": t.mt5_ticket, "is_paper": t.is_paper,
+             "open_time": str(t.open_time)[:19]}
+            for t in trades.scalars().all()
+        ]
+
+        # Key config values
+        config_keys = ["paper_mode", "enabled_pairs", "min_sl_pips", "rr_ratio",
+                       "max_open_trades", "kill_zones", "mt5_bridge_url", "model_mode",
+                       "account_balance", "max_risk_usd"]
+        config = {}
+        for key in config_keys:
+            config[key] = await get_config(key, s)
+        result["config"] = config
+
+        # Last RM evaluation detail
+        rm_log = await s.execute(
+            select(AgentLog).where(AgentLog.agent_name == "RM")
+            .order_by(desc(AgentLog.timestamp)).limit(1)
+        )
+        rm_row = rm_log.scalar_one_or_none()
+        if rm_row and rm_row.data:
+            try:
+                rm_data = json.loads(rm_row.data)
+                result["last_rm"] = {
+                    "symbol": (rm_row.message or "")[:50],
+                    "approved": rm_data.get("approved"),
+                    "rejection_reason": rm_data.get("rejection_reason", "")[:300],
+                    "recommendation": rm_data.get("recommendation"),
+                    "sl_pips": rm_data.get("position_size", {}).get("sl_pips"),
+                    "tp1_pips": rm_data.get("position_size", {}).get("tp1_pips"),
+                    "rr_ratio": rm_data.get("position_size", {}).get("rr_ratio"),
+                }
+            except Exception:
+                result["last_rm"] = {"raw": (rm_row.data or "")[:300]}
+
+    return result
+
+
+@app.put("/api/config/{key}")
+async def update_config(key: str, data: dict):
+    value = str(data.get("value", ""))
+    # HARD INVARIANT: lab cannot be taken out of paper mode via API.
+    if _SYSTEM_MODE == "lab" and key == "paper_mode" and value.lower() != "true":
+        raise HTTPException(403, "Lab is locked in paper mode — cannot set paper_mode=false")
+    async with async_session_factory() as s:
+        await set_config(key, value, s)
+        # Keep paper_balance in sync with account_balance
+        if key == "account_balance":
+            await set_config("paper_balance", value, s)
+    # Auto-save settings backup on every config change
+    asyncio.create_task(_save_settings_backup())
+    return {"key": key, "value": value}
+
+
+@app.post("/api/config/save_as_default")
+async def save_config_as_default():
+    """Snapshot all current config values as user defaults for fresh-DB restores."""
+    skip = {"system_performance", "_user_defaults"}
+    async with async_session_factory() as s:
+        result = await s.execute(select(SystemConfig))
+        rows = result.scalars().all()
+        snapshot = {r.key: r.value for r in rows if r.key not in skip}
+        await set_config("_user_defaults", json.dumps(snapshot), s)
+    return {"saved": len(snapshot)}
+
+
+@app.post("/api/analyze")
+async def trigger_analysis(data: dict | None = None):
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    symbol = data.get("symbol") if data else None
+    asyncio.create_task(orchestrator.trigger_analysis(symbol))
+    return {"status": "Analysis triggered", "symbol": symbol or "all pairs"}
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Receive Telegram webhook updates (alternative to polling)."""
+    if not orchestrator or not orchestrator.telegram:
+        return {"ok": False}
+    update = await request.json()
+    asyncio.create_task(orchestrator.telegram.handle_webhook_update(update))
+    return {"ok": True}
+
+
+@app.post("/api/telegram/test")
+async def telegram_test():
+    if not orchestrator or not orchestrator.telegram:
+        raise HTTPException(503, "Telegram bot not configured")
+    result = await orchestrator.telegram.send_test()
+    return result
+
+
+@app.post("/api/telegram/webhook/set")
+async def telegram_set_webhook(data: dict):
+    if not orchestrator or not orchestrator.telegram:
+        raise HTTPException(503, "Telegram bot not configured")
+    url = data.get("url", "")
+    if not url:
+        raise HTTPException(400, "url is required")
+    result = await orchestrator.telegram.set_webhook(url)
+    return result
+
+
+@app.post("/whatsapp/webhook")
+async def whatsapp_webhook(request: Request):
+    """Receive incoming WhatsApp messages from Twilio webhook."""
+    if not orchestrator or not orchestrator._wa:
+        return {"ok": False}
+    form = await request.form()
+    form_data = dict(form)
+    asyncio.create_task(orchestrator._wa.handle_webhook(form_data))
+    # Twilio expects a TwiML response (empty is fine if we reply via API)
+    from fastapi.responses import Response
+    return Response(content="<Response></Response>", media_type="application/xml")
+
+
+@app.post("/api/whatsapp/test")
+async def whatsapp_test():
+    if not orchestrator or not orchestrator._wa:
+        raise HTTPException(503, "WhatsApp bot not configured")
+    result = await orchestrator._wa.send_test()
+    return result
+
+
+@app.get("/api/news")
+async def get_news(hours: int = 24, symbol: str | None = None):
+    if not orchestrator or not orchestrator.news_filter:
+        raise HTTPException(503, "System not ready")
+    events = await orchestrator.news_filter.upcoming_events(hours_ahead=hours, symbol=symbol)
+    async with async_session_factory() as s:
+        block_enabled = await get_config("news_block_enabled", s)
+    return {
+        "events": [e.to_dict() for e in events],
+        "block_enabled": (block_enabled or "true").lower() != "false",
+        "block_minutes_before": orchestrator.news_filter.block_minutes_before,
+        "block_minutes_after":  orchestrator.news_filter.block_minutes_after,
+        "count": len(events),
+    }
+
+
+@app.get("/api/chart-data/{symbol}")
+async def get_chart_data(symbol: str, timeframe: str = "H1", bars: int = 200):
+    """OHLCV + ICT overlays for the chart tab."""
+    symbol = symbol.upper()
+    bars   = max(50, min(bars, 500))
+    valid_tf = {"M1","M5","M15","M30","H1","H4","D1","W1"}
+    if timeframe not in valid_tf:
+        raise HTTPException(400, f"timeframe must be one of {valid_tf}")
+
+    data = await fetch_ohlcv(symbol, timeframe, bars)
+
+    # Attach active trades for this symbol as overlay levels
+    async with async_session_factory() as s:
+        result = await s.execute(
+            select(Trade).where(Trade.symbol == symbol, Trade.status == "ACTIVE")
+        )
+        active = result.scalars().all()
+
+    trade_levels = [
+        {
+            "id":          t.id,
+            "direction":   t.direction,
+            "entry_price": t.entry_price,
+            "stop_loss":   t.stop_loss,
+            "take_profit_1": t.take_profit_1,
+            "take_profit_2": t.take_profit_2,
+            "take_profit_3": t.take_profit_3,
+            "ict_setup":   t.ict_setup,
+        }
+        for t in active
+    ]
+
+    return {**data, "active_trades": trade_levels}
+
+
+@app.post("/api/news/refresh")
+async def refresh_news():
+    if not orchestrator or not orchestrator.news_filter:
+        raise HTTPException(503, "System not ready")
+    count = await orchestrator.news_filter.force_refresh()
+    return {"status": "refreshed", "event_count": count}
+
+
+@app.post("/api/backtest/run")
+async def backtest_run(data: dict):
+    try:
+        # Accept either `symbols` (list) or `symbol` (single string, legacy)
+        symbols_in = data.get("symbols")
+        if symbols_in:
+            symbols = [str(s).upper().strip() for s in symbols_in if s]
+        else:
+            symbols = [str(data.get("symbol", "EURUSD")).upper().strip()]
+        if not symbols:
+            raise HTTPException(400, "symbols is empty")
+
+        timeframe    = data.get("timeframe", "H1")
+        strategy     = data.get("strategy", "Mixed")
+        bars         = int(data.get("bars", 500))
+        risk_percent = float(data.get("risk_percent", 1.0))
+        rr_ratio     = float(data.get("rr_ratio", 2.0))
+        balance      = float(data.get("initial_balance", 10000.0))
+        max_risk_usd    = float(data["max_risk_usd"]) if data.get("max_risk_usd") else None
+        enabled_setups  = data.get("enabled_setups") or None
+        date_from       = data.get("date_from") or None
+        date_to         = data.get("date_to")   or None
+        # Realistic-cost knobs — None means "use per-symbol defaults"
+        spread_pips     = float(data["spread_pips"]) if data.get("spread_pips") not in (None, "") else None
+        slippage_pips   = float(data["slippage_pips"]) if data.get("slippage_pips") not in (None, "") else None
+        commission_per_lot_usd = float(data["commission_per_lot_usd"]) if data.get("commission_per_lot_usd") not in (None, "") else None
+
+        valid_tf = {"M1","M5","M15","M30","H1","H4","D1"}
+        valid_st = {"FVG","OrderBlock","Liquidity","Mixed"}
+        if timeframe not in valid_tf:
+            raise HTTPException(400, f"timeframe must be one of {valid_tf}")
+        if strategy not in valid_st:
+            raise HTTPException(400, f"strategy must be one of {valid_st}")
+
+        async with async_session_factory() as s:
+            oanda_key      = await get_config("oanda_api_key", s) or ""
+            oanda_practice = (await get_config("oanda_practice", s) or "true") != "false"
+            mt5_bridge_url = await get_config("mt5_bridge_url", s) or ""
+
+        # The run record's `symbol` column stores comma-joined symbols when
+        # multi. Single-symbol runs still look identical to the old shape.
+        symbol_label = ",".join(symbols)
+        async with async_session_factory() as s:
+            run = BacktestRun(
+                symbol=symbol_label, timeframe=timeframe, strategy=strategy,
+                bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
+            )
+            s.add(run)
+            await s.commit()
+            await s.refresh(run)
+            run_id = run.id
+
+        asyncio.create_task(_exec_backtest_multi(
+            run_id, symbols, timeframe, strategy, bars,
+            risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups,
+            oanda_key, oanda_practice, mt5_bridge_url,
+            date_from=date_from, date_to=date_to,
+            spread_pips=spread_pips, slippage_pips=slippage_pips,
+            commission_per_lot_usd=commission_per_lot_usd,
+        ))
+        return {"run_id": run_id, "status": "RUNNING", "symbols": symbols}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("backtest_run failed: %s", exc, exc_info=True)
+        raise HTTPException(500, str(exc))
+
+
+async def _maybe_auto_update_cache(run_id, symbol, timeframe, oanda_key, oanda_practice, mt5_bridge_url):
+    """If the H1 cache exists but is stale (last bar > 4h old), update it before running the backtest."""
+    try:
+        from services.ohlcv_cache import get_latest_time
+        from datetime import datetime, timezone
+        latest = await get_latest_time(symbol, timeframe)
+        if not latest:
+            return  # No cache → backtester will fall back to API
+        dt_latest = datetime.fromisoformat(latest.replace("Z", "+00:00"))
+        age_hours = (datetime.now(timezone.utc) - dt_latest).total_seconds() / 3600
+        if age_hours <= 4:
+            return  # Fresh enough
+        logger.info("Cache stale (%.1fh old) for %s %s — auto-updating before backtest", age_hours, symbol, timeframe)
+        # Signal frontend that we're updating
+        async with async_session_factory() as s:
+            run = await s.get(BacktestRun, run_id)
+            if run:
+                run.status = "UPDATING_CACHE"
+                await s.commit()
+        await _do_update_cache(symbol, timeframe, oanda_key, oanda_practice, mt5_bridge_url)
+    except Exception as exc:
+        logger.warning("Auto-update cache skipped (%s) — continuing with existing data", exc)
+
+
+async def _exec_backtest_multi(
+    run_id, symbols, timeframe, strategy, bars,
+    risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None,
+    oanda_api_key="", oanda_practice=True, mt5_bridge_url="",
+    date_from=None, date_to=None,
+    spread_pips=None, slippage_pips=None, commission_per_lot_usd=None,
+):
+    """Run one backtest per symbol and aggregate trades/equity into a
+    single BacktestRun row. Each trade keeps its own `symbol` field so
+    the frontend can filter by symbol just like it filters by setup.
+    """
+    def _set_progress(i: int, sym: str, phase: str):
+        """Publish what the backtest is currently doing so the frontend
+        can show '3/9 EURUSD — fetching M1' instead of the generic spinner."""
+        _backtest_progress[run_id] = {
+            "i": i, "total": len(symbols),
+            "current_symbol": sym, "phase": phase,
+        }
+
+    try:
+        all_trades: list[dict] = []
+        warnings: list[str] = []
+        for idx, sym in enumerate(symbols, start=1):
+            _set_progress(idx, sym, "checking_cache")
+            await _maybe_auto_update_cache(run_id, sym, timeframe, oanda_api_key, oanda_practice, mt5_bridge_url)
+            _set_progress(idx, sym, "running_backtest")
+            try:
+                res = await run_backtest(
+                    symbol=sym, timeframe=timeframe, strategy=strategy,
+                    bars=bars, risk_percent=risk_percent, rr_ratio=rr_ratio,
+                    initial_balance=balance, max_risk_usd=max_risk_usd,
+                    enabled_setups=enabled_setups, date_from=date_from, date_to=date_to,
+                    oanda_api_key=oanda_api_key, oanda_practice=oanda_practice,
+                    mt5_bridge_url=mt5_bridge_url,
+                    spread_pips=spread_pips, slippage_pips=slippage_pips,
+                    commission_per_lot_usd=commission_per_lot_usd,
+                )
+            except Exception as exc:
+                logger.warning("Backtest %s on %s failed: %s", run_id, sym, exc)
+                warnings.append(f"{sym}: {exc}")
+                continue
+            for t in res.trades:
+                d = t.__dict__.copy() if hasattr(t, "__dict__") else dict(t)
+                d.setdefault("symbol", sym)
+                all_trades.append(d)
+            if res.data_warning:
+                warnings.append(f"{sym}: {res.data_warning}")
+
+        # Sort trades by exit time so the aggregated equity curve makes
+        # chronological sense across symbols.
+        _backtest_progress[run_id] = {"i": len(symbols), "total": len(symbols),
+                                       "current_symbol": "", "phase": "aggregating"}
+
+        def _sort_key(t):
+            return t.get("exit_time") or t.get("entry_time") or ""
+        all_trades.sort(key=_sort_key)
+
+        # Aggregate stats from the merged trade list (mirrors
+        # frontend calcBtStatsFromTrades but server-side authoritative).
+        wins = sum(1 for t in all_trades if t.get("result") == "WIN")
+        losses = sum(1 for t in all_trades if t.get("result") == "LOSS")
+        n = len(all_trades)
+        win_rate = (wins / n * 100) if n else 0.0
+        total_pnl = sum(float(t.get("pnl_usd") or 0) for t in all_trades)
+        total_pips = sum(float(t.get("pnl_pips") or 0) for t in all_trades)
+        gross_win  = sum(float(t.get("pnl_usd") or 0) for t in all_trades if t.get("result") == "WIN")
+        gross_loss = sum(abs(float(t.get("pnl_usd") or 0)) for t in all_trades if t.get("result") == "LOSS")
+        pf = (gross_win / gross_loss) if gross_loss > 0 else (999.0 if gross_win > 0 else 0.0)
+        rrs = [float(t.get("rr_actual")) for t in all_trades if t.get("rr_actual") is not None]
+        avg_rr = (sum(rrs) / len(rrs)) if rrs else 0.0
+
+        # Equity curve = running sum of pnl from initial balance, in time order
+        equity = [{"bar": 0, "time": "", "equity": balance}]
+        eq = balance
+        peak = balance
+        max_dd_pct = 0.0
+        max_dd_usd = 0.0
+        for i, t in enumerate(all_trades, start=1):
+            eq += float(t.get("pnl_usd") or 0)
+            peak = max(peak, eq)
+            dd_usd = peak - eq
+            dd_pct = (dd_usd / peak * 100) if peak > 0 else 0
+            if dd_usd > max_dd_usd: max_dd_usd = dd_usd
+            if dd_pct > max_dd_pct: max_dd_pct = dd_pct
+            equity.append({"bar": i, "time": _sort_key(t), "equity": round(eq, 2)})
+
+        async with async_session_factory() as s:
+            run = await s.get(BacktestRun, run_id)
+            if run:
+                run.status        = "DONE"
+                run.total_trades  = n
+                run.wins          = wins
+                run.losses        = losses
+                run.win_rate      = round(win_rate, 2)
+                run.total_pips    = round(total_pips, 1)
+                run.total_pnl_usd = round(total_pnl, 2)
+                run.total_return  = round((total_pnl / balance * 100) if balance > 0 else 0, 2)
+                run.max_drawdown     = round(max_dd_pct, 2)
+                run.max_drawdown_usd = round(max_dd_usd, 2)
+                run.profit_factor = round(pf, 2)
+                run.avg_rr        = round(avg_rr, 2)
+                run.sharpe        = 0  # not computed for aggregate (per-symbol sharpe doesn't combine cleanly)
+                run.trades_json   = json.dumps(all_trades, default=str)
+                run.equity_json   = json.dumps(equity)
+                run.data_warning  = " | ".join(warnings) if warnings else None
+                run.completed_at  = datetime.utcnow()
+                await s.commit()
+        _backtest_progress.pop(run_id, None)
+    except Exception as exc:
+        logger.error("Backtest %s failed: %s", run_id, exc, exc_info=True)
+        async with async_session_factory() as s:
+            run = await s.get(BacktestRun, run_id)
+            if run:
+                run.status = "FAILED"
+                run.error  = str(exc)
+                await s.commit()
+        _backtest_progress.pop(run_id, None)
+
+
+# Legacy single-symbol entrypoint kept for back-compat; routes through the
+# new multi-symbol executor with a one-element list.
+async def _exec_backtest(
+    run_id, symbol, timeframe, strategy, bars,
+    risk_percent, rr_ratio, balance, max_risk_usd=None, enabled_setups=None,
+    oanda_api_key="", oanda_practice=True, mt5_bridge_url="",
+    date_from=None, date_to=None,
+):
+    return await _exec_backtest_multi(
+        run_id, [symbol], timeframe, strategy, bars,
+        risk_percent, rr_ratio, balance, max_risk_usd, enabled_setups,
+        oanda_api_key, oanda_practice, mt5_bridge_url,
+        date_from=date_from, date_to=date_to,
+    )
+
+
+@app.get("/api/paper/status")
+async def paper_status():
+    if not orchestrator or not orchestrator.paper_account:
+        raise HTTPException(503, "System not ready")
+    paper_on = (await orchestrator._get_config_value("paper_mode")) == "true"
+    return {
+        **orchestrator.paper_account.get_summary(),
+        "paper_mode": paper_on,
+    }
+
+
+@app.get("/api/paper/positions")
+async def paper_positions():
+    if not orchestrator or not orchestrator.paper_account:
+        raise HTTPException(503, "System not ready")
+    return orchestrator.paper_account.get_positions()
+
+
+@app.get("/api/paper/trades")
+async def paper_trades(limit: int = 50):
+    async with async_session_factory() as s:
+        result = await s.execute(
+            select(Trade)
+            .where(Trade.is_paper == True)  # noqa: E712
+            .order_by(desc(Trade.created_at))
+            .limit(limit)
+        )
+        trades = result.scalars().all()
+    return [_trade_to_dict(t) for t in trades]
+
+
+@app.post("/api/paper/enable")
+async def paper_enable(data: dict | None = None):
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    # Only pass balance if explicitly provided — avoids resetting current paper balance
+    balance_param = (data or {}).get("balance")
+    balance = float(balance_param) if balance_param else None
+    await orchestrator.enable_paper_mode(balance)
+    return {"status": "paper_mode enabled"}
+
+
+@app.post("/api/paper/disable")
+async def paper_disable():
+    if not orchestrator:
+        raise HTTPException(503, "System not ready")
+    await orchestrator.disable_paper_mode()
+    return {"status": "paper_mode disabled"}
+
+
+@app.post("/api/paper/reset")
+async def paper_reset(data: dict | None = None):
+    if not orchestrator or not orchestrator.paper_account:
+        raise HTTPException(503, "System not ready")
+    balance = float((data or {}).get("balance", 10000.0))
+    await orchestrator.paper_account.reset(balance)
+    await orchestrator.enable_paper_mode(balance)
+    return {"status": "reset", "balance": balance}
+
+
+# ── Backup / Restore Points ───────────────────────────────────────────────────
+
+BACKUP_DIR = os.path.join(os.path.dirname(__file__), "..", "backups")
+
+
+def _backup_dir() -> str:
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    return BACKUP_DIR
+
+
+async def _create_backup(label: str) -> dict:
+    """Snapshot all key tables to a JSON file in backups/. Returns metadata."""
+    import json as _json
+    ts = datetime.utcnow()
+    fname = f"{ts.strftime('%Y%m%d_%H%M%S')}_{label}.json"
+    path = os.path.join(_backup_dir(), fname)
+
+    async with async_session_factory() as s:
+        trades   = (await s.execute(select(Trade).order_by(Trade.id))).scalars().all()
+        journals = (await s.execute(select(JournalEntry).order_by(JournalEntry.id))).scalars().all()
+        meetings = (await s.execute(select(Meeting).order_by(Meeting.id))).scalars().all()
+        mem_rows = (await s.execute(select(StrategyMemory).order_by(StrategyMemory.id))).scalars().all()
+        configs  = (await s.execute(select(SystemConfig))).scalars().all()
+
+    def _t(obj):
+        return obj.isoformat() if isinstance(obj, datetime) else obj
+
+    def row_to_dict(r):
+        return {c.name: _t(getattr(r, c.name)) for c in r.__table__.columns}
+
+    snapshot = {
+        "meta":    {"timestamp": ts.isoformat(), "label": label, "file": fname},
+        "trades":           [row_to_dict(r) for r in trades],
+        "journal_entries":  [row_to_dict(r) for r in journals],
+        "meetings":         [row_to_dict(r) for r in meetings],
+        "strategy_memory":  [row_to_dict(r) for r in mem_rows],
+        "config":           [row_to_dict(r) for r in configs],
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump(snapshot, fh, ensure_ascii=False, indent=2)
+
+    return {
+        "file": fname,
+        "timestamp": ts.isoformat(),
+        "label": label,
+        "trades": len(trades),
+        "meetings": len(meetings),
+        "size_kb": round(os.path.getsize(path) / 1024, 1),
+    }
+
+
+@app.post("/api/backup/create")
+async def backup_create(data: dict | None = None):
+    label = (data or {}).get("label", "manual")
+    meta = await _create_backup(label)
+    return meta
+
+
+@app.get("/api/backup/list")
+async def backup_list():
+    d = _backup_dir()
+    files = sorted([f for f in os.listdir(d) if f.endswith(".json")], reverse=True)
+    result = []
+    for f in files:
+        path = os.path.join(d, f)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                meta = json.load(fh).get("meta", {})
+            result.append({
+                "file":      f,
+                "timestamp": meta.get("timestamp"),
+                "label":     meta.get("label", ""),
+                "size_kb":   round(os.path.getsize(path) / 1024, 1),
+            })
+        except Exception:
+            result.append({"file": f, "timestamp": None, "label": "?", "size_kb": 0})
+    return result
+
+
+@app.post("/api/backup/restore/{filename}")
+async def backup_restore(filename: str):
+    """Restore DB tables from a backup snapshot file."""
+    import logging as _log
+    _rlog = _log.getLogger("backup_restore")
+
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    path = os.path.join(_backup_dir(), filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "Backup not found")
+
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            snap = json.load(fh)
+    except Exception as e:
+        raise HTTPException(400, f"Cannot read backup file: {e}")
+
+    def _parse_dt(v):
+        if not v:
+            return None
+        try:
+            return datetime.fromisoformat(v)
+        except Exception:
+            return None
+
+    def _safe_row(model_class, row_dict):
+        """Build model kwargs using only columns that exist in the current model."""
+        valid_cols = {c.name for c in model_class.__table__.columns}
+        dt_suffixes = ("_at", "_time", "started_at", "ended_at", "last_updated")
+        return {
+            k: (_parse_dt(v) if any(k.endswith(s) for s in dt_suffixes) else v)
+            for k, v in row_dict.items()
+            if k in valid_cols
+        }
+
+    try:
+        async with async_session_factory() as s:
+            # Clear current data
+            await s.execute(delete(AgentLog))
+            await s.execute(delete(JournalEntry))
+            await s.execute(delete(Meeting))
+            await s.execute(delete(Trade))
+            await s.execute(delete(StrategyMemory))
+            await s.commit()
+
+            for r in snap.get("trades", []):
+                s.add(Trade(**_safe_row(Trade, r)))
+            await s.flush()
+
+            for r in snap.get("meetings", []):
+                s.add(Meeting(**_safe_row(Meeting, r)))
+            await s.flush()
+
+            for r in snap.get("journal_entries", []):
+                s.add(JournalEntry(**_safe_row(JournalEntry, r)))
+
+            for r in snap.get("strategy_memory", []):
+                s.add(StrategyMemory(**_safe_row(StrategyMemory, r)))
+
+            for r in snap.get("config", []):
+                result = await s.execute(select(SystemConfig).where(SystemConfig.key == r["key"]))
+                cfg = result.scalar_one_or_none()
+                if cfg:
+                    cfg.value = r["value"]
+                else:
+                    s.add(SystemConfig(**_safe_row(SystemConfig, r)))
+
+            await s.commit()
+    except Exception as e:
+        _rlog.exception("Restore failed")
+        raise HTTPException(500, f"Restore failed: {e}")
+
+    if orchestrator:
+        await orchestrator.broadcast({"type": "full_reset"})
+
+    return {
+        "status": "restored",
+        "file": filename,
+        "trades_restored": len(snap.get("trades", [])),
+        "meetings_restored": len(snap.get("meetings", [])),
+    }
+
+
+@app.delete("/api/backup/{filename}")
+async def backup_delete(filename: str):
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+    path = os.path.join(_backup_dir(), filename)
+    if not os.path.exists(path):
+        raise HTTPException(404, "Backup not found")
+    os.remove(path)
+    return {"deleted": filename}
+
+
+@app.post("/api/reset-stats")
+async def reset_stats():
+    """Archive all closed trades so stats start from zero. Trades are preserved and restorable."""
+    await _create_backup("reset_stats")
+    from sqlalchemy import update as _upd
+    async with async_session_factory() as s:
+        # Archive all non-active trades (CLOSED, CANCELLED, PROPOSED)
+        res = await s.execute(
+            _upd(Trade)
+            .where(Trade.status != "ACTIVE")
+            .where((Trade.archived == False) | (Trade.archived == None))
+            .values(archived=True)
+        )
+        archived_count = res.rowcount
+        empty = '{"total_trades":0,"wins":0,"losses":0,"breakeven":0,"win_rate":0,"avg_rr":0}'
+        await set_config("system_performance", empty, s)
+        await s.execute(delete(AgentLog))
+        await s.commit()
+    if orchestrator:
+        await orchestrator.broadcast({"type": "stats_reset"})
+    return {"status": "stats_reset", "archived": archived_count}
+
+
+@app.post("/api/trades/unarchive")
+async def unarchive_trades():
+    """Restore all archived trades back to visible state."""
+    from sqlalchemy import update as _upd
+    async with async_session_factory() as s:
+        res = await s.execute(
+            _upd(Trade).where(Trade.archived == True).values(archived=False)
+        )
+        count = res.rowcount
+        await s.commit()
+    if orchestrator:
+        await orchestrator.broadcast({"type": "stats_reset"})
+    return {"status": "unarchived", "restored": count}
+
+
+@app.get("/api/trades/archived-count")
+async def archived_count():
+    from sqlalchemy import func
+    async with async_session_factory() as s:
+        cnt = (await s.execute(
+            select(func.count()).select_from(Trade).where(Trade.archived == True)
+        )).scalar_one()
+    return {"count": cnt}
+
+
+@app.post("/api/reset-all")
+async def reset_all(data: dict | None = None):
+    """Full reset: delete closed trades, agent logs, journal entries, meetings. Preserves ACTIVE trades."""
+    balance = float((data or {}).get("balance", 5000.0))
+    await _create_backup("reset_all")
+    async with async_session_factory() as s:
+        await s.execute(delete(AgentLog))
+        await s.execute(delete(JournalEntry))
+        await s.execute(delete(Meeting))
+        # Only delete non-active trades — preserve open positions
+        await s.execute(delete(Trade).where(Trade.status != "ACTIVE"))
+        await set_config("system_performance", "{}", s)
+        await s.commit()
+    # Reset paper account in memory only if no active trades remain
+    if orchestrator and orchestrator.paper_account:
+        from sqlalchemy import func as _func
+        async with async_session_factory() as s:
+            active_count = (await s.execute(
+                select(_func.count()).select_from(Trade).where(Trade.status == "ACTIVE")
+            )).scalar()
+        if active_count == 0:
+            await orchestrator.paper_account.reset(balance)
+    await orchestrator.broadcast({"type": "full_reset", "balance": balance})
+    return {"status": "reset", "balance": balance}
+
+
+@app.get("/api/strategy-memory")
+async def get_strategy_memory():
+    """Return all StrategyMemory rows for frontend visualization."""
+    import json as _json
+    async with async_session_factory() as s:
+        rows = (await s.execute(
+            select(StrategyMemory).order_by(StrategyMemory.setup_type, StrategyMemory.symbol)
+        )).scalars().all()
+    result = []
+    for r in rows:
+        total = (r.win_count or 0) + (r.loss_count or 0)
+        win_rate = round(r.win_count / total * 100, 1) if total > 0 else None
+        result.append({
+            "id":               r.id,
+            "setup_type":       r.setup_type,
+            "symbol":           r.symbol,
+            "win_count":        r.win_count or 0,
+            "loss_count":       r.loss_count or 0,
+            "total_trades":     total,
+            "win_rate":         win_rate,
+            "total_pnl_usd":    round(r.total_pnl_usd or 0, 2),
+            "failure_patterns": _json.loads(r.failure_patterns or "[]"),
+            "success_patterns": _json.loads(r.success_patterns or "[]"),
+            "lessons":          _json.loads(r.lessons or "[]"),
+            "strategy_notes":   r.strategy_notes or "",
+            "last_updated":     r.last_updated.isoformat() if r.last_updated else None,
+        })
+    return result
+
+
+@app.delete("/api/strategy-memory")
+async def clear_strategy_memory():
+    """Clear all strategy memory (use after intentional strategy reset)."""
+    async with async_session_factory() as s:
+        result = await s.execute(delete(StrategyMemory))
+        await s.commit()
+    return {"deleted": result.rowcount}
+
+
+from models.database import ActivityEvent
+
+
+async def log_activity(message: str, level: str = "info", source: str = "system", data: dict | None = None):
+    """Persist an event so the frontend Activity Log survives refreshes and
+    can be shared across browsers. Silently tolerates DB errors (logging
+    must never break the main flow)."""
+    try:
+        async with async_session_factory() as s:
+            ev = ActivityEvent(
+                level=level,
+                source=source,
+                message=message[:4000],
+                data=json.dumps(data)[:8000] if data else None,
+            )
+            s.add(ev)
+            await s.commit()
+    except Exception:
+        pass
+
+
+@app.get("/api/activity")
+async def get_activity(since_id: int = 0, limit: int = 500):
+    """Return recent activity events. Frontend calls this at boot to
+    hydrate the Activity Log, then polls with since_id for incremental
+    updates (or just relies on WebSocket + periodic reconciliation)."""
+    async with async_session_factory() as s:
+        q = select(ActivityEvent).where(ActivityEvent.id > since_id).order_by(ActivityEvent.id.desc()).limit(limit)
+        rows = (await s.execute(q)).scalars().all()
+    return [
+        {"id": r.id,
+         # Force UTC suffix so frontends parse unambiguously
+         "ts": r.timestamp.isoformat() + "Z" if r.timestamp else None,
+         "level": r.level, "source": r.source, "message": r.message,
+         "data": json.loads(r.data) if r.data else None}
+        for r in reversed(rows)  # oldest first
+    ]
+
+
+@app.delete("/api/activity")
+async def clear_activity(before_days: int = 30):
+    """Purge old activity events — defaults to keeping only last 30 days."""
+    from datetime import timedelta as _td
+    cutoff = datetime.utcnow() - _td(days=before_days)
+    async with async_session_factory() as s:
+        result = await s.execute(delete(ActivityEvent).where(ActivityEvent.timestamp < cutoff))
+        await s.commit()
+    return {"deleted": result.rowcount}
+
+
+@app.get("/api/diagnostics/bias")
+async def diagnostics_bias(limit: int = 30):
+    """Analyze the last N trades to understand direction bias and whether
+    the strategy contradicts ICTEA's own declared HTF trend. Read-only."""
+    async with async_session_factory() as s:
+        q = (select(Trade)
+             .order_by(desc(Trade.created_at))
+             .limit(limit))
+        rows = (await s.execute(q)).scalars().all()
+
+    from collections import Counter
+    total = len(rows)
+    by_dir = Counter(t.direction for t in rows)
+    by_sym_dir: dict = {}
+    conflicts = []   # trades where proposed direction is opposite to ICTEA's HTF trend
+    bias_items = []
+
+    for t in rows:
+        sym = t.symbol
+        dirn = t.direction
+        by_sym_dir.setdefault(sym, Counter())[dirn] += 1
+        ictea = {}
+        try:
+            ictea = json.loads(t.ict_context or "{}")
+        except Exception:
+            pass
+        htf_bias = (ictea.get("bias") or "").upper()
+        htf_trend = ""
+        try:
+            htf_trend = (ictea.get("htf_analysis", {}).get("trend") or "").lower()
+        except Exception:
+            pass
+
+        row = {
+            "id": t.id, "symbol": sym, "direction": dirn,
+            "status": t.status, "result": t.result, "pnl_usd": t.pnl_usd,
+            "ictea_bias": htf_bias, "ictea_htf_trend": htf_trend,
+        }
+        bias_items.append(row)
+
+        # Conflict: ICTEA reports bullish but we SELL, or bearish but we BUY
+        if htf_trend in ("bullish", "up", "uptrend") and dirn == "SELL":
+            conflicts.append({**row, "conflict": "SELL into bullish HTF"})
+        elif htf_trend in ("bearish", "down", "downtrend") and dirn == "BUY":
+            conflicts.append({**row, "conflict": "BUY into bearish HTF"})
+        elif htf_bias == "BULLISH" and dirn == "SELL":
+            conflicts.append({**row, "conflict": "SELL while ICTEA bias=BULLISH"})
+        elif htf_bias == "BEARISH" and dirn == "BUY":
+            conflicts.append({**row, "conflict": "BUY while ICTEA bias=BEARISH"})
+
+    return {
+        "total_trades_examined": total,
+        "direction_distribution": dict(by_dir),
+        "per_symbol_distribution": {k: dict(v) for k, v in by_sym_dir.items()},
+        "conflict_count": len(conflicts),
+        "conflict_rate_pct": round(len(conflicts) / total * 100, 1) if total else 0,
+        "conflicts": conflicts[:15],
+        "sample_trades": bias_items[:15],
+    }
+
+
+@app.post("/api/alerts/ack")
+async def ack_alerts():
+    """Mark all current alerts as acknowledged. Future GET /api/alerts will
+    count only alerts strictly AFTER this timestamp toward unacked_errors.
+    Does NOT delete the underlying alerts.log (audit trail stays intact)."""
+    from datetime import datetime as _dt, timezone as _tz
+    ack_ts = _dt.now(_tz.utc).isoformat()
+    async with async_session_factory() as s:
+        await set_config("alerts_acked_until", ack_ts, s)
+    return {"acked_until": ack_ts}
+
+
+@app.get("/api/alerts")
+async def get_alerts(limit: int = 50):
+    """Return watchdog alerts for THIS backend's mode only.
+    The watchdog log is shared on disk, but the 'component' field tells
+    which backend the alert refers to (e.g. 'Backend (prod)' vs 'Backend
+    (lab)'). We filter so /api/alerts on port 8000 returns only prod
+    events, and port 8001 returns only lab events. Component strings
+    that match neither (bridge, MT5 terminal) are shown on BOTH because
+    they describe shared infrastructure."""
+    import os as _os
+    my_mode = _os.getenv("SYSTEM_MODE", "production").lower()
+
+    alerts_path = os.path.join(_log_dir, "alerts.log")
+    if not os.path.exists(alerts_path):
+        return {"alerts": [], "unacked_errors": 0, "mode": my_mode}
+    try:
+        with open(alerts_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()[-500:]  # read a wider window before filtering
+    except Exception:
+        return {"alerts": [], "unacked_errors": 0, "mode": my_mode}
+
+    alerts = []
+    for ln in lines:
+        parts = ln.rstrip("\n").split("\t")
+        if len(parts) < 4:
+            continue
+        comp = parts[2]
+        # Filter: keep alerts that belong to this mode OR shared infrastructure
+        comp_lower = comp.lower()
+        if "prod" in comp_lower and my_mode != "production":
+            continue
+        if "lab" in comp_lower and my_mode != "lab":
+            continue
+        # "Cancellation rate" is prod-scoped (checks prod trades) — hide in lab
+        if "cancellation" in comp_lower and my_mode != "production":
+            continue
+        alerts.append({"ts": parts[0], "level": parts[1], "component": comp, "message": parts[3]})
+
+    alerts = alerts[-limit:]
+
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    one_hour_ago = _dt.now(_tz.utc) - _td(hours=1)
+    # Read the user's ack cutoff — everything strictly before is not counted.
+    acked_until = None
+    async with async_session_factory() as s:
+        acked_str = await get_config("alerts_acked_until", s)
+    if acked_str:
+        try:
+            acked_until = _dt.fromisoformat(acked_str.replace("Z", "+00:00"))
+            if acked_until.tzinfo is None:
+                acked_until = acked_until.replace(tzinfo=_tz.utc)
+        except Exception:
+            acked_until = None
+
+    unacked = 0
+    for a in alerts:
+        try:
+            ts = _dt.fromisoformat(a["ts"].replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=_tz.utc)
+            if a["level"] != "ERROR":
+                continue
+            if ts <= one_hour_ago:
+                continue
+            if acked_until and ts <= acked_until:
+                continue
+            unacked += 1
+        except Exception:
+            pass
+    return {"alerts": alerts, "unacked_errors": unacked, "mode": my_mode}
+
+
+@app.get("/api/system-mode")
+async def get_system_mode():
+    """Tells the frontend which instance it is talking to (production / lab / br)."""
+    import os as _os
+    mode = _os.getenv("SYSTEM_MODE", "production").lower()
+    db_file = (
+        "tradewizard_lab.db" if mode == "lab" else
+        "tradewizard_br.db"  if mode == "br"  else
+        "tradewizard.db"
+    )
+    return {"mode": mode, "db_file": db_file}
+
+
+# ─── Learning Rules API ────────────────────────────────────────────────
+from models.database import LearningRule
+
+
+@app.get("/api/learning-rules")
+async def list_learning_rules(status: str | None = None):
+    """List learning rules, optionally filtered by status."""
+    import json as _json
+    async with async_session_factory() as s:
+        q = select(LearningRule)
+        if status:
+            q = q.where(LearningRule.status == status.upper())
+        rows = (await s.execute(q.order_by(LearningRule.created_at.desc()))).scalars().all()
+    result = []
+    for r in rows:
+        total_feedback = r.times_correct + r.times_wrong
+        accuracy = round(r.times_correct / total_feedback * 100, 1) if total_feedback > 0 else None
+        result.append({
+            "id":            r.id,
+            "rule_type":     r.rule_type,
+            "setup_type":    r.setup_type,
+            "symbol":        r.symbol,
+            "session":       r.session,
+            "condition":     _json.loads(r.condition or "{}"),
+            "action":        _json.loads(r.action or "{}"),
+            "confidence":    r.confidence,
+            "sample_size":   r.sample_size,
+            "source_type":   r.source_type,
+            "source_id":     r.source_id,
+            "description":   r.description,
+            "status":        r.status,
+            "times_applied": r.times_applied,
+            "times_correct": r.times_correct,
+            "times_wrong":   r.times_wrong,
+            "accuracy":      accuracy,
+            "created_at":    r.created_at.isoformat() if r.created_at else None,
+            "activated_at":  r.activated_at.isoformat() if r.activated_at else None,
+            "confirmed_at":  r.confirmed_at.isoformat() if r.confirmed_at else None,
+            "deprecated_at": r.deprecated_at.isoformat() if r.deprecated_at else None,
+        })
+    return result
+
+
+@app.get("/api/learning-rules/stats")
+async def learning_rules_stats():
+    """Summary metrics for the learning dashboard."""
+    async with async_session_factory() as s:
+        rows = (await s.execute(select(LearningRule))).scalars().all()
+
+    from collections import Counter
+    status_counts = Counter(r.status for r in rows)
+    type_counts = Counter(r.rule_type for r in rows)
+
+    active = [r for r in rows if r.status in ("ACTIVE", "CONFIRMED")]
+    total_applications = sum(r.times_applied for r in active)
+    total_correct = sum(r.times_correct for r in active)
+    total_wrong = sum(r.times_wrong for r in active)
+    total_feedback = total_correct + total_wrong
+    avg_accuracy = round(total_correct / total_feedback * 100, 1) if total_feedback > 0 else None
+
+    # Top 5 by impact
+    top_rules = sorted(active, key=lambda r: r.times_applied, reverse=True)[:5]
+    top = [{"id": r.id, "description": r.description, "times_applied": r.times_applied,
+            "accuracy": (round(r.times_correct / (r.times_correct + r.times_wrong) * 100, 1)
+                         if (r.times_correct + r.times_wrong) > 0 else None)}
+           for r in top_rules]
+
+    return {
+        "by_status": dict(status_counts),
+        "by_type":   dict(type_counts),
+        "total_applications": total_applications,
+        "avg_accuracy": avg_accuracy,
+        "top_rules":  top,
+    }
+
+
+@app.post("/api/learning-rules/{rule_id}/activate")
+async def activate_learning_rule(rule_id: int):
+    from services.learning_rules import activate_rule
+    await activate_rule(rule_id)
+    return {"id": rule_id, "status": "ACTIVE"}
+
+
+@app.post("/api/learning-rules/{rule_id}/deprecate")
+async def deprecate_learning_rule(rule_id: int, data: dict | None = None):
+    from services.learning_rules import deprecate_rule
+    reason = (data or {}).get("reason", "Manual deprecation")
+    await deprecate_rule(rule_id, reason)
+    return {"id": rule_id, "status": "DEPRECATED"}
+
+
+@app.post("/api/learning-rules")
+async def create_learning_rule(data: dict):
+    """Create a manual learning rule. Expected JSON: {rule_type, setup_type, symbol,
+    session, condition, action, confidence, description}."""
+    from services.learning_rules import ingest_proposed_rules
+    ids = await ingest_proposed_rules([data], source_type="MANUAL")
+    return {"created_ids": ids}
+
+
+@app.post("/api/paper/close/{trade_id}")
+async def paper_close(trade_id: int):
+    if not orchestrator or not orchestrator.paper_account:
+        raise HTTPException(503, "System not ready")
+    result = orchestrator.paper_account.close_position(trade_id)
+    if result.get("success"):
+        # Update DB
+        async with async_session_factory() as s:
+            t = await s.get(Trade, trade_id)
+            if t:
+                close_price = result.get("close_price", t.entry_price)
+                t.status      = "CLOSED"
+                t.close_price = close_price
+                t.close_time  = datetime.utcnow()
+                t.pnl_pips    = result.get("pnl_pips", 0)
+                t.pnl_usd     = result.get("pnl_usd", 0)
+                t.result      = "WIN" if (t.pnl_usd or 0) > 0 else "LOSS"
+                await s.commit()
+    return result
+
+
+@app.get("/api/mt5/health")
+async def mt5_health():
+    """Check if MT5 is connected (direct, no bridge)."""
+    try:
+        from services.mt5_direct import get_mt5_direct
+        h = get_mt5_direct().health()
+        return {"connected": h.get("connected", False), "status": h.get("status", "unknown")}
+    except Exception as exc:
+        return {"connected": False, "error": str(exc)}
+
+
+@app.get("/api/mt5/account")
+async def mt5_account():
+    """Fetch live MT5 account info (direct)."""
+    try:
+        from services.mt5_direct import get_mt5_direct
+        return get_mt5_direct().get_account_info()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/mt5/test-order")
+async def mt5_test_order():
+    """Test MT5 order_send with 0.01 lot EURUSD (opens and immediately closes)."""
+    try:
+        import MetaTrader5 as _mt5
+        from services.mt5_direct import get_mt5_direct
+        m = get_mt5_direct()
+        # Fresh init
+        _mt5.shutdown()
+        kwargs = {}
+        if m.path: kwargs["path"] = m.path
+        if m.login: kwargs["login"] = m.login
+        if m.password: kwargs["password"] = m.password
+        if m.server: kwargs["server"] = m.server
+        init_ok = _mt5.initialize(**kwargs)
+        info = _mt5.account_info()
+        tick = _mt5.symbol_info_tick("EURUSD")
+        if not tick:
+            return {"error": "No tick", "init": init_ok, "account": info.login if info else None}
+        # order_check first
+        check = _mt5.order_check({
+            "action": _mt5.TRADE_ACTION_DEAL, "symbol": "EURUSD",
+            "volume": 0.01, "type": _mt5.ORDER_TYPE_BUY, "price": tick.ask,
+        })
+        check_result = {"retcode": check.retcode, "comment": check.comment} if check else {"error": "None", "last_error": str(_mt5.last_error())}
+        # order_send
+        r = _mt5.order_send({
+            "action": _mt5.TRADE_ACTION_DEAL, "symbol": "EURUSD",
+            "volume": 0.01, "type": _mt5.ORDER_TYPE_BUY, "price": tick.ask,
+            "deviation": 10, "magic": 99999, "comment": "TW-DIAG",
+            "type_time": _mt5.ORDER_TIME_GTC, "type_filling": _mt5.ORDER_FILLING_FOK,
+        })
+        send_result = {"retcode": r.retcode, "comment": r.comment, "ticket": r.order} if r else {"error": "None", "last_error": str(_mt5.last_error())}
+        # Close immediately if opened
+        if r and r.retcode == 10009:
+            _mt5.order_send({
+                "action": _mt5.TRADE_ACTION_DEAL, "symbol": "EURUSD",
+                "volume": 0.01, "type": _mt5.ORDER_TYPE_SELL, "price": tick.bid,
+                "position": r.order, "deviation": 10, "magic": 99999,
+                "comment": "TW-DIAG-CLOSE", "type_filling": _mt5.ORDER_FILLING_FOK,
+            })
+        return {"init": init_ok, "account": info.login if info else None,
+                "order_check": check_result, "order_send": send_result}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/broker/accounts")
+async def list_broker_accounts():
+    """List all MT5 accounts."""
+    async with async_session_factory() as s:
+        result = await s.execute(select(MT5Account).order_by(MT5Account.created_at))
+        accounts = result.scalars().all()
+    return [_mt5acc_to_dict(a) for a in accounts]
+
+
+@app.post("/api/broker/accounts")
+async def add_broker_account(payload: dict):
+    """Add a new MT5 account."""
+    async with async_session_factory() as s:
+        acc = MT5Account(
+            label=payload.get("label", ""),
+            login=str(payload.get("login", "")),
+            password=payload.get("password", ""),
+            server=payload.get("server", ""),
+            account_type=payload.get("account_type", "demo"),
+            is_active=False,
+        )
+        s.add(acc)
+        await s.commit()
+        await s.refresh(acc)
+        return _mt5acc_to_dict(acc)
+
+
+@app.post("/api/broker/accounts/{account_id}/activate")
+async def activate_broker_account(account_id: int):
+    """Set a specific account as active; deactivate all others."""
+    async with async_session_factory() as s:
+        result = await s.execute(select(MT5Account))
+        all_accs = result.scalars().all()
+        target = None
+        for a in all_accs:
+            if a.id == account_id:
+                a.is_active = True
+                target = a
+            else:
+                a.is_active = False
+        if not target:
+            raise HTTPException(404, "Account not found")
+        # Update system config with new credentials
+        await set_config("mt5_login",    target.login,        s)
+        await set_config("mt5_password", target.password,     s)
+        await set_config("mt5_server",   target.server,       s)
+        await s.commit()
+    # Restart bridge with new credentials
+    os.environ["MT5_LOGIN"]    = target.login
+    os.environ["MT5_PASSWORD"] = target.password
+    os.environ["MT5_SERVER"]   = target.server
+    global _bridge_proc
+    if _bridge_proc and _bridge_proc.poll() is None:
+        try:
+            _bridge_proc.terminate()
+            _bridge_proc.wait(timeout=3)
+        except Exception:
+            pass
+    _bridge_proc = None
+    _start_mt5_direct()
+    return {"status": "activated", "account_id": account_id}
+
+
+@app.get("/api/broker/accounts/{account_id}/test")
+async def test_broker_account(account_id: int):
+    """Test credentials for a specific account via the bridge."""
+    async with async_session_factory() as s:
+        acc = await s.get(MT5Account, account_id)
+        bridge_url = await get_config("mt5_bridge_url", s) or ""
+    if not acc:
+        raise HTTPException(404, "Account not found")
+    if not bridge_url:
+        return {"ok": False, "error": "MT5 bridge non configurato"}
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{bridge_url.rstrip('/')}/test-credentials",
+                json={"login": acc.login, "password": acc.password, "server": acc.server},
+            )
+            return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.delete("/api/broker/accounts/{account_id}")
+async def remove_broker_account(account_id: int):
+    """Delete an MT5 account (cannot delete active account)."""
+    async with async_session_factory() as s:
+        acc = await s.get(MT5Account, account_id)
+        if not acc:
+            raise HTTPException(404, "Account not found")
+        if acc.is_active:
+            raise HTTPException(400, "Cannot remove the active account")
+        await s.delete(acc)
+        await s.commit()
+    return {"status": "removed", "account_id": account_id}
+
+
+def _mt5acc_to_dict(a: MT5Account) -> dict:
+    return {
+        "id":           a.id,
+        "label":        a.label,
+        "login":        a.login,
+        "server":       a.server,
+        "account_type": a.account_type,
+        "is_active":    a.is_active,
+        "balance":      a.balance,
+        "created_at":   a.created_at.isoformat() if a.created_at else None,
+    }
+
+
+@app.get("/api/backtest")
+async def list_backtests(limit: int = 20):
+    async with async_session_factory() as s:
+        result = await s.execute(
+            select(BacktestRun).order_by(desc(BacktestRun.created_at)).limit(limit)
+        )
+        runs = result.scalars().all()
+    return [_bt_to_dict(r) for r in runs]
+
+
+@app.get("/api/backtest/{run_id}")
+async def get_backtest(run_id: int):
+    async with async_session_factory() as s:
+        run = await s.get(BacktestRun, run_id)
+    if not run:
+        raise HTTPException(404, "Backtest run not found")
+    d = _bt_to_dict(run)
+    if run.trades_json:
+        try:
+            d["trades"] = json.loads(run.trades_json)
+        except Exception:
+            d["trades"] = []
+    if run.equity_json:
+        try:
+            d["equity"] = json.loads(run.equity_json)
+        except Exception:
+            d["equity"] = []
+    # Live multi-symbol progress (only present while RUNNING)
+    if run_id in _backtest_progress:
+        d["progress"] = _backtest_progress[run_id]
+    return d
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# BR (Backtest-to-Reality) endpoints
+# ──────────────────────────────────────────────────────────────────────────
+
+def _require_br():
+    if _SYSTEM_MODE != "br" or br_engine is None:
+        raise HTTPException(400, "BR endpoints only available when SYSTEM_MODE=br")
+
+
+@app.get("/api/br/status")
+async def br_status():
+    if _SYSTEM_MODE != "br":
+        return {"mode": _SYSTEM_MODE, "available": False}
+    return {
+        "mode": "br",
+        "available": True,
+        "running": br_engine.running if br_engine else False,
+        "symbols": br_engine.symbols if br_engine else [],
+        "enabled_setups": sorted(br_engine.enabled_setups) if br_engine else [],
+        "risk_usd": br_engine.risk_usd if br_engine else 0,
+        "rr_ratio": br_engine.rr_ratio if br_engine else 0,
+        "tick_seconds": br_engine.tick_seconds if br_engine else 0,
+        "max_hold_hours": br_engine.max_hold_hours if br_engine else 0,
+        "slippage_pips": br_engine.slippage_pips if br_engine else 0,
+        "commission_per_lot_usd": br_engine.commission_per_lot_usd if br_engine else 0,
+    }
+
+
+@app.post("/api/br/start")
+async def br_start():
+    _require_br()
+    await br_engine.start()
+    return {"running": True}
+
+
+@app.post("/api/br/stop")
+async def br_stop():
+    _require_br()
+    await br_engine.stop()
+    return {"running": False}
+
+
+@app.put("/api/br/config")
+async def br_update_config(data: dict):
+    _require_br()
+    async with async_session_factory() as s:
+        # Whitelist of editable BR config keys + their format
+        if "symbols" in data:
+            await set_config("br_enabled_symbols", json.dumps(data["symbols"]), s)
+        if "enabled_setups" in data:
+            await set_config("br_enabled_setups", json.dumps(data["enabled_setups"]), s)
+        for num_key in ("risk_usd", "rr_ratio", "slippage_pips",
+                         "commission_per_lot_usd", "max_hold_hours", "tick_seconds"):
+            if num_key in data and data[num_key] is not None and data[num_key] != "":
+                await set_config(f"br_{num_key}", str(data[num_key]), s)
+    # Push to live engine without requiring a restart
+    if br_engine:
+        await br_engine.load_config()
+    return {"updated": True}
+
+
+@app.get("/api/br/trades")
+async def br_trades(limit: int = 200):
+    _require_br()
+    async with async_session_factory() as s:
+        rows = await s.execute(
+            select(Trade).where(
+                (Trade.ict_setup.like("BR/%")) | (Trade.ict_setup.like("BR/%"))
+            ).order_by(desc(Trade.created_at)).limit(limit)
+        )
+        trades = rows.scalars().all()
+    return [_trade_to_dict(t) for t in trades]
+
+
+@app.get("/api/br/summary")
+async def br_summary():
+    _require_br()
+    from sqlalchemy import select as _sel, and_
+    async with async_session_factory() as s:
+        rows = await s.execute(
+            _sel(Trade).where(Trade.ict_setup.like("BR/%"))
+        )
+        ts = rows.scalars().all()
+    closed = [t for t in ts if t.status == "CLOSED"]
+    wins  = sum(1 for t in closed if (t.result or "").upper() == "WIN")
+    losses = sum(1 for t in closed if (t.result or "").upper() == "LOSS")
+    pnl = sum(float(t.pnl_usd or 0) for t in closed)
+    pips = sum(float(t.pnl_pips or 0) for t in closed)
+    by_symbol = {}
+    by_setup  = {}
+    for t in closed:
+        by_symbol.setdefault(t.symbol, {"n": 0, "wins": 0, "pnl": 0.0})
+        by_symbol[t.symbol]["n"] += 1
+        if (t.result or "").upper() == "WIN":
+            by_symbol[t.symbol]["wins"] += 1
+        by_symbol[t.symbol]["pnl"] += float(t.pnl_usd or 0)
+        setup_label = (t.ict_setup or "").replace("BR/", "")
+        by_setup.setdefault(setup_label, {"n": 0, "wins": 0, "pnl": 0.0})
+        by_setup[setup_label]["n"] += 1
+        if (t.result or "").upper() == "WIN":
+            by_setup[setup_label]["wins"] += 1
+        by_setup[setup_label]["pnl"] += float(t.pnl_usd or 0)
+    return {
+        "total_trades": len(closed),
+        "wins": wins, "losses": losses,
+        "win_rate": round(wins / len(closed) * 100, 2) if closed else 0,
+        "total_pnl_usd": round(pnl, 2),
+        "total_pips": round(pips, 1),
+        "open": len([t for t in ts if t.status == "ACTIVE"]),
+        "by_symbol": by_symbol,
+        "by_setup": by_setup,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _bt_to_dict(r: BacktestRun) -> dict:
+    return {
+        "id":           r.id,
+        "symbol":       r.symbol,
+        "timeframe":    r.timeframe,
+        "strategy":     r.strategy,
+        "bars":         r.bars,
+        "risk_percent": r.risk_percent,
+        "rr_ratio":     r.rr_ratio,
+        "status":       r.status,
+        "total_trades": r.total_trades,
+        "wins":         r.wins,
+        "losses":       r.losses,
+        "win_rate":     r.win_rate,
+        "total_pips":   r.total_pips,
+        "total_return":     r.total_return,
+        "total_pnl_usd":    r.total_pnl_usd,
+        "max_drawdown":     r.max_drawdown,
+        "max_drawdown_usd": r.max_drawdown_usd,
+        "profit_factor":r.profit_factor,
+        "avg_rr":       r.avg_rr,
+        "sharpe":       r.sharpe,
+        "error":        r.error,
+        "data_warning": r.data_warning,
+        "created_at":   r.created_at.isoformat() if r.created_at else None,
+        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+    }
+
+
+# ── OHLCV Cache endpoints ──────────────────────────────────────────────────────
+
+@app.get("/api/ohlcv/status")
+async def ohlcv_status():
+    """Summary of what's in the local OHLCV cache."""
+    from services.ohlcv_cache import get_cache_info
+    info = await get_cache_info()
+    for row in info:
+        key = f"{row['symbol']}_{row['timeframe']}"
+        if key in _build_tasks:
+            row["build"] = _build_tasks[key]
+    building = {k: v for k, v in _build_tasks.items() if v["status"] in ("running", "updating")}
+    return {"cached": info, "building": building}
+
+
+@app.get("/api/ohlcv/progress/{key}")
+async def ohlcv_progress(key: str):
+    """Poll build/update progress for a symbol_timeframe key."""
+    return _build_tasks.get(key, {"status": "idle"})
+
+
+@app.post("/api/ohlcv/build")
+async def ohlcv_build(data: dict):
+    """Start building the cache for a symbol/timeframe/bar-count."""
+    symbol    = data.get("symbol", "EURUSD").upper()
+    timeframe = data.get("timeframe", "H1")
+    n_bars    = int(data.get("bars", 5000))
+    key       = f"{symbol}_{timeframe}"
+
+    if _build_tasks.get(key, {}).get("status") in ("running", "updating"):
+        return {"status": "already_running", "key": key}
+
+    async with async_session_factory() as s:
+        oanda_key      = await get_config("oanda_api_key", s) or ""
+        oanda_practice = (await get_config("oanda_practice", s) or "true") != "false"
+        mt5_bridge_url = await get_config("mt5_bridge_url", s) or ""
+
+    asyncio.create_task(_do_build_cache(symbol, timeframe, n_bars, oanda_key, oanda_practice, mt5_bridge_url))
+    return {"status": "started", "key": key}
+
+
+@app.post("/api/ohlcv/update")
+async def ohlcv_update(data: dict):
+    """Fetch bars newer than the latest cached timestamp."""
+    symbol    = data.get("symbol", "EURUSD").upper()
+    timeframe = data.get("timeframe", "H1")
+    key       = f"{symbol}_{timeframe}"
+
+    if _build_tasks.get(key, {}).get("status") in ("running", "updating"):
+        return {"status": "already_running", "key": key}
+
+    async with async_session_factory() as s:
+        oanda_key      = await get_config("oanda_api_key", s) or ""
+        oanda_practice = (await get_config("oanda_practice", s) or "true") != "false"
+        mt5_bridge_url = await get_config("mt5_bridge_url", s) or ""
+
+    asyncio.create_task(_do_update_cache(symbol, timeframe, oanda_key, oanda_practice, mt5_bridge_url))
+    return {"status": "started", "key": key}
+
+
+@app.delete("/api/ohlcv/clear")
+async def ohlcv_clear(data: dict):
+    """Delete cached bars for a symbol/timeframe (or all if empty)."""
+    symbol    = (data.get("symbol") or "").upper()
+    timeframe = data.get("timeframe") or ""
+    from sqlalchemy import delete as _del
+    async with async_session_factory() as s:
+        q = _del(OhlcvBar)
+        if symbol:    q = q.where(OhlcvBar.symbol    == symbol)
+        if timeframe: q = q.where(OhlcvBar.timeframe == timeframe)
+        result = await s.execute(q)
+        await s.commit()
+    key = f"{symbol}_{timeframe}" if symbol and timeframe else None
+    if key and key in _build_tasks:
+        del _build_tasks[key]
+    return {"deleted": result.rowcount}
+
+
+# ── Cache background workers ───────────────────────────────────────────────────
+
+async def _do_build_cache(symbol, timeframe, n_bars, oanda_key, oanda_practice, mt5_bridge_url):
+    key = f"{symbol}_{timeframe}"
+    _build_tasks[key] = {"done": 0, "total": n_bars, "status": "running", "error": None, "inserted": 0}
+    try:
+        if mt5_bridge_url:
+            # /candles caps at 50k bars per call. For M1/M5 with long history
+            # we use the date-range endpoint chunked across the period.
+            BRIDGE_CALL_CAP = 50000
+            tf_minutes = {"M1": 1, "M5": 5, "M15": 15, "M30": 30,
+                          "H1": 60, "H4": 240, "D1": 1440}.get(timeframe.upper(), 60)
+            if n_bars > BRIDGE_CALL_CAP:
+                from datetime import timezone, timedelta as _td
+                from services.mt5_data import fetch_range
+                # Compute how far back we need to go. n_bars wall-clock minutes,
+                # then add 40% slack for forex weekend gaps so we still land on
+                # roughly n_bars actual trading bars.
+                end_dt   = datetime.now(timezone.utc).replace(tzinfo=None)
+                start_dt = end_dt - _td(minutes=int(n_bars * tf_minutes * 1.4))
+                candles = await fetch_range(symbol, timeframe, start_dt, end_dt, mt5_bridge_url)
+            else:
+                from services.mt5_data import fetch_ohlcv as _fetch
+                raw     = await _fetch(symbol, timeframe, n_bars, bridge_url=mt5_bridge_url)
+                candles = raw.get("candles", [])
+        else:
+            from services.oanda_data import OandaClient
+            client  = OandaClient(oanda_key, oanda_practice)
+            candles = await client.get_candles_chunked(symbol, timeframe, n_bars)
+
+        if not candles:
+            raise RuntimeError("No candles returned from data source")
+
+        _build_tasks[key]["total"] = len(candles)
+        from services.ohlcv_cache import upsert_candles
+        BATCH = 500
+        inserted = 0
+        for i in range(0, len(candles), BATCH):
+            n = await upsert_candles(symbol, timeframe, candles[i : i + BATCH])
+            inserted += n
+            _build_tasks[key]["done"] = min(i + BATCH, len(candles))
+            _build_tasks[key]["inserted"] = inserted
+
+        _build_tasks[key].update({"status": "done", "done": len(candles), "inserted": inserted})
+        logger.info("Cache built: %s %s — %d bars fetched, %d new", symbol, timeframe, len(candles), inserted)
+
+        # Also cache M1 data so backtests never need to call the API for timing data
+        if timeframe != "M1" and candles:
+            # Pre-register M1 task NOW so the frontend finds "running" immediately
+            # (asyncio.create_task is non-deterministic and might not start before the next frontend poll)
+            key_m1 = f"{symbol}_M1"
+            _build_tasks[key_m1] = {"done": 0, "total": 0, "status": "running", "error": None, "inserted": 0}
+            asyncio.create_task(_build_m1_cache(symbol, candles, oanda_key, oanda_practice, mt5_bridge_url))
+    except Exception as exc:
+        logger.error("Cache build failed %s %s: %s", symbol, timeframe, exc, exc_info=True)
+        _build_tasks[key].update({"status": "error", "error": str(exc)})
+
+
+async def _do_update_cache(symbol, timeframe, oanda_key, oanda_practice, mt5_bridge_url):
+    key = f"{symbol}_{timeframe}"
+    _build_tasks[key] = {"done": 0, "total": 0, "status": "updating", "error": None, "inserted": 0}
+    try:
+        from services.ohlcv_cache import get_latest_time, upsert_candles
+        latest = await get_latest_time(symbol, timeframe)
+
+        if not latest:
+            # Nothing cached yet → full build with 2000-bar default
+            await _do_build_cache(symbol, timeframe, 2000, oanda_key, oanda_practice, mt5_bridge_url)
+            return
+
+        from datetime import datetime, timezone, timedelta
+        dt_from = datetime.fromisoformat(latest.replace("Z", "+00:00")) + timedelta(minutes=1)
+        dt_to   = datetime.now(timezone.utc)
+
+        if mt5_bridge_url:
+            from services.mt5_data import fetch_ohlcv as _fetch
+            raw     = await _fetch(symbol, timeframe, 500, bridge_url=mt5_bridge_url)
+            candles = [c for c in raw.get("candles", []) if c["time"] > latest]
+        else:
+            from services.oanda_data import OandaClient
+            client  = OandaClient(oanda_key, oanda_practice)
+            candles = await client.get_candles(symbol, timeframe, from_time=dt_from, to_time=dt_to)
+
+        _build_tasks[key]["total"] = len(candles)
+        inserted = await upsert_candles(symbol, timeframe, candles) if candles else 0
+        _build_tasks[key].update({"status": "done", "done": len(candles), "inserted": inserted})
+        logger.info("Cache updated: %s %s — %d new bars", symbol, timeframe, inserted)
+
+        # Update M1 cache too (only new bars since latest M1)
+        if timeframe != "M1" and candles:
+            asyncio.create_task(_build_m1_cache(symbol, candles, oanda_key, oanda_practice, mt5_bridge_url))
+    except Exception as exc:
+        logger.error("Cache update failed %s %s: %s", symbol, timeframe, exc, exc_info=True)
+        _build_tasks[key].update({"status": "error", "error": str(exc)})
+
+
+async def _build_m1_cache(symbol, h1_candles, oanda_key, oanda_practice, mt5_bridge_url):
+    """Fetch and cache M1 data for the date range covered by the given H1 candles."""
+    key_m1 = f"{symbol}_M1"
+    _build_tasks[key_m1] = {"done": 0, "total": 0, "status": "running", "error": None, "inserted": 0}
+    try:
+        from datetime import datetime, timedelta
+        from services.ohlcv_cache import upsert_candles, get_latest_time
+
+        first_t = h1_candles[0]["time"]
+        last_t  = h1_candles[-1]["time"]
+
+        # Skip M1 bars we already have
+        latest_m1 = await get_latest_time(symbol, "M1")
+
+        def _dt(s):
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+        first_dt = _dt(first_t)
+        if latest_m1 and _dt(latest_m1) >= first_dt:
+            first_dt = _dt(latest_m1) + timedelta(minutes=1)
+
+        last_dt = _dt(last_t) + timedelta(hours=1)
+
+        if first_dt >= last_dt:
+            _build_tasks[key_m1].update({"status": "done", "done": 0, "total": 0})
+            return
+
+        if mt5_bridge_url:
+            from services.mt5_data import fetch_m1_for_period as _m1_fetch
+            m1_list = await _m1_fetch(symbol, first_dt, last_dt, bridge_url=mt5_bridge_url)
+        else:
+            from services.oanda_data import fetch_m1_for_period as _m1_fetch
+            m1_list = await _m1_fetch(symbol, first_dt, last_dt,
+                                      api_key=oanda_key, practice=oanda_practice)
+
+        _build_tasks[key_m1]["total"] = len(m1_list) if m1_list else 0
+        if m1_list:
+            n = await upsert_candles(symbol, "M1", m1_list)
+            _build_tasks[key_m1].update({"status": "done", "done": len(m1_list), "inserted": n})
+            logger.info("M1 cache built: %s — %d bars, %d new", symbol, len(m1_list), n)
+        else:
+            _build_tasks[key_m1].update({"status": "done", "done": 0})
+    except Exception as exc:
+        logger.warning("M1 cache build failed for %s: %s", symbol, exc)
+        _build_tasks[key_m1].update({"status": "error", "error": str(exc)})
+
+
+@app.get("/api/analytics")
+async def get_analytics(include_archived: bool = False):
+    """Full analytics report — equity curve, drawdown, breakdowns, stats.
+    By default excludes archived trades (respects reset-stats); pass
+    include_archived=true to get lifetime view."""
+    return await compute_analytics(include_archived=include_archived)
+
+
+@app.get("/api/performance")
+async def get_performance(include_archived: bool = False):
+    async with async_session_factory() as s:
+        # Respect the archived flag by default — reset-stats archives trades
+        # to hide them from the user's visible performance. Set include_archived
+        # =true explicitly if you need all-time stats ignoring the reset.
+        q = select(Trade).where(Trade.status == "CLOSED")
+        if not include_archived:
+            q = q.where((Trade.archived == False) | (Trade.archived == None))
+        result = await s.execute(q)
+        closed = result.scalars().all()
+
+    total  = len(closed)
+    wins   = sum(1 for t in closed if t.result == "WIN")
+    losses = sum(1 for t in closed if t.result == "LOSS")
+    be     = sum(1 for t in closed if t.result == "BREAKEVEN")
+
+    gross_win  = sum((t.pnl_usd or 0) for t in closed if (t.pnl_usd or 0) > 0)
+    gross_loss = abs(sum((t.pnl_usd or 0) for t in closed if (t.pnl_usd or 0) < 0))
+    pf = round(gross_win / gross_loss, 2) if gross_loss else (999.0 if gross_win else 0.0)
+
+    pnl_list = [t.pnl_usd or 0 for t in closed]
+    avg_rr   = round(gross_win / wins / (gross_loss / losses), 2) if wins and losses else 0.0
+
+    setups: dict = {}
+    for t in closed:
+        setup = t.ict_setup or "Unknown"
+        if setup not in setups:
+            setups[setup] = {"total": 0, "wins": 0, "losses": 0, "total_pips": 0.0, "total_pnl": 0.0}
+        setups[setup]["total"]      += 1
+        setups[setup]["total_pips"] += t.pnl_pips or 0
+        setups[setup]["total_pnl"]  += t.pnl_usd  or 0
+        if t.result == "WIN":   setups[setup]["wins"]   += 1
+        elif t.result == "LOSS": setups[setup]["losses"] += 1
+    for v in setups.values():
+        v["win_rate"]   = round(v["wins"] / v["total"] * 100, 1) if v["total"] > 0 else 0
+        v["total_pips"] = round(v["total_pips"], 1)
+        v["total_pnl"]  = round(v["total_pnl"], 2)
+
+    # Max drawdown calculation — track equity curve from trade sequence
+    account_balance = 5000.0
+    try:
+        async with async_session_factory() as s:
+            bal_raw = await get_config("account_balance", s)
+            if bal_raw:
+                account_balance = float(bal_raw)
+    except Exception:
+        pass
+
+    sorted_trades = sorted(closed, key=lambda t: t.close_time or t.open_time or datetime.min)
+    equity = account_balance
+    peak = equity
+    max_dd_usd = 0.0
+    max_dd_pct = 0.0
+    for t in sorted_trades:
+        equity += (t.pnl_usd or 0)
+        if equity > peak:
+            peak = equity
+        dd = peak - equity
+        dd_pct = (dd / peak * 100) if peak > 0 else 0
+        if dd > max_dd_usd:
+            max_dd_usd = dd
+        if dd_pct > max_dd_pct:
+            max_dd_pct = dd_pct
+
+    return {
+        "total_trades":  total,
+        "wins":          wins,
+        "losses":        losses,
+        "breakeven":     be,
+        "win_rate":      round(wins / total * 100, 1) if total else 0,
+        "avg_rr":        avg_rr,
+        "profit_factor": pf,
+        "total_pnl":     round(sum(pnl_list), 2),
+        "max_drawdown_usd": round(max_dd_usd, 2),
+        "max_drawdown_pct": round(max_dd_pct, 2),
+        "by_setup":      setups,
+        "total_closed":  total,
+    }
+
+
+# ------------------------------------------------------------------ #
+#  Serializers
+# ------------------------------------------------------------------ #
+def _trade_to_dict(t: Trade) -> dict:
+    return {
+        "id": t.id, "symbol": t.symbol, "direction": t.direction,
+        "status": t.status, "entry_price": t.entry_price, "stop_loss": t.stop_loss,
+        "take_profit_1": t.take_profit_1, "take_profit_2": t.take_profit_2,
+        "take_profit_3": t.take_profit_3, "lot_size": t.lot_size,
+        "risk_percent": t.risk_percent, "rr_ratio": t.rr_ratio,
+        "ict_setup": t.ict_setup, "mt5_ticket": t.mt5_ticket,
+        "open_time": t.open_time.isoformat() if t.open_time else None,
+        "close_time": t.close_time.isoformat() if t.close_time else None,
+        "close_price": t.close_price, "pnl_pips": t.pnl_pips, "pnl_usd": t.pnl_usd,
+        "result": t.result, "trailing_sl_updates": t.trailing_sl_updates,
+        "tp_hits": t.tp_hits or 0,
+        "close_notes": t.close_notes or "",
+    }
+
+
+def _journal_to_dict(e: JournalEntry) -> dict:
+    return {
+        "id": e.id, "trade_id": e.trade_id, "meeting_id": e.meeting_id,
+        "entry_type": e.entry_type, "content": e.content,
+        "metrics": e.metrics,
+        "created_at": e.created_at.isoformat() if e.created_at else None,
+    }
+
+
+def _meeting_to_dict(m: Meeting) -> dict:
+    return {
+        "id": m.id, "meeting_type": m.meeting_type, "trigger": m.trigger,
+        "participants": m.participants, "summary": m.summary,
+        "conclusions": m.conclusions, "improvements": m.improvements,
+        "status": m.status,
+        "created_at": m.created_at.isoformat() if m.created_at else None,
+        "completed_at": m.completed_at.isoformat() if m.completed_at else None,
+    }
+
+
+def _log_to_dict(l: AgentLog) -> dict:
+    return {
+        "id": l.id, "trade_id": l.trade_id, "agent_name": l.agent_name,
+        "action": l.action, "message": l.message,
+        "timestamp": l.timestamp.isoformat() if l.timestamp else None,
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    try:
+        uvicorn.run(
+            "main:app",
+            host=os.environ.get("HOST", "0.0.0.0"),
+            port=int(os.environ.get("PORT", 8000)),
+            reload=False,
+        )
+    except Exception as exc:
+        logger.critical("FATAL: Backend crashed: %s", exc, exc_info=True)
+        raise

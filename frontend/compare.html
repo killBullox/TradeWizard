@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>TradeWizard — Production vs Lab</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <style>
+    body { padding: 20px; }
+    h1 { margin-bottom: 20px; }
+    .compare-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+      max-width: 1400px; margin: 0 auto;
+    }
+    .col h2 { padding: 10px 0; border-bottom: 2px solid; margin-bottom: 10px; }
+    .col.prod h2 { border-color: #2563eb; color: #3b82f6; }
+    .col.lab  h2 { border-color: #d97706; color: #f59e0b; }
+    .stat-row { display: flex; justify-content: space-between; padding: 6px 10px;
+                background: rgba(0,0,0,0.25); border-radius: 4px; margin-bottom: 4px; }
+    .stat-label { color: #9ca3af; }
+    .stat-value { font-weight: 700; }
+    .better { color: #10b981; }
+    .worse  { color: #ef4444; }
+    .loader { text-align: center; padding: 20px; color: #9ca3af; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.9em; }
+    th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.1); }
+    th { color: #9ca3af; font-weight: 500; }
+    .win  { color: #10b981; }
+    .loss { color: #ef4444; }
+    .delta { font-size: 0.85em; margin-left: 6px; }
+    a.home { color: #3b82f6; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <h1>📊 Production vs Lab — Performance Comparison</h1>
+  <p><a class="home" href="/">← back to main UI</a> |
+     auto-refresh: <span id="cd">30</span>s</p>
+
+  <div class="compare-grid">
+    <div class="col prod">
+      <h2>⚡ Production <small id="prod-url" style="opacity:0.5"></small></h2>
+      <div id="prod-body" class="loader">loading...</div>
+    </div>
+    <div class="col lab">
+      <h2>🧪 Lab <small id="lab-url" style="opacity:0.5"></small></h2>
+      <div id="lab-body" class="loader">loading...</div>
+    </div>
+  </div>
+
+  <script>
+    const PROD = window.location.origin;
+    const LAB  = 'http://' + window.location.hostname + ':8001';
+    document.getElementById('prod-url').textContent = ' (' + PROD + ')';
+    document.getElementById('lab-url').textContent  = ' (' + LAB  + ')';
+
+    async function fetchJSON(base, path) {
+      try {
+        const r = await fetch(base + path, { mode: 'cors' });
+        if (!r.ok) throw new Error(r.status);
+        return await r.json();
+      } catch (e) {
+        return { error: String(e) };
+      }
+    }
+
+    async function loadSide(base, elId) {
+      const el = document.getElementById(elId);
+      const [stats, rules, trades] = await Promise.all([
+        fetchJSON(base, '/api/analytics'),
+        fetchJSON(base, '/api/learning-rules/stats'),
+        fetchJSON(base, '/api/trades?limit=20'),
+      ]);
+      if (stats.error) { el.innerHTML = '<div class="loader">Unreachable: ' + stats.error + '</div>'; return; }
+
+      const s = stats.system_performance || stats || {};
+      const byStatus = rules.by_status || {};
+      const trList = Array.isArray(trades) ? trades : [];
+
+      const closed = trList.filter(t => t.status === 'CLOSED');
+      const wins = closed.filter(t => t.result === 'WIN').length;
+      const losses = closed.filter(t => t.result === 'LOSS').length;
+      const totalPnl = closed.reduce((a, t) => a + (t.pnl_usd || 0), 0);
+      const wr = closed.length ? (wins/closed.length*100).toFixed(1) : '—';
+
+      el.innerHTML = `
+        <div class="stat-row"><span class="stat-label">Closed trades (last 20)</span>
+             <span class="stat-value">${closed.length}</span></div>
+        <div class="stat-row"><span class="stat-label">Win rate</span>
+             <span class="stat-value">${wr}%</span></div>
+        <div class="stat-row"><span class="stat-label">W / L</span>
+             <span class="stat-value"><span class="win">${wins}</span> / <span class="loss">${losses}</span></span></div>
+        <div class="stat-row"><span class="stat-label">Total P&L</span>
+             <span class="stat-value ${totalPnl>=0?'win':'loss'}">$${totalPnl.toFixed(2)}</span></div>
+        <div class="stat-row"><span class="stat-label">Active rules</span>
+             <span class="stat-value">${(byStatus.ACTIVE||0) + (byStatus.CONFIRMED||0)}</span></div>
+        <div class="stat-row"><span class="stat-label">Candidate rules</span>
+             <span class="stat-value">${byStatus.CANDIDATE||0}</span></div>
+        <div class="stat-row"><span class="stat-label">Deprecated rules</span>
+             <span class="stat-value">${byStatus.DEPRECATED||0}</span></div>
+        <div class="stat-row"><span class="stat-label">Avg rule accuracy</span>
+             <span class="stat-value">${rules.avg_accuracy != null ? rules.avg_accuracy + '%' : '—'}</span></div>
+
+        <h3 style="margin-top:20px">Recent trades</h3>
+        <table>
+          <thead><tr><th>Sym</th><th>Dir</th><th>Setup</th><th>P&L</th><th>Status</th></tr></thead>
+          <tbody>
+          ${trList.slice(0,10).map(t => `
+            <tr>
+              <td>${t.symbol}</td>
+              <td>${t.direction}</td>
+              <td>${(t.ict_setup||'').substring(0,20)}</td>
+              <td class="${t.pnl_usd>0?'win':t.pnl_usd<0?'loss':''}">
+                ${t.pnl_usd != null ? '$'+t.pnl_usd.toFixed(2) : '—'}
+              </td>
+              <td>${t.status}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
+    let cd = 30;
+    setInterval(() => {
+      cd--; document.getElementById('cd').textContent = cd;
+      if (cd <= 0) { cd = 30; refresh(); }
+    }, 1000);
+
+    async function refresh() {
+      await Promise.all([
+        loadSide(PROD, 'prod-body'),
+        loadSide(LAB,  'lab-body'),
+      ]);
+    }
+    refresh();
+  </script>
+</body>
+</html>

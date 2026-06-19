@@ -1,0 +1,49 @@
+"""Verify the regression guard against today's bad config and the working
+April-24 config."""
+import os, sys, json, asyncio
+os.environ['SYSTEM_MODE'] = 'production'
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'backend'))
+from orchestrator import Orchestrator
+from models.database import Trade, async_session_factory, get_config
+from sqlalchemy import select
+
+async def main():
+    o = Orchestrator()
+    keys = list(Orchestrator._REGRESSION_GUARD_KEYS)
+    async with async_session_factory() as s:
+        current = {k: float(await get_config(k, s) or 0) for k in keys}
+    print(f"Current config: {current}")
+    regimes = Orchestrator.REGRESSION_ATR_REGIMES
+    tradable_now = [a for a in regimes if Orchestrator._atr_regime_tradable(a, current)]
+    print(f"Current tradable ATR regimes: {tradable_now}/{regimes}\n")
+
+    # Bad config (meeting #136 of today, strangled prod): tightening
+    # gate from 1.2 → 1.7 + adding floor 30 + tp 1.5 should be REJECTED.
+    bad = {
+        "rm_min_rr_gate": "1.7",
+        "rm_min_sl_pips_floor": "30",
+        "rm_max_tp_atr_mult": "1.5",
+    }
+    v = await o._check_regression(bad)
+    print("Bad config (delta tightening):")
+    print(f"  pending = {bad}")
+    print(f"  guard verdict = {'REJECTED -- ' + v if v else 'ACCEPTED'}")
+
+    # Slight loosening — should be ACCEPTED (delta negative or near zero).
+    loosen = {
+        "rm_min_rr_gate": "1.0",
+        "rr_ratio": "1.2",
+    }
+    v = await o._check_regression(loosen)
+    print("\nLoosening config:")
+    print(f"  pending = {loosen}")
+    print(f"  guard verdict = {'REJECTED -- ' + v if v else 'ACCEPTED'}")
+
+    # Same as current — delta = 0, must be ACCEPTED
+    noop = {"rm_min_rr_gate": "1.2"}
+    v = await o._check_regression(noop)
+    print("\nNo-op config:")
+    print(f"  pending = {noop}")
+    print(f"  guard verdict = {'REJECTED -- ' + v if v else 'ACCEPTED'}")
+
+asyncio.run(main())
